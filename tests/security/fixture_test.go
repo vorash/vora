@@ -9,6 +9,7 @@ package security
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -26,6 +27,38 @@ import (
 )
 
 const testSecret = "VORA_SECURITY_TEST_SECRET"
+
+// TestMain fails the suite if any runtime units leak, making cleanup a tested
+// guarantee rather than an assumption.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if residual := leakedUnits(); len(residual) > 0 {
+		fmt.Fprintf(os.Stderr, "security suite leaked runtime units: %v\n", residual)
+		for _, u := range residual {
+			_ = exec.Command("systemctl", "--user", "reset-failed", u).Run()
+		}
+		if code == 0 {
+			code = 1
+		}
+	}
+	os.Exit(code)
+}
+
+// leakedUnits lists vora-managed systemd services still present.
+func leakedUnits() []string {
+	out, err := exec.Command("systemctl", "--user", "list-units", "--type=service", "--all", "--no-legend", "--plain").Output()
+	if err != nil {
+		return nil
+	}
+	var units []string
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && strings.HasPrefix(fields[0], cgroup.UnitPrefix) {
+			units = append(units, fields[0])
+		}
+	}
+	return units
+}
 
 // fixture owns a backend and the sandboxes created by a test.
 type fixture struct {
