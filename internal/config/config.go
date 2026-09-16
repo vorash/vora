@@ -30,6 +30,8 @@ type Config struct {
 	SystemdMode SystemdMode
 	// DefaultTTL is applied when a sandbox spec does not set one.
 	DefaultTTL time.Duration
+	// MetricsAddr is the listen address for the Prometheus /metrics endpoint.
+	MetricsAddr string
 }
 
 // ImagesDir is the read-only rootfs cache.
@@ -48,6 +50,7 @@ func Default() (Config, error) {
 	c := Config{
 		SystemdMode: SystemdUser,
 		DefaultTTL:  30 * time.Minute,
+		MetricsAddr: "127.0.0.1:9101",
 	}
 
 	if os.Geteuid() == 0 {
@@ -73,6 +76,10 @@ func Default() (Config, error) {
 			return Config{}, fmt.Errorf("invalid VORA_SYSTEMD_MODE %q (want %q or %q)",
 				v, SystemdUser, SystemdSystem)
 		}
+	}
+
+	if v := os.Getenv("VORA_METRICS_ADDR"); v != "" {
+		c.MetricsAddr = v
 	}
 
 	if c.DefaultTTL <= 0 {

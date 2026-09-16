@@ -22,6 +22,7 @@ import (
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/runtime/bwrap"
 	"github.com/vorash/vora/internal/sandbox"
+	"github.com/vorash/vora/internal/telemetry"
 	"github.com/vorash/vora/internal/ulid"
 	"github.com/vorash/vora/internal/version"
 )
@@ -57,6 +58,8 @@ func run() error {
 	registerBackends(cfg, registry, logger)
 	runnerID := ulid.NewRunner()
 	server := runner.NewServer(cfg, store, registry, runnerID, logger)
+	metrics := telemetry.New()
+	server.SetMetrics(metrics)
 
 	lis, err := net.Listen("unix", cfg.SocketPath)
 	if err != nil {
@@ -80,6 +83,12 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	go func() {
+		if err := metrics.Serve(ctx, cfg.MetricsAddr, logger); err != nil {
+			logger.Warn("metrics server stopped", "error", err)
+		}
+	}()
 
 	errCh := make(chan error, 1)
 	go func() {

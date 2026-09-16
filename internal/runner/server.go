@@ -18,6 +18,7 @@ import (
 	"github.com/vorash/vora/internal/images"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/sandbox"
+	"github.com/vorash/vora/internal/telemetry"
 	"github.com/vorash/vora/internal/ulid"
 	"github.com/vorash/vora/internal/workspace"
 )
@@ -33,6 +34,7 @@ type Server struct {
 	workspaces *workspace.Manager
 	runnerID   string
 	logger     *slog.Logger
+	metrics    *telemetry.Metrics
 
 	handlesMu sync.Mutex
 	handles   map[string]runtime.Handle
@@ -51,12 +53,27 @@ func NewServer(cfg config.Config, store *sandbox.Store, registry *runtime.Regist
 		workspaces: workspace.NewManager(cfg.SandboxesDir()),
 		runnerID:   runnerID,
 		logger:     logger,
+		metrics:    telemetry.New(),
 		handles:    make(map[string]runtime.Handle),
 	}
 }
 
+// SetMetrics replaces the default metric set (used by the daemon).
+func (s *Server) SetMetrics(m *telemetry.Metrics) {
+	if m != nil {
+		s.metrics = m
+	}
+}
+
 // CreateSandbox validates and persists a new sandbox in the REQUESTED state.
-func (s *Server) CreateSandbox(ctx context.Context, req *v1.CreateSandboxRequest) (*v1.CreateSandboxResponse, error) {
+func (s *Server) CreateSandbox(ctx context.Context, req *v1.CreateSandboxRequest) (resp *v1.CreateSandboxResponse, err error) {
+	metricStatus := "requested"
+	defer func() {
+		if err != nil {
+			metricStatus = "failed"
+		}
+		s.metrics.SandboxCreateTotal.WithLabelValues(metricStatus).Inc()
+	}()
 	spec, err := specFromProto(req.GetSpec(), s.cfg.DefaultTTL)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
@@ -142,6 +159,8 @@ func (s *Server) ListSandboxes(ctx context.Context, req *v1.ListSandboxesRequest
 
 // StartSandbox provisions and starts a sandbox using the default backend.
 func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) (*v1.Sandbox, error) {
+	start := time.Now()
+	defer func() { s.metrics.SandboxCreateDuration.Observe(time.Since(start).Seconds()) }()
 	if req.GetSandboxId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "sandbox_id is required")
 	}
@@ -189,12 +208,16 @@ func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) 
 	if err := s.transition(rec, sandbox.StateRunning, ""); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
+	s.metrics.SandboxRunning.Inc()
+	s.metrics.RunnerSandboxes.Inc()
 	s.logger.Info("sandbox running", "sandbox_id", rec.ID, "backend", backend.Name())
 	return toProtoSandbox(rec), nil
 }
 
 // ExecSandbox runs a command in a running sandbox and streams its output.
 func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStreamingServer[v1.ExecChunk]) error {
+	start := time.Now()
+	defer func() { s.metrics.ExecDuration.Observe(time.Since(start).Seconds()) }()
 	backend, err := s.backend()
 	if err != nil {
 		return err
@@ -212,6 +235,7 @@ func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStrea
 	es, err := backend.Exec(stream.Context(), h, execReq)
 	if err != nil {
 		s.recordExec(req.GetSandboxId(), execReq, started, 0, 0, 0, runtime.ReasonRuntimeFailure)
+		s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure)).Inc()
 		return status.Errorf(codes.Internal, "exec: %v", err)
 	}
 	defer es.Close()
@@ -244,6 +268,7 @@ func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStrea
 		reason = exit.Reason
 	}
 	s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, code, reason)
+	s.metrics.ExecTotal.WithLabelValues("ok").Inc()
 	return nil
 }
 
@@ -323,6 +348,10 @@ func (s *Server) DestroySandbox(ctx context.Context, req *v1.DestroySandboxReque
 		}
 	}
 	s.delHandle(rec.ID)
+	if rec.State == sandbox.StateRunning {
+		s.metrics.SandboxRunning.Dec()
+		s.metrics.RunnerSandboxes.Dec()
+	}
 	if rec.State != sandbox.StateDestroyed {
 		if err := s.transition(rec, sandbox.StateDestroyed, rec.Reason); err != nil {
 			s.logger.Warn("state transition on destroy failed", "sandbox_id", rec.ID, "state", rec.State, "error", err)
@@ -382,6 +411,7 @@ func (s *Server) transition(rec *sandbox.Record, to sandbox.State, reason runtim
 }
 
 func (s *Server) fail(rec *sandbox.Record, reason runtime.ExitReason) {
+	s.metrics.SandboxFailedTotal.WithLabelValues(string(reason)).Inc()
 	if err := s.transition(rec, sandbox.StateFailed, reason); err != nil {
 		s.logger.Warn("failed to record FAILED state", "sandbox_id", rec.ID, "state", rec.State, "error", err)
 	}
