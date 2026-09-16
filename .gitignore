@@ -1,0 +1,12 @@
+# Local-only planning documents (kept out of git for now)
+/VORA_MASTER_IMPLEMENTATION_PLAN.md
+/plans/
+
+# Build artifacts
+/bin/
+/dist/
+*.test
+*.out
+
+# Local runtime state
+/.vora/
