@@ -32,6 +32,13 @@ type Config struct {
 	DefaultTTL time.Duration
 	// MetricsAddr is the listen address for the Prometheus /metrics endpoint.
 	MetricsAddr string
+	// GvisorPlatform selects the gVisor platform ("kvm" or "systrap").
+	GvisorPlatform string
+	// GvisorRunRoot is the runsc --root state directory (default under
+	// $XDG_RUNTIME_DIR).
+	GvisorRunRoot string
+	// RunscPath overrides the runsc binary location.
+	RunscPath string
 }
 
 // ImagesDir is the read-only rootfs cache.
@@ -48,9 +55,10 @@ func (c Config) SandboxesDir() string { return filepath.Join(c.StateDir, "sandbo
 //	VORA_SYSTEMD_MODE  "user" (default) or "system"
 func Default() (Config, error) {
 	c := Config{
-		SystemdMode: SystemdUser,
-		DefaultTTL:  30 * time.Minute,
-		MetricsAddr: "127.0.0.1:9101",
+		SystemdMode:    SystemdUser,
+		DefaultTTL:     30 * time.Minute,
+		MetricsAddr:    "127.0.0.1:9101",
+		GvisorPlatform: "kvm",
 	}
 
 	if os.Geteuid() == 0 {
@@ -80,6 +88,15 @@ func Default() (Config, error) {
 
 	if v := os.Getenv("VORA_METRICS_ADDR"); v != "" {
 		c.MetricsAddr = v
+	}
+	if v := os.Getenv("VORA_GVISOR_PLATFORM"); v != "" {
+		c.GvisorPlatform = v
+	}
+	if v := os.Getenv("VORA_GVISOR_ROOT"); v != "" {
+		c.GvisorRunRoot = v
+	}
+	if v := os.Getenv("VORA_RUNSC"); v != "" {
+		c.RunscPath = v
 	}
 
 	if c.DefaultTTL <= 0 {
