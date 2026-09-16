@@ -547,6 +547,7 @@ type ExecRequest struct {
 	Cwd            string                 `protobuf:"bytes,4,opt,name=cwd,proto3" json:"cwd,omitempty"`
 	Env            []string               `protobuf:"bytes,5,rep,name=env,proto3" json:"env,omitempty"`
 	TimeoutSeconds int64                  `protobuf:"varint,6,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
+	Stdin          []byte                 `protobuf:"bytes,7,opt,name=stdin,proto3" json:"stdin,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -621,6 +622,13 @@ func (x *ExecRequest) GetTimeoutSeconds() int64 {
 		return x.TimeoutSeconds
 	}
 	return 0
+}
+
+func (x *ExecRequest) GetStdin() []byte {
+	if x != nil {
+		return x.Stdin
+	}
+	return nil
 }
 
 // ExecExit reports how an execution finished.
@@ -894,14 +902,15 @@ const file_api_proto_v1_common_proto_rawDesc = "" +
 	"\x06reason\x18\x05 \x01(\x0e2\x13.vora.v1.ExitReasonR\x06reason\x12+\n" +
 	"\x12created_at_unix_ms\x18\x06 \x01(\x03R\x0fcreatedAtUnixMs\x12+\n" +
 	"\x12updated_at_unix_ms\x18\a \x01(\x03R\x0fupdatedAtUnixMs\x12!\n" +
-	"\fimage_rootfs\x18\b \x01(\tR\vimageRootfs\"\xab\x01\n" +
+	"\fimage_rootfs\x18\b \x01(\tR\vimageRootfs\"\xc1\x01\n" +
 	"\vExecRequest\x12!\n" +
 	"\fexecution_id\x18\x01 \x01(\tR\vexecutionId\x12\x18\n" +
 	"\acommand\x18\x02 \x01(\tR\acommand\x12\x12\n" +
 	"\x04args\x18\x03 \x03(\tR\x04args\x12\x10\n" +
 	"\x03cwd\x18\x04 \x01(\tR\x03cwd\x12\x10\n" +
 	"\x03env\x18\x05 \x03(\tR\x03env\x12'\n" +
-	"\x0ftimeout_seconds\x18\x06 \x01(\x03R\x0etimeoutSeconds\"T\n" +
+	"\x0ftimeout_seconds\x18\x06 \x01(\x03R\x0etimeoutSeconds\x12\x14\n" +
+	"\x05stdin\x18\a \x01(\fR\x05stdin\"T\n" +
 	"\bExecExit\x12\x1b\n" +
 	"\texit_code\x18\x01 \x01(\x05R\bexitCode\x12+\n" +
 	"\x06reason\x18\x02 \x01(\x0e2\x13.vora.v1.ExitReasonR\x06reason\"s\n" +

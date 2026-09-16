@@ -219,6 +219,7 @@ func (b *Backend) Exec(ctx context.Context, h runtime.Handle, req runtime.ExecRe
 		Cwd:            req.Cwd,
 		Env:            envSlice(req.Env),
 		TimeoutSeconds: int64(req.Timeout / time.Second),
+		Stdin:          req.Stdin,
 	})
 }
 

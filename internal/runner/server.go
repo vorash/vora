@@ -276,15 +276,30 @@ func (s *Server) DestroySandbox(ctx context.Context, req *v1.DestroySandboxReque
 		}
 	}
 	s.delHandle(rec.ID)
-	if err := s.workspaces.Clean(rec.ID); err != nil {
-		s.logger.Warn("clean workspace failed", "sandbox_id", rec.ID, "error", err)
-	}
 	if rec.State != sandbox.StateDestroyed {
 		if err := s.transition(rec, sandbox.StateDestroyed, rec.Reason); err != nil {
 			s.logger.Warn("state transition on destroy failed", "sandbox_id", rec.ID, "state", rec.State, "error", err)
 		}
 	}
+	if err := s.workspaces.Clean(rec.ID); err != nil {
+		s.logger.Warn("clean workspace failed", "sandbox_id", rec.ID, "error", err)
+	}
 	return &v1.DestroySandboxResponse{}, nil
+}
+
+// GetSandboxEvents returns the lifecycle event history for a sandbox.
+func (s *Server) GetSandboxEvents(_ context.Context, req *v1.GetSandboxEventsRequest) (*v1.GetSandboxEventsResponse, error) {
+	if req.GetSandboxId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "sandbox_id is required")
+	}
+	if _, err := s.store.Load(req.GetSandboxId()); err != nil {
+		return nil, s.loadError(err, req.GetSandboxId())
+	}
+	events, err := sandbox.ReadEvents(s.workspaces.LogsDir(req.GetSandboxId()))
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "read events: %v", err)
+	}
+	return &v1.GetSandboxEventsResponse{Events: eventsToProto(events)}, nil
 }
 
 func (s *Server) backend() (runtime.Backend, error) {
@@ -299,10 +314,24 @@ func (s *Server) transition(rec *sandbox.Record, to sandbox.State, reason runtim
 	if rec.State == to {
 		return nil
 	}
+	from := rec.State
 	if err := sandbox.Transition(rec, to, reason); err != nil {
 		return err
 	}
-	return s.store.Save(rec)
+	if err := s.store.Save(rec); err != nil {
+		return err
+	}
+	event := sandbox.Event{
+		SandboxID: rec.ID,
+		From:      from,
+		To:        to,
+		Reason:    string(reason),
+		RunnerID:  s.runnerID,
+	}
+	if err := sandbox.AppendEvent(s.workspaces.LogsDir(rec.ID), event); err != nil {
+		s.logger.Debug("append event failed", "sandbox_id", rec.ID, "error", err)
+	}
+	return nil
 }
 
 func (s *Server) fail(rec *sandbox.Record, reason runtime.ExitReason) {

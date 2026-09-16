@@ -86,6 +86,7 @@ message ExecRequest {
   string cwd = 4;
   repeated string env = 5;
   int64 timeout_seconds = 6;
+  bytes stdin = 7;
 }
 
 // ExecExit reports how an execution finished.

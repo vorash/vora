@@ -16,6 +16,7 @@ service RunnerService {
   rpc ExecSandbox(ExecSandboxRequest) returns (stream ExecChunk);
   rpc SignalSandbox(SignalSandboxRequest) returns (SignalSandboxResponse);
   rpc StatsSandbox(StatsSandboxRequest) returns (Stats);
+  rpc GetSandboxEvents(GetSandboxEventsRequest) returns (GetSandboxEventsResponse);
   rpc DestroySandbox(DestroySandboxRequest) returns (DestroySandboxResponse);
 }
 
@@ -59,6 +60,24 @@ message SignalSandboxResponse {}
 
 message StatsSandboxRequest {
   string sandbox_id = 1;
+}
+
+message GetSandboxEventsRequest {
+  string sandbox_id = 1;
+}
+
+message GetSandboxEventsResponse {
+  repeated SandboxEvent events = 1;
+}
+
+// SandboxEvent is one lifecycle transition.
+message SandboxEvent {
+  string sandbox_id = 1;
+  string from = 2;
+  string to = 3;
+  string reason = 4;
+  string runner_id = 5;
+  int64 timestamp_unix_ms = 6;
 }
 
 message DestroySandboxRequest {

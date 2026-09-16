@@ -128,6 +128,8 @@ type ExecRequest struct {
 	Cwd         string
 	Env         map[string]string
 	Timeout     time.Duration
+	// Stdin is written to the command's standard input and then closed.
+	Stdin []byte
 }
 
 // ExecResult reports how an execution finished.

@@ -181,6 +181,7 @@ func execRequestFromProto(p *v1.ExecRequest) runtime.ExecRequest {
 		Cwd:         p.GetCwd(),
 		Env:         envMap(p.GetEnv()),
 		Timeout:     time.Duration(p.GetTimeoutSeconds()) * time.Second,
+		Stdin:       p.GetStdin(),
 	}
 }
 
@@ -197,6 +198,21 @@ func execChunkToProto(c runtime.ExecChunk) *v1.ExecChunk {
 	default:
 		return &v1.ExecChunk{Payload: &v1.ExecChunk_Stdout{Stdout: c.Stdout}}
 	}
+}
+
+func eventsToProto(events []sandbox.Event) []*v1.SandboxEvent {
+	out := make([]*v1.SandboxEvent, 0, len(events))
+	for _, e := range events {
+		out = append(out, &v1.SandboxEvent{
+			SandboxId:       e.SandboxID,
+			From:            string(e.From),
+			To:              string(e.To),
+			Reason:          e.Reason,
+			RunnerId:        e.RunnerID,
+			TimestampUnixMs: e.Timestamp.UnixMilli(),
+		})
+	}
+	return out
 }
 
 func envMap(env []string) map[string]string {

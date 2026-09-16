@@ -7,6 +7,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -187,6 +188,9 @@ func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.Exe
 	cmd := exec.Command(command, req.GetArgs()...)
 	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(), req.GetEnv()...)
+	if len(req.GetStdin()) > 0 {
+		cmd.Stdin = bytes.NewReader(req.GetStdin())
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	// Hold execMu from before Start until after Wait so the orphan reaper
@@ -211,6 +215,7 @@ func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.Exe
 	}
 
 	if err := cmd.Start(); err != nil {
+		_ = sendChunk(&v1.ExecChunk{Payload: &v1.ExecChunk_Stderr{Stderr: []byte("vora-init: " + err.Error() + "\n")}})
 		_ = sendChunk(&v1.ExecChunk{Payload: &v1.ExecChunk_Exit{Exit: &v1.ExecExit{
 			ExitCode: 127,
 			Reason:   v1.ExitReason_RUNTIME_FAILURE,
