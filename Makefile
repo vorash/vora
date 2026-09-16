@@ -51,6 +51,10 @@ test-security: ## Run the isolation security suite
 bench: ## Run the benchmark harness
 	$(GO) test -tags=benchmark -bench=. -run='^$$' ./tests/benchmark/...
 
+.PHONY: bench-report
+bench-report: ## Run benchmarks and write a report to docs/benchmarks/
+	./scripts/bench.sh
+
 .PHONY: images
 images: ## Build sandbox rootfs image cache
 	./scripts/build-images.sh
