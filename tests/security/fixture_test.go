@@ -32,7 +32,18 @@ const testSecret = "VORA_SECURITY_TEST_SECRET"
 // guarantee rather than an assumption.
 func TestMain(m *testing.M) {
 	code := m.Run()
-	if residual := leakedUnits(); len(residual) > 0 {
+
+	// Units may still be deactivating when the last test returns; retry briefly
+	// before declaring a leak.
+	var residual []string
+	for i := 0; i < 25; i++ {
+		residual = leakedUnits()
+		if len(residual) == 0 {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if len(residual) > 0 {
 		fmt.Fprintf(os.Stderr, "security suite leaked runtime units: %v\n", residual)
 		for _, u := range residual {
 			_ = exec.Command("systemctl", "--user", "reset-failed", u).Run()
@@ -44,16 +55,21 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// leakedUnits lists vora-managed systemd services still present.
+// leakedUnits lists vora-managed systemd services that are still active or
+// failed (i.e. not cleanly gone).
 func leakedUnits() []string {
-	out, err := exec.Command("systemctl", "--user", "list-units", "--type=service", "--all", "--no-legend", "--plain").Output()
+	out, err := exec.Command("systemctl", "--user", "list-units", "--type=service", "--all", "--no-legend", "--plain", "--no-pager").Output()
 	if err != nil {
 		return nil
 	}
 	var units []string
 	for _, line := range strings.Split(string(out), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) > 0 && strings.HasPrefix(fields[0], cgroup.UnitPrefix) {
+		if len(fields) < 3 || !strings.HasPrefix(fields[0], cgroup.UnitPrefix) {
+			continue
+		}
+		switch fields[2] { // ACTIVE column
+		case "active", "failed", "activating", "reloading":
 			units = append(units, fields[0])
 		}
 	}
