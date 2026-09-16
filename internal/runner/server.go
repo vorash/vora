@@ -11,20 +11,24 @@ import (
 
 	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/config"
+	"github.com/vorash/vora/internal/images"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/sandbox"
 	"github.com/vorash/vora/internal/ulid"
+	"github.com/vorash/vora/internal/workspace"
 )
 
 // Server implements v1.RunnerServiceServer.
 type Server struct {
 	v1.UnimplementedRunnerServiceServer
 
-	cfg      config.Config
-	store    *sandbox.Store
-	registry *runtime.Registry
-	runnerID string
-	logger   *slog.Logger
+	cfg        config.Config
+	store      *sandbox.Store
+	registry   *runtime.Registry
+	images     *images.Cache
+	workspaces *workspace.Manager
+	runnerID   string
+	logger     *slog.Logger
 }
 
 // NewServer constructs a runner server.
@@ -33,11 +37,13 @@ func NewServer(cfg config.Config, store *sandbox.Store, registry *runtime.Regist
 		logger = slog.Default()
 	}
 	return &Server{
-		cfg:      cfg,
-		store:    store,
-		registry: registry,
-		runnerID: runnerID,
-		logger:   logger,
+		cfg:        cfg,
+		store:      store,
+		registry:   registry,
+		images:     images.NewCache(cfg.ImagesDir()),
+		workspaces: workspace.NewManager(cfg.SandboxesDir()),
+		runnerID:   runnerID,
+		logger:     logger,
 	}
 }
 
@@ -54,6 +60,16 @@ func (s *Server) CreateSandbox(ctx context.Context, req *v1.CreateSandboxRequest
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
+	// Prepare the per-sandbox directories and record the rootfs path. The
+	// image is not required to exist yet; the backend validates it at start.
+	ws := s.workspaces.Paths(spec.ID)
+	ws.RootfsDir = s.images.Rootfs(spec.Image)
+	spec.Workspace = ws
+	if _, err := s.workspaces.Create(ws); err != nil {
+		s.logger.Error("create workspace failed", "sandbox_id", spec.ID, "error", err)
+		return nil, status.Error(codes.Internal, "failed to prepare workspace")
+	}
+
 	rec := &sandbox.Record{
 		ID:       spec.ID,
 		Spec:     spec,
@@ -61,6 +77,7 @@ func (s *Server) CreateSandbox(ctx context.Context, req *v1.CreateSandboxRequest
 		RunnerID: s.runnerID,
 	}
 	if err := s.store.Create(rec); err != nil {
+		_ = s.workspaces.Destroy(spec.ID)
 		if _, loadErr := s.store.Load(spec.ID); loadErr == nil {
 			return nil, status.Errorf(codes.AlreadyExists, "sandbox %s already exists", spec.ID)
 		}

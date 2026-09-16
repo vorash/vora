@@ -55,7 +55,7 @@ func (s *Store) Create(rec *Record) error {
 	defer s.mu.Unlock()
 
 	dir := s.Dir(rec.ID)
-	if _, err := os.Stat(dir); err == nil {
+	if _, err := os.Stat(filepath.Join(dir, configFile)); err == nil {
 		return fmt.Errorf("sandbox: %s already exists", rec.ID)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
