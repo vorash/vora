@@ -1,0 +1,193 @@
+package runner
+
+import (
+	"fmt"
+	"time"
+
+	v1 "github.com/vorash/vora/api/proto/v1"
+	"github.com/vorash/vora/internal/runtime"
+	"github.com/vorash/vora/internal/sandbox"
+)
+
+// specFromProto converts a proto spec into a runtime spec, applying defaults.
+func specFromProto(p *v1.SandboxSpec, defaultTTL time.Duration) (runtime.SandboxSpec, error) {
+	if p == nil {
+		return runtime.SandboxSpec{}, fmt.Errorf("spec is required")
+	}
+	spec := runtime.SandboxSpec{
+		ID:       p.GetSandboxId(),
+		TenantID: p.GetTenantId(),
+		AgentID:  p.GetAgentId(),
+		Image:    p.GetImage(),
+		Network: runtime.NetworkPolicy{
+			Mode:           networkModeFromProto(p.GetNetwork().GetMode()),
+			AllowedDomains: p.GetNetwork().GetAllowedDomains(),
+		},
+	}
+	if r := p.GetResources(); r != nil {
+		spec.Resources = runtime.ResourceLimits{
+			CPUMillis:   r.GetCpuMillis(),
+			MemoryBytes: r.GetMemoryBytes(),
+			Pids:        r.GetPids(),
+			DiskBytes:   r.GetDiskBytes(),
+		}
+	}
+	if len(p.GetEnv()) > 0 {
+		spec.Env = make(map[string]string, len(p.GetEnv()))
+		for _, kv := range p.GetEnv() {
+			// values are "KEY=VALUE"
+			for i := 0; i < len(kv); i++ {
+				if kv[i] == '=' {
+					spec.Env[kv[:i]] = kv[i+1:]
+					break
+				}
+			}
+		}
+	}
+	spec.TTL = time.Duration(p.GetTtlSeconds()) * time.Second
+	if spec.TTL <= 0 {
+		spec.TTL = defaultTTL
+	}
+	return spec, nil
+}
+
+func networkModeFromProto(m v1.NetworkMode) runtime.NetworkMode {
+	switch m {
+	case v1.NetworkMode_NETWORK_NONE:
+		return runtime.NetworkNone
+	case v1.NetworkMode_NETWORK_RESTRICTED:
+		return runtime.NetworkRestricted
+	case v1.NetworkMode_NETWORK_FULL:
+		return runtime.NetworkFull
+	case v1.NetworkMode_NETWORK_PRIVATE:
+		return runtime.NetworkPrivate
+	default:
+		return ""
+	}
+}
+
+func stateToProto(s sandbox.State) v1.SandboxState {
+	switch s {
+	case sandbox.StateRequested:
+		return v1.SandboxState_REQUESTED
+	case sandbox.StateScheduling:
+		return v1.SandboxState_SCHEDULING
+	case sandbox.StateCreating:
+		return v1.SandboxState_CREATING
+	case sandbox.StateStarting:
+		return v1.SandboxState_STARTING
+	case sandbox.StateRunning:
+		return v1.SandboxState_RUNNING
+	case sandbox.StateStopping:
+		return v1.SandboxState_STOPPING
+	case sandbox.StateStopped:
+		return v1.SandboxState_STOPPED
+	case sandbox.StateFailed:
+		return v1.SandboxState_FAILED
+	case sandbox.StateExpired:
+		return v1.SandboxState_EXPIRED
+	case sandbox.StateDestroyed:
+		return v1.SandboxState_DESTROYED
+	default:
+		return v1.SandboxState_SANDBOX_STATE_UNSPECIFIED
+	}
+}
+
+func stateFromProto(s v1.SandboxState) sandbox.State {
+	switch s {
+	case v1.SandboxState_REQUESTED:
+		return sandbox.StateRequested
+	case v1.SandboxState_SCHEDULING:
+		return sandbox.StateScheduling
+	case v1.SandboxState_CREATING:
+		return sandbox.StateCreating
+	case v1.SandboxState_STARTING:
+		return sandbox.StateStarting
+	case v1.SandboxState_RUNNING:
+		return sandbox.StateRunning
+	case v1.SandboxState_STOPPING:
+		return sandbox.StateStopping
+	case v1.SandboxState_STOPPED:
+		return sandbox.StateStopped
+	case v1.SandboxState_FAILED:
+		return sandbox.StateFailed
+	case v1.SandboxState_EXPIRED:
+		return sandbox.StateExpired
+	case v1.SandboxState_DESTROYED:
+		return sandbox.StateDestroyed
+	default:
+		return ""
+	}
+}
+
+func reasonToProto(r runtime.ExitReason) v1.ExitReason {
+	switch r {
+	case runtime.ReasonExited:
+		return v1.ExitReason_EXITED
+	case runtime.ReasonOOMKilled:
+		return v1.ExitReason_OOM_KILLED
+	case runtime.ReasonPidsLimit:
+		return v1.ExitReason_PIDS_LIMIT_EXCEEDED
+	case runtime.ReasonTimeout:
+		return v1.ExitReason_TIMEOUT_EXCEEDED
+	case runtime.ReasonPolicyViolation:
+		return v1.ExitReason_POLICY_VIOLATION
+	case runtime.ReasonRuntimeFailure:
+		return v1.ExitReason_RUNTIME_FAILURE
+	default:
+		return v1.ExitReason_EXIT_REASON_UNSPECIFIED
+	}
+}
+
+func resourceLimitsToProto(r runtime.ResourceLimits) *v1.ResourceLimits {
+	return &v1.ResourceLimits{
+		CpuMillis:   r.CPUMillis,
+		MemoryBytes: r.MemoryBytes,
+		Pids:        r.Pids,
+		DiskBytes:   r.DiskBytes,
+	}
+}
+
+func networkPolicyToProto(n runtime.NetworkPolicy) *v1.NetworkPolicy {
+	return &v1.NetworkPolicy{
+		Mode:           networkModeToProto(n.Mode),
+		AllowedDomains: n.AllowedDomains,
+	}
+}
+
+func networkModeToProto(m runtime.NetworkMode) v1.NetworkMode {
+	switch m {
+	case runtime.NetworkNone:
+		return v1.NetworkMode_NETWORK_NONE
+	case runtime.NetworkRestricted:
+		return v1.NetworkMode_NETWORK_RESTRICTED
+	case runtime.NetworkFull:
+		return v1.NetworkMode_NETWORK_FULL
+	case runtime.NetworkPrivate:
+		return v1.NetworkMode_NETWORK_PRIVATE
+	default:
+		return v1.NetworkMode_NETWORK_MODE_UNSPECIFIED
+	}
+}
+
+// toProtoSandbox converts a persisted record into its proto representation.
+func toProtoSandbox(rec *sandbox.Record) *v1.Sandbox {
+	return &v1.Sandbox{
+		Id:    rec.ID,
+		State: stateToProto(rec.State),
+		Spec: &v1.SandboxSpec{
+			SandboxId:  rec.Spec.ID,
+			TenantId:   rec.Spec.TenantID,
+			AgentId:    rec.Spec.AgentID,
+			Image:      rec.Spec.Image,
+			Resources:  resourceLimitsToProto(rec.Spec.Resources),
+			Network:    networkPolicyToProto(rec.Spec.Network),
+			TtlSeconds: int64(rec.Spec.TTL / time.Second),
+		},
+		RunnerId:        rec.RunnerID,
+		Reason:          reasonToProto(rec.Reason),
+		CreatedAtUnixMs: rec.CreatedAt.UnixMilli(),
+		UpdatedAtUnixMs: rec.UpdatedAt.UnixMilli(),
+		ImageRootfs:     rec.Spec.Workspace.RootfsDir,
+	}
+}
