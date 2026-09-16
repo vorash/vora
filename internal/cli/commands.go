@@ -24,6 +24,7 @@ func (a *app) sandboxCmd() *cobra.Command {
 func (a *app) sandboxCreateCmd() *cobra.Command {
 	var (
 		image, memory, cpu, network, ttl string
+		backend                          string
 		pids                             int64
 		env                              []string
 		tenant, agent                    string
@@ -58,6 +59,7 @@ func (a *app) sandboxCreateCmd() *cobra.Command {
 
 			spec := &v1.SandboxSpec{
 				Image:      image,
+				Backend:    backend,
 				TenantId:   tenant,
 				AgentId:    agent,
 				Resources:  &v1.ResourceLimits{CpuMillis: cpuMillis, MemoryBytes: memBytes, Pids: pids},
@@ -81,6 +83,7 @@ func (a *app) sandboxCreateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&image, "image", "vora/base", "rootfs image (e.g. python:3.13, node:22, vora/base)")
+	cmd.Flags().StringVar(&backend, "backend", "", "runtime backend: gvisor or bwrap (default: auto)")
 	cmd.Flags().StringVar(&memory, "memory", "512m", "memory limit (e.g. 512m, 1Gi)")
 	cmd.Flags().StringVar(&cpu, "cpu", "1", "CPU limit (e.g. 1, 500m)")
 	cmd.Flags().Int64Var(&pids, "pids", 128, "process limit")
@@ -152,6 +155,9 @@ func (a *app) sandboxInspectCmd() *cobra.Command {
 			fmt.Printf("id:         %s\n", sb.GetId())
 			fmt.Printf("state:      %s\n", shortState(sb.GetState()))
 			fmt.Printf("image:      %s\n", sb.GetSpec().GetImage())
+			if be := sb.GetSpec().GetBackend(); be != "" {
+				fmt.Printf("backend:    %s\n", be)
+			}
 			fmt.Printf("cpu:        %dm\n", sb.GetSpec().GetResources().GetCpuMillis())
 			fmt.Printf("memory:     %d bytes\n", sb.GetSpec().GetResources().GetMemoryBytes())
 			fmt.Printf("pids:       %d\n", sb.GetSpec().GetResources().GetPids())

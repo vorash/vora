@@ -21,6 +21,7 @@ import (
 	"github.com/vorash/vora/internal/runner"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/runtime/bwrap"
+	"github.com/vorash/vora/internal/runtime/gvisor"
 	"github.com/vorash/vora/internal/sandbox"
 	"github.com/vorash/vora/internal/telemetry"
 	"github.com/vorash/vora/internal/ulid"
@@ -150,19 +151,24 @@ func run() error {
 func registerBackends(cfg config.Config, registry *runtime.Registry, logger *slog.Logger) cgroup.Manager {
 	manager, err := cgroup.New(cfg)
 	if err != nil {
-		logger.Warn("cgroup manager unavailable; sandboxes cannot be started", "error", err)
-		return nil
-	}
-	backend, err := bwrap.New(cfg, manager, logger)
-	if err != nil {
+		logger.Warn("cgroup manager unavailable; bwrap sandboxes cannot be started", "error", err)
+	} else if backend, err := bwrap.New(cfg, manager, logger); err != nil {
 		logger.Warn("bubblewrap backend unavailable", "error", err)
-		return nil
-	}
-	if err := registry.Register(backend); err != nil {
+	} else if err := registry.Register(backend); err != nil {
 		logger.Warn("register backend failed", "backend", backend.Name(), "error", err)
-		return nil
+	} else {
+		logger.Info("registered runtime backend", "backend", backend.Name())
 	}
-	logger.Info("registered runtime backend", "backend", backend.Name())
+
+	// gVisor is preferred when available (auto-selection prefers gvisor).
+	if backend, err := gvisor.New(cfg, logger); err != nil {
+		logger.Warn("gvisor backend unavailable", "error", err)
+	} else if err := registry.Register(backend); err != nil {
+		logger.Warn("register backend failed", "backend", backend.Name(), "error", err)
+	} else {
+		logger.Info("registered runtime backend", "backend", backend.Name())
+	}
+
 	return manager
 }
 

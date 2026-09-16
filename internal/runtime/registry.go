@@ -59,6 +59,23 @@ func (r *Registry) Default() (Backend, bool) {
 	return b, ok
 }
 
+// Preferred returns the first registered backend among names, falling back to
+// the default backend when none of names are registered.
+func (r *Registry) Preferred(names ...string) (Backend, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, n := range names {
+		if b, ok := r.backends[n]; ok {
+			return b, true
+		}
+	}
+	if r.def == "" {
+		return nil, false
+	}
+	b, ok := r.backends[r.def]
+	return b, ok
+}
+
 // Names returns the registered backend names in sorted order.
 func (r *Registry) Names() []string {
 	r.mu.RLock()

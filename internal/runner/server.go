@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -42,7 +43,14 @@ type Server struct {
 	cgroups    cgroup.Manager
 
 	handlesMu sync.Mutex
-	handles   map[string]runtime.Handle
+	handles   map[string]sandboxHandle
+}
+
+// sandboxHandle binds a sandbox to the backend that manages it, so later RPCs
+// (exec/stats/signal/destroy) use the right backend.
+type sandboxHandle struct {
+	backend runtime.Backend
+	handle  runtime.Handle
 }
 
 // NewServer constructs a runner server.
@@ -61,7 +69,7 @@ func NewServer(cfg config.Config, store *sandbox.Store, registry *runtime.Regist
 		runnerID:   runnerID,
 		logger:     logger,
 		metrics:    telemetry.New(),
-		handles:    make(map[string]runtime.Handle),
+		handles:    make(map[string]sandboxHandle),
 	}
 }
 
@@ -189,7 +197,7 @@ func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) 
 	if rec.State != sandbox.StateRequested {
 		return nil, status.Errorf(codes.FailedPrecondition, "sandbox %s is in state %s", rec.ID, rec.State)
 	}
-	backend, err := s.backend()
+	backend, err := s.selectBackend(rec.Spec)
 	if err != nil {
 		return nil, err
 	}
@@ -222,7 +230,7 @@ func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) 
 		s.fail(rec, runtime.ReasonRuntimeFailure)
 		return nil, status.Errorf(codes.Internal, "start sandbox: %v", err)
 	}
-	s.putHandle(rec.ID, h)
+	s.putHandle(rec.ID, backend, h)
 	if err := s.transition(rec, sandbox.StateRunning, ""); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -236,11 +244,7 @@ func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) 
 func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStreamingServer[v1.ExecChunk]) error {
 	start := time.Now()
 	defer func() { s.metrics.ExecDuration.Observe(time.Since(start).Seconds()) }()
-	backend, err := s.backend()
-	if err != nil {
-		return err
-	}
-	h, err := s.handle(req.GetSandboxId())
+	backend, h, err := s.handle(req.GetSandboxId())
 	if err != nil {
 		return err
 	}
@@ -313,11 +317,7 @@ func (s *Server) recordExec(sandboxID string, req runtime.ExecRequest, started t
 
 // SignalSandbox forwards a signal to the sandbox.
 func (s *Server) SignalSandbox(ctx context.Context, req *v1.SignalSandboxRequest) (*v1.SignalSandboxResponse, error) {
-	backend, err := s.backend()
-	if err != nil {
-		return nil, err
-	}
-	h, err := s.handle(req.GetSandboxId())
+	backend, h, err := s.handle(req.GetSandboxId())
 	if err != nil {
 		return nil, err
 	}
@@ -329,11 +329,7 @@ func (s *Server) SignalSandbox(ctx context.Context, req *v1.SignalSandboxRequest
 
 // StatsSandbox returns resource usage for a running sandbox.
 func (s *Server) StatsSandbox(ctx context.Context, req *v1.StatsSandboxRequest) (*v1.Stats, error) {
-	backend, err := s.backend()
-	if err != nil {
-		return nil, err
-	}
-	h, err := s.handle(req.GetSandboxId())
+	backend, h, err := s.handle(req.GetSandboxId())
 	if err != nil {
 		return nil, err
 	}
@@ -366,11 +362,9 @@ func (s *Server) destroy(ctx context.Context, id string) error {
 	if err != nil {
 		return s.loadError(err, id)
 	}
-	if h, herr := s.handle(rec.ID); herr == nil {
-		if backend, berr := s.backend(); berr == nil {
-			if err := backend.Destroy(ctx, h); err != nil {
-				s.logger.Warn("destroy backend failed", "sandbox_id", rec.ID, "error", err)
-			}
+	if backend, h, herr := s.handle(rec.ID); herr == nil {
+		if err := backend.Destroy(ctx, h); err != nil {
+			s.logger.Warn("destroy backend failed", "sandbox_id", rec.ID, "error", err)
 		}
 	}
 	s.delHandle(rec.ID)
@@ -432,6 +426,30 @@ func (s *Server) Reconcile(ctx context.Context) error {
 		}
 	}
 
+	// Reap backend-managed sandboxes that are no longer in the store.
+	for _, name := range s.registry.Names() {
+		b, ok := s.registry.Get(name)
+		if !ok {
+			continue
+		}
+		sw, ok := b.(runtime.Sweeper)
+		if !ok {
+			continue
+		}
+		ids, err := sw.List(ctx)
+		if err != nil {
+			s.logger.Warn("reconcile: backend list failed", "backend", name, "error", err)
+			continue
+		}
+		for _, id := range ids {
+			if _, err := s.store.Load(id); err == nil {
+				continue
+			}
+			s.logger.Info("reconcile: reaping orphaned sandbox", "backend", name, "sandbox_id", id)
+			_ = sw.Reap(ctx, id)
+		}
+	}
+
 	recs, err := s.store.List()
 	if err != nil {
 		return err
@@ -466,12 +484,28 @@ func (s *Server) GetSandboxEvents(ctx context.Context, req *v1.GetSandboxEventsR
 	return &v1.GetSandboxEventsResponse{Events: eventsToProto(events)}, nil
 }
 
-func (s *Server) backend() (runtime.Backend, error) {
-	b, ok := s.registry.Default()
-	if !ok {
-		return nil, status.Error(codes.Unavailable, "no runtime backend is registered")
+// selectBackend resolves the backend for a spec: an explicit spec.Backend wins,
+// otherwise auto-select the strongest usable backend.
+//
+// gVisor is only preferred when the runner is running as UID 0, i.e. as root or
+// inside a rootlesskit user namespace (gVisor Method 2). An unprivileged
+// unwrapped runner falls back to bwrap, which works without a user namespace.
+func (s *Server) selectBackend(spec runtime.SandboxSpec) (runtime.Backend, error) {
+	if spec.Backend != "" {
+		if b, ok := s.registry.Get(spec.Backend); ok {
+			return b, nil
+		}
+		return nil, status.Errorf(codes.InvalidArgument, "unknown backend %q", spec.Backend)
 	}
-	return b, nil
+	preferred := []string{}
+	if os.Getuid() == 0 {
+		preferred = append(preferred, "gvisor")
+	}
+	preferred = append(preferred, "bwrap")
+	if b, ok := s.registry.Preferred(preferred...); ok {
+		return b, nil
+	}
+	return nil, status.Error(codes.Unavailable, "no runtime backend is registered")
 }
 
 func (s *Server) transition(rec *sandbox.Record, to sandbox.State, reason runtime.ExitReason) error {
@@ -512,23 +546,23 @@ func (s *Server) loadError(err error, id string) error {
 	return status.Error(codes.Internal, "failed to load sandbox")
 }
 
-func (s *Server) putHandle(id string, h runtime.Handle) {
+func (s *Server) putHandle(id string, backend runtime.Backend, h runtime.Handle) {
 	s.handlesMu.Lock()
 	defer s.handlesMu.Unlock()
-	s.handles[id] = h
+	s.handles[id] = sandboxHandle{backend: backend, handle: h}
 }
 
-func (s *Server) handle(id string) (runtime.Handle, error) {
+func (s *Server) handle(id string) (runtime.Backend, runtime.Handle, error) {
 	if id == "" {
-		return nil, status.Error(codes.InvalidArgument, "sandbox_id is required")
+		return nil, nil, status.Error(codes.InvalidArgument, "sandbox_id is required")
 	}
 	s.handlesMu.Lock()
 	defer s.handlesMu.Unlock()
-	h, ok := s.handles[id]
+	sh, ok := s.handles[id]
 	if !ok {
-		return nil, status.Errorf(codes.FailedPrecondition, "sandbox %s is not running", id)
+		return nil, nil, status.Errorf(codes.FailedPrecondition, "sandbox %s is not running", id)
 	}
-	return h, nil
+	return sh.backend, sh.handle, nil
 }
 
 func (s *Server) delHandle(id string) {
