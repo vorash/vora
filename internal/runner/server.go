@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -202,22 +203,68 @@ func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStrea
 	if err != nil {
 		return err
 	}
-	es, err := backend.Exec(stream.Context(), h, execRequestFromProto(req.GetExec()))
+	execReq := execRequestFromProto(req.GetExec())
+	if execReq.ExecutionID == "" {
+		execReq.ExecutionID = ulid.NewExec()
+	}
+
+	started := time.Now().UTC()
+	es, err := backend.Exec(stream.Context(), h, execReq)
 	if err != nil {
+		s.recordExec(req.GetSandboxId(), execReq, started, 0, 0, 0, runtime.ReasonRuntimeFailure)
 		return status.Errorf(codes.Internal, "exec: %v", err)
 	}
 	defer es.Close()
+
+	var stdoutBytes, stderrBytes int64
+	var exit *runtime.ExecResult
 	for {
 		chunk, err := es.Recv()
 		if errors.Is(err, io.EOF) {
-			return nil
+			break
 		}
 		if err != nil {
+			s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure)
 			return status.Errorf(codes.Internal, "exec stream: %v", err)
+		}
+		stdoutBytes += int64(len(chunk.Stdout))
+		stderrBytes += int64(len(chunk.Stderr))
+		if chunk.Exit != nil {
+			exit = chunk.Exit
 		}
 		if err := stream.Send(execChunkToProto(chunk)); err != nil {
 			return err
 		}
+	}
+
+	code := 0
+	reason := runtime.ReasonExited
+	if exit != nil {
+		code = exit.ExitCode
+		reason = exit.Reason
+	}
+	s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, code, reason)
+	return nil
+}
+
+// recordExec persists an execution audit record. Failures are logged, not
+// fatal: losing an audit write must not fail the caller's command.
+func (s *Server) recordExec(sandboxID string, req runtime.ExecRequest, started time.Time, stdoutBytes, stderrBytes int64, code int, reason runtime.ExitReason) {
+	rec := sandbox.ExecRecord{
+		ExecutionID: req.ExecutionID,
+		SandboxID:   sandboxID,
+		Command:     req.Command,
+		Args:        req.Args,
+		Cwd:         req.Cwd,
+		StartedAt:   started,
+		FinishedAt:  time.Now().UTC(),
+		ExitCode:    code,
+		Reason:      reason,
+		StdoutBytes: stdoutBytes,
+		StderrBytes: stderrBytes,
+	}
+	if err := sandbox.WriteExecRecord(s.workspaces.ExecLogDir(sandboxID), rec); err != nil {
+		s.logger.Warn("write exec record failed", "sandbox_id", sandboxID, "execution_id", req.ExecutionID, "error", err)
 	}
 }
 
