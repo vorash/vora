@@ -45,16 +45,16 @@ const (
 
 // ResourceLimits are enforced through the sandbox cgroup.
 type ResourceLimits struct {
-	CPUMillis   int64
-	MemoryBytes int64
-	Pids        int64
-	DiskBytes   int64
+	CPUMillis   int64 `json:"cpu_millis"`
+	MemoryBytes int64 `json:"memory_bytes"`
+	Pids        int64 `json:"pids"`
+	DiskBytes   int64 `json:"disk_bytes,omitempty"`
 }
 
 // NetworkPolicy is the egress policy for a sandbox.
 type NetworkPolicy struct {
-	Mode           NetworkMode
-	AllowedDomains []string
+	Mode           NetworkMode `json:"mode"`
+	AllowedDomains []string    `json:"allowed_domains,omitempty"`
 }
 
 // WorkspaceSpec describes the per-sandbox paths prepared by the runner. The
@@ -62,31 +62,31 @@ type NetworkPolicy struct {
 // sandbox and exposes the control socket to the in-sandbox agent.
 type WorkspaceSpec struct {
 	// RootDir is the per-sandbox state directory.
-	RootDir string
+	RootDir string `json:"root_dir"`
 	// RootfsDir is the read-only image rootfs to bind as /.
-	RootfsDir string
+	RootfsDir string `json:"rootfs_dir"`
 	// WorkspaceDir is bound read-write at /workspace.
-	WorkspaceDir string
+	WorkspaceDir string `json:"workspace_dir"`
 	// HomeDir is bound read-write at /root.
-	HomeDir string
+	HomeDir string `json:"home_dir"`
 	// IPCDir is bound at /run/vora and carries the agent control socket.
-	IPCDir string
+	IPCDir string `json:"ipc_dir"`
 	// ControlSocket is the agent socket path on the host
 	// (inside IPCDir).
-	ControlSocket string
+	ControlSocket string `json:"control_socket"`
 }
 
 // SandboxSpec is the desired state for a sandbox.
 type SandboxSpec struct {
-	ID        string
-	TenantID  string
-	AgentID   string
-	Image     string
-	Resources ResourceLimits
-	Network   NetworkPolicy
-	Env       map[string]string
-	TTL       time.Duration
-	Workspace WorkspaceSpec
+	ID        string            `json:"id"`
+	TenantID  string            `json:"tenant_id,omitempty"`
+	AgentID   string            `json:"agent_id,omitempty"`
+	Image     string            `json:"image"`
+	Resources ResourceLimits    `json:"resources"`
+	Network   NetworkPolicy     `json:"network"`
+	Env       map[string]string `json:"env,omitempty"`
+	TTL       time.Duration     `json:"ttl_ns,omitempty"`
+	Workspace WorkspaceSpec     `json:"workspace"`
 }
 
 // Validate checks that a spec is structurally usable by any backend. Backends
