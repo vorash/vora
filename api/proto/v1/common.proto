@@ -1,0 +1,114 @@
+syntax = "proto3";
+
+package vora.v1;
+
+option go_package = "github.com/vorash/vora/api/proto/v1;v1";
+
+// SandboxState is the lifecycle state of a sandbox.
+enum SandboxState {
+  SANDBOX_STATE_UNSPECIFIED = 0;
+  REQUESTED = 1;
+  SCHEDULING = 2;
+  CREATING = 3;
+  STARTING = 4;
+  RUNNING = 5;
+  STOPPING = 6;
+  STOPPED = 7;
+  FAILED = 8;
+  EXPIRED = 9;
+  DESTROYED = 10;
+}
+
+// NetworkMode describes the egress policy applied to a sandbox.
+// Only NETWORK_NONE is implemented in v0.1.
+enum NetworkMode {
+  NETWORK_MODE_UNSPECIFIED = 0;
+  NETWORK_NONE = 1;
+  NETWORK_RESTRICTED = 2;
+  NETWORK_FULL = 3;
+  NETWORK_PRIVATE = 4;
+}
+
+// ExitReason is the semantic reason a sandbox or execution terminated.
+enum ExitReason {
+  EXIT_REASON_UNSPECIFIED = 0;
+  EXITED = 1;
+  OOM_KILLED = 2;
+  PIDS_LIMIT_EXCEEDED = 3;
+  TIMEOUT_EXCEEDED = 4;
+  POLICY_VIOLATION = 5;
+  RUNTIME_FAILURE = 6;
+}
+
+// ResourceLimits are the enforcement limits for a sandbox cgroup.
+message ResourceLimits {
+  int64 cpu_millis = 1;
+  int64 memory_bytes = 2;
+  int64 pids = 3;
+  int64 disk_bytes = 4;
+}
+
+// NetworkPolicy is the egress policy for a sandbox.
+message NetworkPolicy {
+  NetworkMode mode = 1;
+  repeated string allowed_domains = 2;
+}
+
+// SandboxSpec is the desired state for a sandbox.
+message SandboxSpec {
+  string sandbox_id = 1;
+  string tenant_id = 2;
+  string agent_id = 3;
+  string image = 4;
+  ResourceLimits resources = 5;
+  NetworkPolicy network = 6;
+  repeated string env = 7;
+  int64 ttl_seconds = 8;
+}
+
+// Sandbox is the observed state of a sandbox.
+message Sandbox {
+  string id = 1;
+  SandboxSpec spec = 2;
+  SandboxState state = 3;
+  string runner_id = 4;
+  ExitReason reason = 5;
+  int64 created_at_unix_ms = 6;
+  int64 updated_at_unix_ms = 7;
+  string image_rootfs = 8;
+}
+
+// ExecRequest is a command to run inside a sandbox.
+message ExecRequest {
+  string execution_id = 1;
+  string command = 2;
+  repeated string args = 3;
+  string cwd = 4;
+  repeated string env = 5;
+  int64 timeout_seconds = 6;
+}
+
+// ExecExit reports how an execution finished.
+message ExecExit {
+  int32 exit_code = 1;
+  ExitReason reason = 2;
+}
+
+// ExecChunk is one streamed unit of exec output.
+message ExecChunk {
+  oneof payload {
+    bytes stdout = 1;
+    bytes stderr = 2;
+    ExecExit exit = 3;
+  }
+}
+
+// Stats are the observed resource usage of a sandbox.
+message Stats {
+  int64 memory_bytes = 1;
+  int64 memory_peak_bytes = 2;
+  int64 cpu_millis = 3;
+  int64 pids = 4;
+  int64 oom_kills = 5;
+  int64 pids_limit_hits = 6;
+}

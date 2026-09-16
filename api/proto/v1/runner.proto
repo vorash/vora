@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package vora.v1;
+
+import "api/proto/v1/common.proto";
+
+option go_package = "github.com/vorash/vora/api/proto/v1;v1";
+
+// RunnerService is the runner control API. It is served over a Unix socket
+// in v0.1 and over the network once the control plane is split out.
+service RunnerService {
+  rpc CreateSandbox(CreateSandboxRequest) returns (CreateSandboxResponse);
+  rpc GetSandbox(GetSandboxRequest) returns (Sandbox);
+  rpc ListSandboxes(ListSandboxesRequest) returns (ListSandboxesResponse);
+  rpc StartSandbox(StartSandboxRequest) returns (Sandbox);
+  rpc ExecSandbox(ExecSandboxRequest) returns (stream ExecChunk);
+  rpc SignalSandbox(SignalSandboxRequest) returns (SignalSandboxResponse);
+  rpc StatsSandbox(StatsSandboxRequest) returns (Stats);
+  rpc DestroySandbox(DestroySandboxRequest) returns (DestroySandboxResponse);
+}
+
+message CreateSandboxRequest {
+  SandboxSpec spec = 1;
+}
+
+message CreateSandboxResponse {
+  Sandbox sandbox = 1;
+}
+
+message GetSandboxRequest {
+  string sandbox_id = 1;
+}
+
+message ListSandboxesRequest {
+  // Optional state filter; unset means all non-destroyed sandboxes.
+  SandboxState state = 1;
+  bool include_destroyed = 2;
+}
+
+message ListSandboxesResponse {
+  repeated Sandbox sandboxes = 1;
+}
+
+message StartSandboxRequest {
+  string sandbox_id = 1;
+}
+
+message ExecSandboxRequest {
+  string sandbox_id = 1;
+  ExecRequest exec = 2;
+}
+
+message SignalSandboxRequest {
+  string sandbox_id = 1;
+  int32 signal = 2;
+}
+
+message SignalSandboxResponse {}
+
+message StatsSandboxRequest {
+  string sandbox_id = 1;
+}
+
+message DestroySandboxRequest {
+  string sandbox_id = 1;
+}
+
+message DestroySandboxResponse {}

@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package vora.v1;
+
+import "api/proto/v1/common.proto";
+
+option go_package = "github.com/vorash/vora/api/proto/v1;v1";
+
+// AgentService is served by vora-init inside a Bubblewrap sandbox. It exists
+// because Bubblewrap cannot exec into an existing sandbox; the runner reaches
+// the agent over a per-sandbox Unix socket bound into the sandbox.
+service AgentService {
+  rpc Ping(PingRequest) returns (PingResponse);
+  rpc Exec(ExecRequest) returns (stream ExecChunk);
+  rpc Signal(SignalRequest) returns (SignalResponse);
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+}
+
+message PingRequest {}
+
+message PingResponse {
+  int32 pid = 1;
+}
+
+message SignalRequest {
+  int32 signal = 1;
+}
+
+message SignalResponse {}
+
+message ShutdownRequest {}
+
+message ShutdownResponse {}
