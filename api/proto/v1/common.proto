@@ -60,6 +60,7 @@ message SandboxSpec {
   string tenant_id = 2;
   string agent_id = 3;
   string image = 4;
+  string backend = 9;
   ResourceLimits resources = 5;
   NetworkPolicy network = 6;
   repeated string env = 7;

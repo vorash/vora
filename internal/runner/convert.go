@@ -20,6 +20,7 @@ func specFromProto(p *v1.SandboxSpec, defaultTTL time.Duration) (runtime.Sandbox
 		TenantID: p.GetTenantId(),
 		AgentID:  p.GetAgentId(),
 		Image:    p.GetImage(),
+		Backend:  p.GetBackend(),
 		Network: runtime.NetworkPolicy{
 			Mode:           networkModeFromProto(p.GetNetwork().GetMode()),
 			AllowedDomains: p.GetNetwork().GetAllowedDomains(),
@@ -237,6 +238,7 @@ func toProtoSandbox(rec *sandbox.Record) *v1.Sandbox {
 			TenantId:   rec.Spec.TenantID,
 			AgentId:    rec.Spec.AgentID,
 			Image:      rec.Spec.Image,
+			Backend:    rec.Spec.Backend,
 			Resources:  resourceLimitsToProto(rec.Spec.Resources),
 			Network:    networkPolicyToProto(rec.Spec.Network),
 			TtlSeconds: int64(rec.Spec.TTL / time.Second),

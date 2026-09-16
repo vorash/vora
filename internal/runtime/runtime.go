@@ -82,6 +82,7 @@ type SandboxSpec struct {
 	TenantID  string            `json:"tenant_id,omitempty"`
 	AgentID   string            `json:"agent_id,omitempty"`
 	Image     string            `json:"image"`
+	Backend   string            `json:"backend,omitempty"`
 	Resources ResourceLimits    `json:"resources"`
 	Network   NetworkPolicy     `json:"network"`
 	Env       map[string]string `json:"env,omitempty"`
@@ -213,4 +214,14 @@ type Backend interface {
 	Stop(ctx context.Context, h Handle) error
 	// Destroy releases all resources for the sandbox.
 	Destroy(ctx context.Context, h Handle) error
+}
+
+// Sweeper is implemented by backends that keep runtime state outside the
+// runner's own store (gVisor containers, systemd units). The runner uses it
+// during reconciliation to find and remove sandboxes it no longer tracks.
+type Sweeper interface {
+	// List returns the ids of sandboxes the backend currently manages.
+	List(ctx context.Context) ([]string, error)
+	// Reap removes a sandbox that is not present in the runner's store.
+	Reap(ctx context.Context, id string) error
 }

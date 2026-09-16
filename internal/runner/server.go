@@ -14,6 +14,8 @@ import (
 	"google.golang.org/grpc/status"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
+	"github.com/vorash/vora/internal/audit"
+	"github.com/vorash/vora/internal/audit/jsonl"
 	"github.com/vorash/vora/internal/cgroup"
 	"github.com/vorash/vora/internal/config"
 	"github.com/vorash/vora/internal/images"
@@ -33,6 +35,7 @@ type Server struct {
 	registry   *runtime.Registry
 	images     *images.Cache
 	workspaces *workspace.Manager
+	audit      audit.Store
 	runnerID   string
 	logger     *slog.Logger
 	metrics    *telemetry.Metrics
@@ -47,16 +50,25 @@ func NewServer(cfg config.Config, store *sandbox.Store, registry *runtime.Regist
 	if logger == nil {
 		logger = slog.Default()
 	}
+	workspaces := workspace.NewManager(cfg.SandboxesDir())
 	return &Server{
 		cfg:        cfg,
 		store:      store,
 		registry:   registry,
 		images:     images.NewCache(cfg.ImagesDir()),
-		workspaces: workspace.NewManager(cfg.SandboxesDir()),
+		workspaces: workspaces,
+		audit:      jsonl.New(workspaces.LogsDir),
 		runnerID:   runnerID,
 		logger:     logger,
 		metrics:    telemetry.New(),
 		handles:    make(map[string]runtime.Handle),
+	}
+}
+
+// SetAudit replaces the audit store (e.g. with the PostgreSQL/Supabase store).
+func (s *Server) SetAudit(a audit.Store) {
+	if a != nil {
+		s.audit = a
 	}
 }
 
@@ -294,7 +306,7 @@ func (s *Server) recordExec(sandboxID string, req runtime.ExecRequest, started t
 		StdoutBytes: stdoutBytes,
 		StderrBytes: stderrBytes,
 	}
-	if err := sandbox.WriteExecRecord(s.workspaces.ExecLogDir(sandboxID), rec); err != nil {
+	if err := s.audit.AppendExec(context.Background(), sandboxID, rec); err != nil {
 		s.logger.Warn("write exec record failed", "sandbox_id", sandboxID, "execution_id", req.ExecutionID, "error", err)
 	}
 }
@@ -440,14 +452,14 @@ func (s *Server) Reconcile(ctx context.Context) error {
 }
 
 // GetSandboxEvents returns the lifecycle event history for a sandbox.
-func (s *Server) GetSandboxEvents(_ context.Context, req *v1.GetSandboxEventsRequest) (*v1.GetSandboxEventsResponse, error) {
+func (s *Server) GetSandboxEvents(ctx context.Context, req *v1.GetSandboxEventsRequest) (*v1.GetSandboxEventsResponse, error) {
 	if req.GetSandboxId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "sandbox_id is required")
 	}
 	if _, err := s.store.Load(req.GetSandboxId()); err != nil {
 		return nil, s.loadError(err, req.GetSandboxId())
 	}
-	events, err := sandbox.ReadEvents(s.workspaces.LogsDir(req.GetSandboxId()))
+	events, err := s.audit.Events(ctx, req.GetSandboxId())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "read events: %v", err)
 	}
@@ -480,7 +492,7 @@ func (s *Server) transition(rec *sandbox.Record, to sandbox.State, reason runtim
 		Reason:    string(reason),
 		RunnerID:  s.runnerID,
 	}
-	if err := sandbox.AppendEvent(s.workspaces.LogsDir(rec.ID), event); err != nil {
+	if err := s.audit.AppendEvent(context.Background(), rec.ID, event); err != nil {
 		s.logger.Debug("append event failed", "sandbox_id", rec.ID, "error", err)
 	}
 	return nil

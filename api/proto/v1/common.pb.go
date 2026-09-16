@@ -343,6 +343,7 @@ type SandboxSpec struct {
 	TenantId      string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
 	AgentId       string                 `protobuf:"bytes,3,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`
 	Image         string                 `protobuf:"bytes,4,opt,name=image,proto3" json:"image,omitempty"`
+	Backend       string                 `protobuf:"bytes,9,opt,name=backend,proto3" json:"backend,omitempty"`
 	Resources     *ResourceLimits        `protobuf:"bytes,5,opt,name=resources,proto3" json:"resources,omitempty"`
 	Network       *NetworkPolicy         `protobuf:"bytes,6,opt,name=network,proto3" json:"network,omitempty"`
 	Env           []string               `protobuf:"bytes,7,rep,name=env,proto3" json:"env,omitempty"`
@@ -405,6 +406,13 @@ func (x *SandboxSpec) GetAgentId() string {
 func (x *SandboxSpec) GetImage() string {
 	if x != nil {
 		return x.Image
+	}
+	return ""
+}
+
+func (x *SandboxSpec) GetBackend() string {
+	if x != nil {
+		return x.Backend
 	}
 	return ""
 }
@@ -882,13 +890,14 @@ const file_api_proto_v1_common_proto_rawDesc = "" +
 	"disk_bytes\x18\x04 \x01(\x03R\tdiskBytes\"b\n" +
 	"\rNetworkPolicy\x12(\n" +
 	"\x04mode\x18\x01 \x01(\x0e2\x14.vora.v1.NetworkModeR\x04mode\x12'\n" +
-	"\x0fallowed_domains\x18\x02 \x03(\tR\x0eallowedDomains\"\x96\x02\n" +
+	"\x0fallowed_domains\x18\x02 \x03(\tR\x0eallowedDomains\"\xb0\x02\n" +
 	"\vSandboxSpec\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12\x1b\n" +
 	"\ttenant_id\x18\x02 \x01(\tR\btenantId\x12\x19\n" +
 	"\bagent_id\x18\x03 \x01(\tR\aagentId\x12\x14\n" +
-	"\x05image\x18\x04 \x01(\tR\x05image\x125\n" +
+	"\x05image\x18\x04 \x01(\tR\x05image\x12\x18\n" +
+	"\abackend\x18\t \x01(\tR\abackend\x125\n" +
 	"\tresources\x18\x05 \x01(\v2\x17.vora.v1.ResourceLimitsR\tresources\x120\n" +
 	"\anetwork\x18\x06 \x01(\v2\x16.vora.v1.NetworkPolicyR\anetwork\x12\x10\n" +
 	"\x03env\x18\a \x03(\tR\x03env\x12\x1f\n" +
