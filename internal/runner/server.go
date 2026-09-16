@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
+	"github.com/vorash/vora/internal/cgroup"
 	"github.com/vorash/vora/internal/config"
 	"github.com/vorash/vora/internal/images"
 	"github.com/vorash/vora/internal/runtime"
@@ -35,6 +36,7 @@ type Server struct {
 	runnerID   string
 	logger     *slog.Logger
 	metrics    *telemetry.Metrics
+	cgroups    cgroup.Manager
 
 	handlesMu sync.Mutex
 	handles   map[string]runtime.Handle
@@ -64,6 +66,10 @@ func (s *Server) SetMetrics(m *telemetry.Metrics) {
 		s.metrics = m
 	}
 }
+
+// SetCgroups provides the cgroup manager, enabling reconciliation of orphaned
+// systemd units on startup. It is optional.
+func (s *Server) SetCgroups(m cgroup.Manager) { s.cgroups = m }
 
 // CreateSandbox validates and persists a new sandbox in the REQUESTED state.
 func (s *Server) CreateSandbox(ctx context.Context, req *v1.CreateSandboxRequest) (resp *v1.CreateSandboxResponse, err error) {
@@ -336,9 +342,17 @@ func (s *Server) StatsSandbox(ctx context.Context, req *v1.StatsSandboxRequest) 
 // DestroySandbox stops a sandbox, releases its resources and records the
 // tombstone. It is idempotent.
 func (s *Server) DestroySandbox(ctx context.Context, req *v1.DestroySandboxRequest) (*v1.DestroySandboxResponse, error) {
-	rec, err := s.store.Load(req.GetSandboxId())
+	if err := s.destroy(ctx, req.GetSandboxId()); err != nil {
+		return nil, err
+	}
+	return &v1.DestroySandboxResponse{}, nil
+}
+
+// destroy releases a sandbox's runtime resources and marks it DESTROYED.
+func (s *Server) destroy(ctx context.Context, id string) error {
+	rec, err := s.store.Load(id)
 	if err != nil {
-		return nil, s.loadError(err, req.GetSandboxId())
+		return s.loadError(err, id)
 	}
 	if h, herr := s.handle(rec.ID); herr == nil {
 		if backend, berr := s.backend(); berr == nil {
@@ -360,7 +374,69 @@ func (s *Server) DestroySandbox(ctx context.Context, req *v1.DestroySandboxReque
 	if err := s.workspaces.Clean(rec.ID); err != nil {
 		s.logger.Warn("clean workspace failed", "sandbox_id", rec.ID, "error", err)
 	}
-	return &v1.DestroySandboxResponse{}, nil
+	return nil
+}
+
+// ReapExpired destroys running sandboxes whose TTL has elapsed.
+func (s *Server) ReapExpired(ctx context.Context) error {
+	recs, err := s.store.List()
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	for _, rec := range recs {
+		if rec.State != sandbox.StateRunning || rec.Spec.TTL <= 0 {
+			continue
+		}
+		if now.Before(rec.CreatedAt.Add(rec.Spec.TTL)) {
+			continue
+		}
+		s.logger.Info("sandbox TTL expired", "sandbox_id", rec.ID, "ttl", rec.Spec.TTL.String())
+		if err := s.transition(rec, sandbox.StateExpired, runtime.ReasonTimeout); err != nil {
+			s.logger.Warn("expire transition failed", "sandbox_id", rec.ID, "error", err)
+			continue
+		}
+		if err := s.destroy(ctx, rec.ID); err != nil {
+			s.logger.Warn("destroy expired sandbox failed", "sandbox_id", rec.ID, "error", err)
+		}
+	}
+	return nil
+}
+
+// Reconcile repairs runner state at startup: it removes runtime units left
+// behind by a previous run and marks orphaned active sandboxes as FAILED.
+func (s *Server) Reconcile(ctx context.Context) error {
+	if s.cgroups != nil {
+		units, err := s.cgroups.List(ctx)
+		if err != nil {
+			s.logger.Warn("reconcile: list units failed", "error", err)
+		}
+		for _, name := range units {
+			s.logger.Info("reconcile: removing stale unit", "unit", name)
+			if u, aerr := s.cgroups.Attach(ctx, name); aerr == nil {
+				_ = u.Stop(ctx)
+				_ = u.Remove(ctx)
+			}
+		}
+	}
+
+	recs, err := s.store.List()
+	if err != nil {
+		return err
+	}
+	for _, rec := range recs {
+		switch rec.State {
+		case sandbox.StateRunning, sandbox.StateStarting, sandbox.StateCreating, sandbox.StateStopping:
+			s.logger.Warn("reconcile: repairing orphaned sandbox to FAILED", "sandbox_id", rec.ID, "state", rec.State)
+			if err := s.transition(rec, sandbox.StateFailed, runtime.ReasonRuntimeFailure); err != nil {
+				s.logger.Warn("reconcile: transition failed", "sandbox_id", rec.ID, "error", err)
+			}
+			if err := s.workspaces.Clean(rec.ID); err != nil {
+				s.logger.Warn("reconcile: clean failed", "sandbox_id", rec.ID, "error", err)
+			}
+		}
+	}
+	return nil
 }
 
 // GetSandboxEvents returns the lifecycle event history for a sandbox.

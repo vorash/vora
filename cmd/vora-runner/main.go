@@ -55,11 +55,14 @@ func run() error {
 
 	store := sandbox.NewStore(cfg.SandboxesDir())
 	registry := runtime.NewRegistry()
-	registerBackends(cfg, registry, logger)
+	manager := registerBackends(cfg, registry, logger)
 	runnerID := ulid.NewRunner()
 	server := runner.NewServer(cfg, store, registry, runnerID, logger)
 	metrics := telemetry.New()
 	server.SetMetrics(metrics)
+	if manager != nil {
+		server.SetCgroups(manager)
+	}
 
 	lis, err := net.Listen("unix", cfg.SocketPath)
 	if err != nil {
@@ -83,6 +86,24 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	if err := server.Reconcile(ctx); err != nil {
+		logger.Warn("startup reconciliation failed", "error", err)
+	}
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := server.ReapExpired(ctx); err != nil {
+					logger.Warn("ttl reaper failed", "error", err)
+				}
+			}
+		}
+	}()
 
 	go func() {
 		if err := metrics.Serve(ctx, cfg.MetricsAddr, logger); err != nil {
@@ -126,22 +147,23 @@ func run() error {
 // registerBackends registers the isolation backends available on this host.
 // A missing backend is not fatal: the runner still serves create/get/list, and
 // start returns a clear error.
-func registerBackends(cfg config.Config, registry *runtime.Registry, logger *slog.Logger) {
+func registerBackends(cfg config.Config, registry *runtime.Registry, logger *slog.Logger) cgroup.Manager {
 	manager, err := cgroup.New(cfg)
 	if err != nil {
 		logger.Warn("cgroup manager unavailable; sandboxes cannot be started", "error", err)
-		return
+		return nil
 	}
 	backend, err := bwrap.New(cfg, manager, logger)
 	if err != nil {
 		logger.Warn("bubblewrap backend unavailable", "error", err)
-		return
+		return nil
 	}
 	if err := registry.Register(backend); err != nil {
 		logger.Warn("register backend failed", "backend", backend.Name(), "error", err)
-		return
+		return nil
 	}
 	logger.Info("registered runtime backend", "backend", backend.Name())
+	return manager
 }
 
 // removeStaleSocket removes a leftover socket file if no process is listening.
