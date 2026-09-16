@@ -21,10 +21,10 @@ scheduling does not change the state machine. `FAILED`, `EXPIRED` and
 | ---- | -- | ------- | ------------ |
 | — | REQUESTED | `CreateSandbox` | allocate ID, persist config, create dirs |
 | REQUESTED | SCHEDULING | runner accepts | select backend (single runner: itself) |
-| SCHEDULING | CREATING | backend selected | materialise mounts, reserve scope |
-| CREATING | STARTING | resources ready | start `vora-init` under cgroup scope |
+| SCHEDULING | CREATING | backend selected | materialise mounts, reserve unit |
+| CREATING | STARTING | resources ready | start `vora-init` under a cgroup service |
 | STARTING | RUNNING | agent ready (`Ping` ok) | record runner_id, start TTL timer |
-| RUNNING | STOPPING | `DestroySandbox` / TTL | signal agent, stop scope |
+| RUNNING | STOPPING | `DestroySandbox` / TTL | signal agent, stop unit |
 | STOPPING | STOPPED | process tree exits | collect final stats |
 | STOPPED | DESTROYED | cleanup | remove mounts/dirs, record tombstone |
 | RUNNING | FAILED | runtime error / unexpected exit | capture reason, surface to caller |
@@ -81,12 +81,12 @@ This is required because Bubblewrap cannot join an existing sandbox. gVisor
 
 The runner holds an attach stream to each agent. If it drops, `vora-init` starts
 a grace timer and then exits, which tears down the sandbox. This preserves
-`--die-with-parent` semantics even though, under systemd scopes, the sandbox's
+`--die-with-parent` semantics even though, under systemd services, the sandbox's
 parent is systemd rather than the runner.
 
 ## Resource limits and termination reasons
 
-Limits are applied by `cgroup.Manager` on a transient systemd scope. Stats and
+Limits are applied by `cgroup.Manager` on a transient systemd service. Stats and
 termination reasons are read from the sandbox cgroup:
 
 | Reason | Source |
@@ -103,14 +103,14 @@ termination reasons are read from the sandbox cgroup:
 - A reaper goroutine expires RUNNING sandboxes whose TTL elapsed → `EXPIRED`,
   then destroys them.
 - On runner start the reconciler compares persisted state with reality:
-  - persisted RUNNING but scope gone → mark `FAILED`/`STOPPED`;
-  - scope present but no config → stop the orphan scope;
+  - persisted RUNNING but unit gone → mark `FAILED`;
+  - unit present but no config → stop the orphan unit;
   - state `CREATING`/`STARTING` → clean up partial resources.
-- Orphan scopes are found via
-  `systemctl --user list-units 'vora-sbx-*.scope'`.
+- Orphan units are found via
+  `systemctl --user list-units 'vora-sbx_*.service'`.
 
 ## Cleanup guarantees
 
-Destroying a sandbox must: stop the scope, kill the process tree, remove the
+Destroying a sandbox must: stop the unit, kill the process tree, remove the
 cgroup, and delete the sandbox directory. `make test-security` asserts no
-`vora-sbx-*.scope` units and no `vora-*` processes remain after the suite runs.
+`vora-sbx_*.service` units and no `vora-*` processes remain after the suite runs.

@@ -35,7 +35,7 @@ it. If the mechanism is removed, the test must fail.
 | Kernel | unprivileged user namespace; no `CAP_SYS_ADMIN` from the host; seccomp hardening is a follow-up |
 | PID 1 / init | sandbox has its own PID namespace and its own PID 1 (`vora-init`) |
 | Devices | minimal `/dev` provided by Bubblewrap |
-| cgroup hierarchy | sandbox scopes are transient systemd units; removing the unit removes the cgroup |
+| cgroup hierarchy | sandbox services are transient systemd units; removing the unit removes the cgroup |
 | Availability | memory/PID caps prevent host exhaustion; CPU quota bounds utilisation |
 
 ## Residual risks (accepted in v0.1)

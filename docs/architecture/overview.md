@@ -34,9 +34,9 @@ brokering, snapshots, SDKs, multi-runner scheduling, Kubernetes.
                               │ runtime.Backend
                      ┌────────┴────────┐
                      ▼                 ▼
-              bwrap backend      cgroup.Manager (systemd scope)
+              bwrap backend      cgroup.Manager (systemd service)
                      │                 │
-                     │  systemd-run --user --scope -p MemoryMax … bwrap …
+                     │  systemd-run --user -p MemoryMax … -- bwrap …
                      ▼
               ┌──────────────────────────────────────────────┐
               │ bubblewrap sandbox                            │
@@ -53,7 +53,7 @@ brokering, snapshots, SDKs, multi-runner scheduling, Kubernetes.
 | `vora-runner` | daemon: lifecycle, state, TTL, reconciliation, exposes `RunnerService` |
 | `vora-init` | PID 1 inside the sandbox; serves `AgentService` for exec/signal/shutdown |
 | `runtime.Backend` | isolation-technology interface (bwrap today, gVisor later) |
-| `cgroup.Manager` | per-sandbox resource limits and stats via systemd scopes |
+| `cgroup.Manager` | per-sandbox resource limits and stats via systemd services |
 | `images` | read-only rootfs cache shared by all sandboxes |
 | `workspace` | per-sandbox mutable directories and mount points |
 | `sandbox.Store` | persisted metadata and state machine |
@@ -96,8 +96,8 @@ which network modes it supports.
 
 | Mode | cgroup target | Root required | Use |
 | ---- | ------------- | ------------- | --- |
-| local (default) | `systemd-run --user --scope` | no | development, CI, benchmarks |
-| system | `systemd-run --system --scope` | yes | hosted runner (Hetzner) |
+| local (default) | `systemd-run --user` | no | development, CI, benchmarks |
+| system | `systemd-run --system` | yes | hosted runner (Hetzner) |
 
 Both use the same `cgroup.Manager`; the mode is a single config switch.
 
