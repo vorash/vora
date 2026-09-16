@@ -23,6 +23,7 @@ func buildBinary(t *testing.T, pkg string) string {
 	out := filepath.Join(t.TempDir(), filepath.Base(pkg))
 	cmd := exec.Command("go", "build", "-o", out, "./cmd/"+pkg)
 	cmd.Dir = filepath.Join("..", "..")
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build %s: %v\n%s", pkg, err, b)
 	}

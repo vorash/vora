@@ -143,6 +143,7 @@ func TestBinaryShutsDownOnSIGTERM(t *testing.T) {
 
 	build := exec.Command("go", "build", "-o", bin, "./cmd/vora-runner")
 	build.Dir = filepath.Join("..", "..")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build runner: %v\n%s", err, out)
 	}

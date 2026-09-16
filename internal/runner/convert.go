@@ -2,6 +2,7 @@ package runner
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
@@ -171,6 +172,46 @@ func networkModeToProto(m runtime.NetworkMode) v1.NetworkMode {
 }
 
 // toProtoSandbox converts a persisted record into its proto representation.
+// execRequestFromProto converts a proto exec request to a runtime one.
+func execRequestFromProto(p *v1.ExecRequest) runtime.ExecRequest {
+	return runtime.ExecRequest{
+		ExecutionID: p.GetExecutionId(),
+		Command:     p.GetCommand(),
+		Args:        p.GetArgs(),
+		Cwd:         p.GetCwd(),
+		Env:         envMap(p.GetEnv()),
+		Timeout:     time.Duration(p.GetTimeoutSeconds()) * time.Second,
+	}
+}
+
+// execChunkToProto converts a runtime exec chunk to its proto form.
+func execChunkToProto(c runtime.ExecChunk) *v1.ExecChunk {
+	switch {
+	case c.Exit != nil:
+		return &v1.ExecChunk{Payload: &v1.ExecChunk_Exit{Exit: &v1.ExecExit{
+			ExitCode: int32(c.Exit.ExitCode),
+			Reason:   reasonToProto(c.Exit.Reason),
+		}}}
+	case c.Stderr != nil:
+		return &v1.ExecChunk{Payload: &v1.ExecChunk_Stderr{Stderr: c.Stderr}}
+	default:
+		return &v1.ExecChunk{Payload: &v1.ExecChunk_Stdout{Stdout: c.Stdout}}
+	}
+}
+
+func envMap(env []string) map[string]string {
+	if len(env) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(env))
+	for _, kv := range env {
+		if i := strings.IndexByte(kv, '='); i > 0 {
+			out[kv[:i]] = kv[i+1:]
+		}
+	}
+	return out
+}
+
 func toProtoSandbox(rec *sandbox.Record) *v1.Sandbox {
 	return &v1.Sandbox{
 		Id:    rec.ID,

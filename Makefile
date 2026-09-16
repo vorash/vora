@@ -1,5 +1,8 @@
 SHELL := /bin/bash
 GO ?= go
+# Sandbox binaries must be statically linked so they run inside minimal
+# rootfs images (e.g. Alpine, which has no glibc).
+CGO_ENABLED ?= 0
 BIN_DIR := bin
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -X github.com/vorash/vora/internal/version.Version=$(VERSION)
@@ -19,7 +22,7 @@ build: ## Build all packages
 .PHONY: binaries
 binaries: ## Build the vora binaries into bin/
 	mkdir -p $(BIN_DIR)
-	$(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/ ./cmd/...
+	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/ ./cmd/...
 
 .PHONY: proto
 proto: ## Generate Go code from protobuf definitions

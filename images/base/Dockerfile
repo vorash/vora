@@ -9,3 +9,6 @@ RUN apk add --no-cache \
     git \
     python3 \
     py3-pip
+
+# Mount points used by Vora: /workspace (rw) and /vora (rw, agent + socket).
+RUN mkdir -p /workspace /vora

@@ -16,9 +16,11 @@ import (
 	"google.golang.org/grpc"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
+	"github.com/vorash/vora/internal/cgroup"
 	"github.com/vorash/vora/internal/config"
 	"github.com/vorash/vora/internal/runner"
 	"github.com/vorash/vora/internal/runtime"
+	"github.com/vorash/vora/internal/runtime/bwrap"
 	"github.com/vorash/vora/internal/sandbox"
 	"github.com/vorash/vora/internal/ulid"
 	"github.com/vorash/vora/internal/version"
@@ -52,6 +54,7 @@ func run() error {
 
 	store := sandbox.NewStore(cfg.SandboxesDir())
 	registry := runtime.NewRegistry()
+	registerBackends(cfg, registry, logger)
 	runnerID := ulid.NewRunner()
 	server := runner.NewServer(cfg, store, registry, runnerID, logger)
 
@@ -109,6 +112,27 @@ func run() error {
 		logger.Warn("failed to remove socket", "error", err)
 	}
 	return nil
+}
+
+// registerBackends registers the isolation backends available on this host.
+// A missing backend is not fatal: the runner still serves create/get/list, and
+// start returns a clear error.
+func registerBackends(cfg config.Config, registry *runtime.Registry, logger *slog.Logger) {
+	manager, err := cgroup.New(cfg)
+	if err != nil {
+		logger.Warn("cgroup manager unavailable; sandboxes cannot be started", "error", err)
+		return
+	}
+	backend, err := bwrap.New(cfg, manager, logger)
+	if err != nil {
+		logger.Warn("bubblewrap backend unavailable", "error", err)
+		return
+	}
+	if err := registry.Register(backend); err != nil {
+		logger.Warn("register backend failed", "backend", backend.Name(), "error", err)
+		return
+	}
+	logger.Info("registered runtime backend", "backend", backend.Name())
 }
 
 // removeStaleSocket removes a leftover socket file if no process is listening.
