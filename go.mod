@@ -3,6 +3,7 @@ module github.com/vorash/vora
 go 1.27.1
 
 require (
+	github.com/oklog/ulid/v2 v2.1.2
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
 )

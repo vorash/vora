@@ -1,0 +1,100 @@
+// Package config defines the runner configuration and its defaults.
+package config
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+)
+
+// SystemdMode selects which systemd instance owns sandbox cgroups.
+type SystemdMode string
+
+const (
+	// SystemdUser uses `systemd-run --user --scope` (no root required).
+	SystemdUser SystemdMode = "user"
+	// SystemdSystem uses `systemd-run --system --scope` (root required).
+	SystemdSystem SystemdMode = "system"
+)
+
+// Config is the runner configuration. Paths default to system-wide locations
+// when running as root and to user directories otherwise, so the runner works
+// rootlessly during local development.
+type Config struct {
+	// StateDir holds sandbox metadata, images and logs.
+	StateDir string
+	// SocketPath is the runner control socket.
+	SocketPath string
+	// SystemdMode selects user or system scopes.
+	SystemdMode SystemdMode
+	// DefaultTTL is applied when a sandbox spec does not set one.
+	DefaultTTL time.Duration
+}
+
+// ImagesDir is the read-only rootfs cache.
+func (c Config) ImagesDir() string { return filepath.Join(c.StateDir, "images") }
+
+// SandboxesDir is the per-sandbox state root.
+func (c Config) SandboxesDir() string { return filepath.Join(c.StateDir, "sandboxes") }
+
+// Default returns the configuration for the current user, with environment
+// overrides:
+//
+//	VORA_STATE_DIR   overrides the state directory
+//	VORA_SOCKET      overrides the control socket path
+//	VORA_SYSTEMD_MODE  "user" (default) or "system"
+func Default() (Config, error) {
+	c := Config{
+		SystemdMode: SystemdUser,
+		DefaultTTL:  30 * time.Minute,
+	}
+
+	if os.Geteuid() == 0 {
+		c.StateDir = "/var/lib/vora"
+		c.SocketPath = "/var/run/vora/runner.sock"
+		c.SystemdMode = SystemdSystem
+	} else {
+		c.StateDir = filepath.Join(userStateDir(), "vora")
+		c.SocketPath = filepath.Join(userRuntimeDir(), "vora", "runner.sock")
+	}
+
+	if v := os.Getenv("VORA_STATE_DIR"); v != "" {
+		c.StateDir = v
+	}
+	if v := os.Getenv("VORA_SOCKET"); v != "" {
+		c.SocketPath = v
+	}
+	if v := os.Getenv("VORA_SYSTEMD_MODE"); v != "" {
+		switch SystemdMode(v) {
+		case SystemdUser, SystemdSystem:
+			c.SystemdMode = SystemdMode(v)
+		default:
+			return Config{}, fmt.Errorf("invalid VORA_SYSTEMD_MODE %q (want %q or %q)",
+				v, SystemdUser, SystemdSystem)
+		}
+	}
+
+	if c.DefaultTTL <= 0 {
+		c.DefaultTTL = 30 * time.Minute
+	}
+	return c, nil
+}
+
+func userStateDir() string {
+	if v := os.Getenv("XDG_STATE_HOME"); v != "" {
+		return v
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return os.TempDir()
+	}
+	return filepath.Join(home, ".local", "state")
+}
+
+func userRuntimeDir() string {
+	if v := os.Getenv("XDG_RUNTIME_DIR"); v != "" {
+		return v
+	}
+	return os.TempDir()
+}
