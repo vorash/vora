@@ -47,6 +47,16 @@ test-integration: ## Run integration tests (real runner, unix socket)
 test-security: ## Run the isolation security suite
 	$(GO) test -tags=security ./tests/security/...
 
+.PHONY: test-security-all
+test-security-all: binaries ## Run the isolation matrix against bwrap AND gVisor
+	$(GO) test -tags=security ./tests/security/...
+	@command -v rootlesskit >/dev/null 2>&1 || { echo "rootlesskit not installed; skipped the gVisor leg"; exit 0; }
+	rootlesskit \
+		--state-dir="$${XDG_RUNTIME_DIR}/vora-rootlesskit-sec" \
+		--net=slirp4netns --mtu=65520 --disable-host-loopback \
+		--copy-up=/etc --copy-up=/run --copy-up=/var/lib --propagation=rslave \
+		bash -c 'cd "$(CURDIR)" && VORA_INIT_BINARY="$(CURDIR)/bin/vora-init" $(GO) test -tags=security -run "Test.*/gvisor" ./tests/security/...'
+
 .PHONY: bench
 bench: ## Run the benchmark harness
 	$(GO) test -tags=benchmark -bench=. -run='^$$' ./tests/benchmark/...

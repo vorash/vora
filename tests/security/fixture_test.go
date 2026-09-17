@@ -2,8 +2,10 @@
 
 // Package security is the isolation test suite. Every test creates a real
 // sandbox through the normal runner/backend path and asserts a specific
-// boundary. Each test documents why the boundary matters, so weakening the
-// boundary breaks the test.
+// boundary. Each test documents why the boundary matters, so weakening it
+// breaks the test.
+//
+// Tests run against every available backend (bwrap and gVisor) as subtests.
 package security
 
 import (
@@ -23,100 +25,114 @@ import (
 	"github.com/vorash/vora/internal/config"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/runtime/bwrap"
+	"github.com/vorash/vora/internal/runtime/gvisor"
 	"github.com/vorash/vora/internal/workspace"
 )
 
 const testSecret = "VORA_SECURITY_TEST_SECRET"
 
-// TestMain fails the suite if any runtime units leak, making cleanup a tested
-// guarantee rather than an assumption.
-func TestMain(m *testing.M) {
-	code := m.Run()
+func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
-	// Units may still be deactivating when the last test returns; retry briefly
-	// before declaring a leak.
-	var residual []string
-	for i := 0; i < 25; i++ {
-		residual = leakedUnits()
-		if len(residual) == 0 {
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	if len(residual) > 0 {
-		fmt.Fprintf(os.Stderr, "security suite leaked runtime units: %v\n", residual)
-		for _, u := range residual {
-			_ = exec.Command("systemctl", "--user", "reset-failed", u).Run()
-		}
-		if code == 0 {
-			code = 1
-		}
-	}
-	os.Exit(code)
+// backendCase is one isolation backend under test.
+type backendCase struct {
+	name      string
+	available func(*testing.T) bool
+	new       func(*testing.T, config.Config) runtime.Backend
 }
 
-// leakedUnits lists vora-managed systemd services that are still active or
-// failed (i.e. not cleanly gone).
-func leakedUnits() []string {
-	out, err := exec.Command("systemctl", "--user", "list-units", "--type=service", "--all", "--no-legend", "--plain", "--no-pager").Output()
-	if err != nil {
-		return nil
+func backends() []backendCase {
+	return []backendCase{
+		{
+			name:      "bwrap",
+			available: func(*testing.T) bool { return true },
+			new: func(t *testing.T, cfg config.Config) runtime.Backend {
+				m, err := cgroup.New(cfg)
+				if err != nil {
+					t.Skipf("cgroup manager unavailable: %v", err)
+				}
+				b, err := bwrap.New(cfg, m, discardLogger())
+				if err != nil {
+					t.Skipf("bwrap backend unavailable: %v", err)
+				}
+				return b
+			},
+		},
+		{
+			name: "gvisor",
+			available: func(*testing.T) bool {
+				if _, err := os.Stat("/dev/kvm"); err != nil {
+					return false
+				}
+				if !runscPresent() {
+					return false
+				}
+				// gVisor Method 2 needs root or a rootlesskit user namespace.
+				return os.Getuid() == 0
+			},
+			new: func(t *testing.T, cfg config.Config) runtime.Backend {
+				b, err := gvisor.New(cfg, discardLogger())
+				if err != nil {
+					t.Skipf("gvisor backend unavailable: %v", err)
+				}
+				return b
+			},
+		},
 	}
-	var units []string
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 3 || !strings.HasPrefix(fields[0], cgroup.UnitPrefix) {
-			continue
-		}
-		switch fields[2] { // ACTIVE column
-		case "active", "failed", "activating", "reloading":
-			units = append(units, fields[0])
+}
+
+func runscPresent() bool {
+	if _, err := exec.LookPath("runsc"); err == nil {
+		return true
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if _, err := os.Stat(filepath.Join(home, ".local", "bin", "runsc")); err == nil {
+			return true
 		}
 	}
-	return units
+	return false
+}
+
+// forEachBackend runs fn against every available backend as a subtest.
+func forEachBackend(t *testing.T, fn func(*testing.T, *fixture)) {
+	t.Helper()
+	for _, bc := range backends() {
+		t.Run(bc.name, func(t *testing.T) {
+			if !bc.available(t) {
+				t.Skipf("backend %s unavailable on this host (needs runsc+KVM+uid 0 for gVisor)", bc.name)
+			}
+			f := newFixture(t, bc)
+			fn(t, f)
+		})
+	}
 }
 
 // fixture owns a backend and the sandboxes created by a test.
 type fixture struct {
-	t        *testing.T
-	backend  *bwrap.Backend
-	ws       *workspace.Manager
-	cfg      config.Config
-	initPath string
+	t       *testing.T
+	backend runtime.Backend
+	ws      *workspace.Manager
+	cfg     config.Config
 }
 
-func newFixture(t *testing.T) *fixture {
+func newFixture(t *testing.T, bc backendCase) *fixture {
 	t.Helper()
-	initBin := os.Getenv("VORA_INIT_BINARY")
-	if initBin == "" {
-		initBin = mustBuildInit(t)
+	if os.Getenv("VORA_INIT_BINARY") == "" {
+		// bwrap needs vora-init; harmless for gVisor.
+		t.Setenv("VORA_INIT_BINARY", mustBuildInit(t))
 	}
-	t.Setenv("VORA_INIT_BINARY", initBin)
-
-	cgroups, err := cgroup.New(config.Config{SystemdMode: config.SystemdUser})
-	if err != nil {
-		t.Skipf("systemd user manager unavailable: %v", err)
+	cfg := config.Config{
+		StateDir:       t.TempDir(),
+		SystemdMode:    config.SystemdUser,
+		GvisorPlatform: "kvm",
 	}
-	cfg := config.Config{StateDir: t.TempDir(), SystemdMode: config.SystemdUser}
-	backend, err := bwrap.New(cfg, cgroups, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatalf("bwrap backend: %v", err)
-	}
-	return &fixture{
-		t:        t,
-		backend:  backend,
-		ws:       workspace.NewManager(cfg.SandboxesDir()),
-		cfg:      cfg,
-		initPath: initBin,
-	}
+	return &fixture{t: t, backend: bc.new(t, cfg), ws: workspace.NewManager(cfg.SandboxesDir()), cfg: cfg}
 }
 
 // create starts a sandbox with the given limits and returns its handle.
 func (f *fixture) create(id string, limits runtime.ResourceLimits) runtime.Handle {
 	f.t.Helper()
-	rootfs := imageRootfs(f.t, "base")
 	ws := f.ws.Paths(id)
-	ws.RootfsDir = rootfs
+	ws.RootfsDir = imageRootfs(f.t, "base")
 	if _, err := f.ws.Create(ws); err != nil {
 		f.t.Fatalf("workspace: %v", err)
 	}
@@ -136,7 +152,10 @@ func (f *fixture) create(id string, limits runtime.ResourceLimits) runtime.Handl
 	if err := f.backend.Start(ctx, h); err != nil {
 		f.t.Fatalf("Start: %v", err)
 	}
-	f.t.Cleanup(func() { _ = f.backend.Destroy(context.Background(), h) })
+	f.t.Cleanup(func() {
+		_ = f.backend.Destroy(context.Background(), h)
+		_ = f.ws.Destroy(id)
+	})
 	return h
 }
 
@@ -222,4 +241,52 @@ func mustBuildInit(t *testing.T) string {
 		t.Fatalf("build vora-init: %v\n%s", err, b)
 	}
 	return out
+}
+
+// TestMain fails the suite if any runtime units leak, making cleanup a tested
+// guarantee rather than an assumption.
+func TestMain(m *testing.M) {
+	code := m.Run()
+
+	// Units may still be deactivating when the last test returns; retry briefly
+	// before declaring a leak.
+	var residual []string
+	for i := 0; i < 25; i++ {
+		residual = leakedUnits()
+		if len(residual) == 0 {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if len(residual) > 0 {
+		fmt.Fprintf(os.Stderr, "security suite leaked runtime units: %v\n", residual)
+		for _, u := range residual {
+			_ = exec.Command("systemctl", "--user", "reset-failed", u).Run()
+		}
+		if code == 0 {
+			code = 1
+		}
+	}
+	os.Exit(code)
+}
+
+// leakedUnits lists bwrap-managed systemd services that are still active or
+// failed (i.e. not cleanly gone). gVisor uses runsc state, not systemd units.
+func leakedUnits() []string {
+	out, err := exec.Command("systemctl", "--user", "list-units", "--type=service", "--all", "--no-legend", "--plain", "--no-pager").Output()
+	if err != nil {
+		return nil
+	}
+	var units []string
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 || !strings.HasPrefix(fields[0], cgroup.UnitPrefix) {
+			continue
+		}
+		switch fields[2] { // ACTIVE column
+		case "active", "failed", "activating", "reloading":
+			units = append(units, fields[0])
+		}
+	}
+	return units
 }

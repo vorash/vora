@@ -59,3 +59,21 @@ it. If the mechanism is removed, the test must fail.
 2. attempts the attack described above;
 3. asserts the boundary holds;
 4. documents *why* the boundary matters so that weakening it breaks the test.
+
+## Backends
+
+The matrix runs against **every available backend** as subtests:
+
+| Backend | How it runs | Covered by the matrix |
+| ------- | ----------- | --------------------- |
+| `bwrap` | unprivileged, cgroups v2 via systemd | filesystem, PID, cross-sandbox, network, secrets, **fork/memory limits** |
+| `gVisor` | `runsc` Method 2 inside a `rootlesskit` user namespace | filesystem, PID, cross-sandbox, network, secrets |
+
+`make test-security` runs the bwrap leg (and skips the gVisor subtests when the
+runner is unprivileged). `make test-security-all` additionally runs the gVisor
+leg inside a `rootlesskit` userns.
+
+**Resource limits are bwrap-only in v0.2:** the rootless gVisor backend runs
+`runsc` with `--ignore-cgroups`, so `pids.max`/`memory.max` enforcement and the
+fork/memory-bomb tests are a follow-up for gVisor (tracked against the
+cgroup-with-rootless work).
