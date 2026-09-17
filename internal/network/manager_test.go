@@ -35,7 +35,7 @@ func TestHolderAliveRejectsCurrentProcess(t *testing.T) {
 }
 
 func TestNftRulesetRedirectsOnlyTCPToGatewayProxy(t *testing.T) {
-	rules := nftRuleset("10.7.0.1", "8443", "8080")
+	rules := nftRuleset("10.7.0.1", servicePorts{proxy: "8443", broker: "8080", dns: "53"})
 	for _, want := range []string{
 		"table ip vora_nat",
 		"oifname != \"lo\" ip daddr != 10.7.0.1 meta l4proto tcp dnat to 10.7.0.1:8443",
@@ -43,16 +43,18 @@ func TestNftRulesetRedirectsOnlyTCPToGatewayProxy(t *testing.T) {
 		"type filter hook output priority 0; policy drop",
 		"oifname \"lo\" accept",
 		"ip daddr 10.7.0.1 meta l4proto tcp th dport 8443 accept",
-		// The broker port is the only other accepted endpoint; everything
-		// else, including UDP, stays dropped.
+		// The broker port is the only other accepted TCP endpoint.
 		"ip daddr 10.7.0.1 meta l4proto tcp th dport 8080 accept",
+		// DNS goes to the gateway resolver on 53 (UDP for queries, TCP for
+		// truncated answers) and a hardcoded resolver is redirected there
+		// rather than silently dropped.
+		"oifname != \"lo\" ip daddr != 10.7.0.1 meta l4proto udp th dport 53 dnat to 10.7.0.1:53",
+		"ip daddr 10.7.0.1 meta l4proto udp th dport 53 accept",
+		"ip daddr 10.7.0.1 meta l4proto tcp th dport 53 accept",
 	} {
 		if !contains(rules, want) {
 			t.Errorf("ruleset missing %q:\n%s", want, rules)
 		}
-	}
-	if contains(rules, "udp") {
-		t.Errorf("ruleset accepts UDP before the DNS phase:\n%s", rules)
 	}
 }
 

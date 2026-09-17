@@ -80,3 +80,29 @@ func indexOf(argv []string, flag, value string) int {
 	}
 	return -1
 }
+
+// TestArgsBindsResolver asserts a restricted sandbox gets its resolver from the
+// gateway, and that no resolv.conf bind appears when none is configured.
+func TestArgsBindsResolver(t *testing.T) {
+	base := BuildOptions{
+		RootfsDir:    "/cache/base/rootfs",
+		WorkspaceDir: "/state/sbx/workspace",
+		IPCDir:       "/state/sbx/ipc",
+	}
+	without, err := Args(base)
+	if err != nil {
+		t.Fatalf("Args: %v", err)
+	}
+	if strings.Contains(strings.Join(without, " "), "/etc/resolv.conf") {
+		t.Fatal("resolv.conf bound without a resolver configured")
+	}
+
+	base.ResolvConf = "/state/sbx/resolv.conf"
+	with, err := Args(base)
+	if err != nil {
+		t.Fatalf("Args: %v", err)
+	}
+	if !strings.Contains(strings.Join(with, " "), "--ro-bind /state/sbx/resolv.conf /etc/resolv.conf") {
+		t.Fatalf("argv missing the resolv.conf bind: %v", with)
+	}
+}
