@@ -22,6 +22,7 @@ import (
 	"github.com/vorash/vora/internal/config"
 	"github.com/vorash/vora/internal/egress"
 	"github.com/vorash/vora/internal/network"
+	runregistry "github.com/vorash/vora/internal/registry"
 	"github.com/vorash/vora/internal/runner"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/runtime/bwrap"
@@ -91,6 +92,26 @@ func run() error {
 	grpcServer := grpc.NewServer()
 	v1.RegisterRunnerServiceServer(grpcServer, server)
 
+	// Optional TCP gRPC endpoint so a remote control plane can reach this
+	// runner. The Unix socket remains the local CLI path.
+	var tcpServer *grpc.Server
+	if addr := os.Getenv("VORA_RUNNER_ADDR"); addr != "" {
+		tcpLn, err := net.Listen("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("listen tcp %s: %w", addr, err)
+		}
+		defer tcpLn.Close()
+		tcpServer = grpc.NewServer()
+		v1.RegisterRunnerServiceServer(tcpServer, server)
+		go func() { _ = tcpServer.Serve(tcpLn) }()
+		logger.Info("runner gRPC listening", "addr", addr)
+	}
+	defer func() {
+		if tcpServer != nil {
+			tcpServer.GracefulStop()
+		}
+	}()
+
 	logger.Info("vora-runner listening",
 		"version", version.String(),
 		"socket", cfg.SocketPath,
@@ -101,6 +122,32 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Register with vora-api and heartbeat, when configured. The runner dials
+	// out, so it can sit behind NAT.
+	if apiAddr := os.Getenv("VORA_API_GRPC"); apiAddr != "" {
+		rc, err := runregistry.Dial(apiAddr, os.Getenv("VORA_API_JOIN_TOKEN"))
+		if err != nil {
+			logger.Warn("runner registry: dial failed", "error", err)
+		} else {
+			defer rc.Close()
+			advertise := os.Getenv("VORA_RUNNER_ADVERTISE_ADDR")
+			if advertise == "" {
+				advertise = os.Getenv("VORA_RUNNER_ADDR")
+			}
+			reporter := &runregistry.Reporter{
+				Client:   rc,
+				RunnerID: runnerID,
+				Address:  advertise,
+				Version:  version.String(),
+				Backends: registry.Names(),
+				Running:  func() int32 { return int32(server.RunningCount()) },
+				Logger:   logger,
+			}
+			go reporter.Run(ctx)
+			logger.Info("registering with vora-api", "api", apiAddr, "advertise", advertise)
+		}
+	}
 
 	// PostgreSQL/Supabase audit store, when a DSN is configured. Failure is not
 	// fatal: the runner falls back to the JSONL store.

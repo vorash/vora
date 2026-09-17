@@ -27,6 +27,16 @@ func Dial(socket string) (*Client, error) {
 	return &Client{conn: conn, stub: v1.NewRunnerServiceClient(conn)}, nil
 }
 
+// DialAddress connects to a runner's TCP gRPC endpoint (used by vora-api).
+func DialAddress(addr string) (*Client, error) {
+	conn, err := grpc.NewClient(addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, fmt.Errorf("client: dial %s: %w", addr, err)
+	}
+	return &Client{conn: conn, stub: v1.NewRunnerServiceClient(conn)}, nil
+}
+
 // Close closes the connection.
 func (c *Client) Close() error { return c.conn.Close() }
 
@@ -90,4 +100,10 @@ func (c *Client) Execs(ctx context.Context, id string) ([]*v1.SandboxExec, error
 // Exec starts a command and returns the output stream.
 func (c *Client) Exec(ctx context.Context, req *v1.ExecSandboxRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ExecChunk], error) {
 	return c.stub.ExecSandbox(ctx, req, opts...)
+}
+
+// SignalSandbox sends a signal to a sandbox.
+func (c *Client) SignalSandbox(ctx context.Context, id string, sig int32) error {
+	_, err := c.stub.SignalSandbox(ctx, &v1.SignalSandboxRequest{SandboxId: id, Signal: sig})
+	return err
 }
