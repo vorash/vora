@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -99,7 +100,7 @@ func TestPostgresAuditStore(t *testing.T) {
 
 	allowed := sandbox.EgressRecord{
 		SandboxID: sandboxID, Host: "example.com", Remote: "93.184.216.34:443",
-		Allowed: true, Timestamp: now,
+		Alias: "github", Allowed: true, Reason: "dns_resolved", Timestamp: now,
 	}
 	denied := sandbox.EgressRecord{
 		SandboxID: sandboxID, Host: "evil.test", Allowed: false,
@@ -117,6 +118,25 @@ func TestPostgresAuditStore(t *testing.T) {
 	}
 	if len(egress) != 2 || !egress[0].Allowed || egress[1].Reason != "domain_not_allowed" {
 		t.Fatalf("egress = %+v", egress)
+	}
+	// Credential-broker decisions carry the alias, never a secret value: the
+	// schema has no column a value could be stored in.
+	if egress[0].Alias != "github" {
+		t.Fatalf("brokered egress record lost its alias: %+v", egress[0])
+	}
+	var columns int
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("raw pool: %v", err)
+	}
+	defer pool.Close()
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM information_schema.columns
+		  WHERE table_name = 'sandbox_egress' AND column_name IN ('value','secret','credential')`).Scan(&columns); err != nil {
+		t.Fatalf("inspect schema: %v", err)
+	}
+	if columns != 0 {
+		t.Fatal("sandbox_egress has a column that could store a credential value")
 	}
 
 	// A different sandbox's records are isolated.

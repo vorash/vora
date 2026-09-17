@@ -1,6 +1,6 @@
 # Security Boundaries
 
-Status: draft · Applies to: v0.2
+Status: draft · Applies to: v0.4
 
 This document answers a single question for every resource type:
 
@@ -21,10 +21,12 @@ proves it. If the mechanism is removed, the test must fail.
 | Users / capabilities | A runs in an unprivileged user namespace with no host capabilities (bwrap) | user namespace | `TestUnprivilegedUserNamespace` |
 | Network | A's network namespace has no interfaces and no routes; B is unreachable | net namespace / `runsc --network none` | `TestNetworkNone` |
 | Egress (bwrap, `NetworkRestricted`) | A's only route is the gateway; every TCP connection is DNAT'd to the SNI proxy, which allows listed domains and denies the rest | per-sandbox netns + veth + nft DNAT + SNI proxy (ADR 012) | `TestNetworkRestrictedDNAT` + `egress` unit tests |
+| Name resolution (bwrap) | A can only resolve allowlisted names, through the gateway resolver; private/CGNAT answers and non-address types are refused | allowlist-only resolver on the gateway + nft accept (ADR 012) | `TestDNSThroughNetns` + `egress` DNS unit tests |
+| Brokered credentials (bwrap) | A reaches an allowlisted API through the broker route without ever holding the credential; the broker binds each alias to one host and never follows a redirect | gateway broker + host/allowlist binding (ADR 013) | `TestNoSecretsLeakBroker` + `egress` broker unit tests |
 | Memory | A's allocations are capped; exceeding the cap kills A, not B | `memory.max`, `memory.swap.max=0` | `TestMemoryBombKilled` |
 | PIDs | A's fork attempts hit its own `pids.max`; B's process budget is untouched | `pids.max` | `TestForkBombContained` |
 | Control socket | A's control socket lives in its own `ipc/` directory bound only into A | per-sandbox bind mount | `TestControlSocketIsolation` |
-| Metadata / secrets | A has no network and no runner credentials in env, files or `/proc/self/environ` | no network; secrets stay outside sandbox | `TestNoSecretsLeak` |
+| Metadata / secrets | A has no network and no runner credentials in env, files or `/proc/self/environ`; brokered credentials are attached outside the sandbox | no network; broker route (ADR 013) | `TestNoSecretsLeak` (+ broker case) |
 
 CPU quota is set (`cpu.max` / systemd `CPUQuota`) and asserted by
 `TestSystemdUnitLimitsAndTeardown` / the gVisor subtree writer. There is no
@@ -42,7 +44,7 @@ quota-enforced; there is no disk-quota test until a later milestone.
 | cgroup hierarchy | bwrap: transient systemd units. gVisor: delegated subtree under `vora-runner.service` (`Delegate=yes`) |
 | Availability | memory/PID caps prevent host exhaustion; CPU quota bounds utilisation |
 
-## Residual risks (accepted in v0.2)
+## Residual risks (accepted in v0.4)
 
 - **Shared kernel on bwrap.** Bubblewrap isolates namespaces but shares the
   kernel; a kernel vulnerability could escape. gVisor reduces this surface.
@@ -52,6 +54,13 @@ quota-enforced; there is no disk-quota test until a later milestone.
 - **Disk quota is directory-bounded, not enforced by a filesystem quota**; the
   sandbox can fill its workspace up to host free space.
 - **Images are trusted.** No signature verification.
+- **The brokered hop inside the netns is plaintext HTTP.** The credential is
+  attached by the gateway, so it still never enters the sandbox, but a workload
+  that logs its own broker responses sees what the API returned.
+- **The gateway resolver sees query names.** Only allowlisted names are
+  answered, but the runner learns which of them the sandbox asked for.
+- **gVisor has no restricted networking.** It remains `NetworkNone` by decision
+  (ADR 012), so brokering and gateway DNS are bwrap-only.
 
 ## Verification policy
 
@@ -69,7 +78,7 @@ The matrix runs against **every available backend** as subtests:
 | Backend | How it runs | Covered by the matrix |
 | ------- | ----------- | --------------------- |
 | `bwrap` | unprivileged, cgroups v2 via systemd | full table including fork/memory and user-ns |
-| `gVisor` | `runsc` Method 2 inside a `rootlesskit` user namespace; limits via delegated cgroup subtree | full table except `TestUnprivilegedUserNamespace` |
+| `gVisor` | `runsc` Method 2 inside a `rootlesskit` user namespace; limits via delegated cgroup subtree | full table except `TestUnprivilegedUserNamespace`; no `NetworkRestricted`, so no broker/DNS rows |
 
 `make test-security` runs the bwrap leg (and skips the gVisor subtests when the
 runner is unprivileged). `make test-security-all` additionally runs the gVisor

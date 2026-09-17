@@ -9,10 +9,11 @@ execution audit trail.
 Built with Go, Bubblewrap, Linux namespaces, cgroups v2 (via systemd), gRPC,
 and Prometheus.
 
-> **Status: v0.3 proof of concept.** Two isolation backends (Bubblewrap and
-> gVisor), restricted bwrap egress, and a `vora-api` control plane are
-> functional and covered by tests. It is **not** production-ready and has not
-> been independently audited. See [Roadmap](#roadmap) and
+> **Status: v0.4 proof of concept.** Two isolation backends (Bubblewrap and
+> gVisor), restricted bwrap egress with an allowlist-only resolver and
+> credential brokering, and a `vora-api` control plane are functional and
+> covered by tests. It is **not** production-ready and has not been
+> independently audited. See [Roadmap](#roadmap) and
 > [Limitations](#limitations-honest).
 
 ## What works today
@@ -32,6 +33,19 @@ and Prometheus.
   (including UDP and direct gateway services). Allowed and denied decisions are
   persisted, metered, and fail closed if an allow cannot be audited. See
   [ADR 012](docs/adr/012-egress-gateway.md).
+- **Allowlist-only DNS** for restricted sandboxes. The gateway resolver answers
+  only allowlisted names (everything else is `NXDOMAIN` before the host resolver
+  is consulted), refuses answers that map to loopback/private/metadata
+  addresses, refuses non-address query types, and audits every query. A workload
+  with a hardcoded resolver is redirected to it rather than silently dropped.
+- **Brokered credentials** ([ADR 013](docs/adr/013-credential-brokering.md)).
+  `vora secrets set` stores a third-party token encrypted under `VORA_MASTER_KEY`
+  in the control plane; a sandbox created with `--broker <alias>` calls
+  `http://$VORA_BROKER_URL/creds/<alias>/<path>` and the gateway attaches the
+  credential upstream over TLS. The value never enters the sandbox environment,
+  filesystem, `/proc`, the persisted sandbox record, or the audit trail (which
+  records the alias). The broker only ever talks to the alias's bound,
+  allowlisted host and never follows a redirect.
 - State persistence, a **TTL reaper**, and startup **reconciliation** (incl.
   reaping orphaned `runsc` containers and systemd units).
 - **Audit trail** behind a `Store` interface: local JSONL, or **PostgreSQL /
@@ -130,6 +144,34 @@ $ vora sandbox destroy sbx_01M2NVHE1KRD8JT3D6QG6R0EW3
 Destroyed sbx_01M2NVHE1KRD8JT3D6QG6R0EW3
 ```
 
+### Brokered credentials
+
+```console
+$ export VORA_MASTER_KEY="$(openssl rand -base64 48)"   # vora-api only
+$ vora-api & vora-runner &
+
+$ vora keys create --name operator --scope admin          # prints the key once
+$ export VORA_API_KEY="vora_..."
+
+$ vora --api http://127.0.0.1:9300 --api-key "$VORA_API_KEY" \
+      secrets set --alias github --host api.github.com --value-stdin <<<"$GITHUB_TOKEN"
+secret github bound to api.github.com (bearer)
+
+$ vora --api http://127.0.0.1:9300 --api-key "$VORA_API_KEY" sandbox create \
+      --image python --network restricted --allow-domain api.github.com --broker github
+Sandbox created: sbx_01M2NVHE1KRD8JT3D6QG6R0EW3
+
+$ vora --api http://127.0.0.1:9300 --api-key "$VORA_API_KEY" exec sbx_... -- \
+      python3 -c 'import os,urllib.request; print(urllib.request.urlopen(os.environ["VORA_BROKER_URL"]+"/creds/github/user").status)'
+200
+
+$ vora --api http://127.0.0.1:9300 --api-key "$VORA_API_KEY" logs sbx_... --egress
+2026-09-17T21:00:00Z  allowed alias=github api.github.com
+```
+
+Inside that sandbox, `env`, `/proc/self/environ`, and the filesystem contain no
+token and no alias secret — only the non-secret `VORA_BROKER_URL`.
+
 ## Repository layout
 
 ```text
@@ -157,6 +199,8 @@ make test-integration  # runner + sandbox lifecycle over a real socket (incl. Po
 make test-security     # isolation suite (bwrap; gVisor subtests skipped unprivileged)
 make test-security-all # isolation matrix against bwrap AND gVisor
 make test-network      # NetworkRestricted netns/DNAT test (rootlesskit)
+make test-broker       # credential-broker boundary + end-to-end test (rootlesskit)
+make test-dns          # gateway resolver test (rootlesskit)
 make bench-report      # benchmarks + report in docs/benchmarks/
 make help              # all targets
 ```
@@ -175,7 +219,8 @@ vora sandbox create --image vora/base --backend gvisor
 The runner exposes Prometheus metrics at `127.0.0.1:9101/metrics` and a health
 check at `/healthz` (override with `VORA_METRICS_ADDR`). Restricted egress is
 bounded by `VORA_EGRESS_MAX_CONNECTIONS` (default 128) and
-`VORA_EGRESS_IDLE_TIMEOUT` (default 5m).
+`VORA_EGRESS_IDLE_TIMEOUT` (default 5m); the broker listens on
+`VORA_EGRESS_BROKER_PORT` (default 8080).
 
 Configuration is via environment variables: `VORA_STATE_DIR`, `VORA_SOCKET`,
 `VORA_SYSTEMD_MODE` (`user`/`system`), `VORA_METRICS_ADDR`, `VORA_INIT_BINARY`,
@@ -192,6 +237,16 @@ vora sandbox create --image vora/python --network restricted \
   --allow-domain example.com --backend bwrap
 ```
 
+Brokered credentials (requires `--api`; see [ADR 013](docs/adr/013-credential-brokering.md)):
+
+```bash
+export VORA_MASTER_KEY="$(openssl rand -base64 48)"   # vora-api only
+vora --api https://api.example:9300 --api-key "$VORA_API_KEY" \
+  secrets set --alias github --host api.github.com --value-stdin < token.txt
+vora --api https://api.example:9300 --api-key "$VORA_API_KEY" sandbox create \
+  --image python --network restricted --allow-domain api.github.com --broker github
+```
+
 Control plane (remote HTTP API):
 
 ```bash
@@ -205,7 +260,10 @@ Control-plane configuration: `VORA_API_HTTP_ADDR`, `VORA_API_GRPC_ADDR`,
 `VORA_API_DSN` (PostgreSQL; omitted → in-memory), `VORA_API_BOOTSTRAP_KEY`
 (initial admin key), `VORA_API_JOIN_TOKEN` (runner registration), and on the
 runner `VORA_RUNNER_ADDR` (TCP gRPC), `VORA_RUNNER_ADVERTISE_ADDR`,
-`VORA_API_GRPC`, `VORA_API_JOIN_TOKEN`. TLS/mTLS is enabled per channel with
+`VORA_API_GRPC`, `VORA_API_JOIN_TOKEN`. Credential brokering is enabled by
+`VORA_MASTER_KEY` (≥32 bytes, `vora-api` only); brokered creates also require
+TLS on the API→runner channel unless `VORA_ALLOW_INSECURE_BROKER=1`. TLS/mTLS is
+enabled per channel with
 `VORA_API_HTTP_TLS_{CERT,KEY,CA}` (external HTTP/CLI),
 `VORA_API_REGISTRY_TLS_{CERT,KEY,CA}` (runner registry), and
 `VORA_RUNNER_TLS_{CERT,KEY,CA}` (API→runner). A server-side CA requires and
@@ -218,15 +276,23 @@ longer read.
   and unpacked into the rootless containerd `native` snapshotter and the
   snapshot rootfs is bound read-only; the Docker-export cache remains only as a
   fallback when containerd is unavailable.
-- **Egress is bwrap-only (documented limitation, not pending work).**
-  `NetworkRestricted` is enforced for the bubblewrap backend. gVisor supports
-  `NetworkNone` only: its host network mode escapes to the runner namespace, and
-  joining a prepared netns via the OCI spec makes netstack egress time out
-  (ADR 012). Closing this would need a userspace-netstack gateway, which is out
-  of scope for v0.x.
-- **No DNS through the gateway yet.** Only TCP is redirected, so restricted
-  sandboxes must resolve names themselves or use literal addresses. An
-  allowlist-only gateway resolver is the v0.4 work item (ADR 012).
+- **Egress, DNS, and brokering are bwrap-only (documented limitation, not
+  pending work).** `NetworkRestricted` is enforced for the bubblewrap backend.
+  gVisor supports `NetworkNone` only: its host network mode escapes to the
+  runner namespace, and joining a prepared netns via the OCI spec makes
+  netstack egress time out (ADR 012). Closing this would need a
+  userspace-netstack gateway, which is out of scope for v0.x.
+- **DNS is allowlist-only, and the resolver sees the names.** Restricted
+  sandboxes resolve through the gateway; only allowlisted names are answered,
+  but the runner does learn which of them were asked for.
+- **The brokered hop inside the netns is plaintext HTTP.** The credential is
+  attached by the gateway, so it still never enters the sandbox — but a workload
+  that logs its own broker responses sees whatever the API returned.
+- **Brokering is a broker route, not a transparent MITM.** Workloads must call
+  `$VORA_BROKER_URL/creds/<alias>/…`; unmodified `curl https://api.github.com`
+  is not rewritten, non-HTTP protocols are not brokered, and brokered creates
+  are refused unless the API-to-runner channel is encrypted (or the operator
+  sets `VORA_ALLOW_INSECURE_BROKER=1`).
 - **Non-TLS egress is denied.** The proxy only understands TLS SNI; plaintext
   HTTP and non-443 ports are blocked by default.
 - **No syscall filtering for bwrap.** seccomp is not applied; Bubblewrap
@@ -256,7 +322,7 @@ longer read.
 | v0.1 | Go runner, Bubblewrap backend, cgroups v2, in-sandbox exec agent, CLI, security suite, benchmarks |
 | v0.2 | gVisor backend (direct `runsc`, Method 2), backend selection, rootlesskit runner service, PostgreSQL/Supabase audit, dual-backend isolation matrix |
 | **v0.3** | containerd-snapshot rootfs (ADR 009), bwrap `NetworkRestricted` with filter+audit (ADR 012), `vora-api` with tenant isolation, split TLS, and failure-safe create (ADR 014) |
-| **v0.4 (in progress)** | **Credential brokering (ADR 013) and allowlist-only gateway DNS (ADR 012) — not implemented yet.** gVisor egress recorded as a documented limitation. **Deferred:** multi-runner scheduling, SDK/MCP, Ansible deployment, bwrap seccomp, disk quota, image signing |
+| **v0.4 (this)** | **Allowlist-only gateway DNS (ADR 012) and credential brokering (ADR 013) for restricted bwrap sandboxes.** gVisor egress recorded as a documented limitation. **Deferred:** multi-runner scheduling, SDK/MCP, Ansible deployment, bwrap seccomp, disk quota, image signing |
 | v1.0 | Firecracker microVM tier, snapshots/forks |
 
 ## License
