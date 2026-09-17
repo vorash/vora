@@ -21,6 +21,7 @@ import (
 
 	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/api"
+	"github.com/vorash/vora/internal/secret"
 	"github.com/vorash/vora/internal/tlsutil"
 	"github.com/vorash/vora/internal/version"
 )
@@ -44,7 +45,8 @@ func run() error {
 	defer stop()
 
 	var store api.Store = api.NewMemStore()
-	if dsn := os.Getenv("VORA_API_DSN"); dsn != "" {
+	dsn := os.Getenv("VORA_API_DSN")
+	if dsn != "" {
 		pg, err := api.OpenPostgres(ctx, dsn)
 		if err != nil {
 			return fmt.Errorf("api store: %w", err)
@@ -56,11 +58,37 @@ func run() error {
 		logger.Warn("VORA_API_DSN not set; using an in-memory store (keys and runners are not persisted)")
 	}
 
+	// Credential brokering is opt-in: without a master key the secret
+	// endpoints report that brokering is not configured instead of storing
+	// credentials under a weak key.
+	var secrets secret.Store
+	if masterKey := os.Getenv("VORA_MASTER_KEY"); masterKey != "" {
+		sealer, err := secret.NewSealer(masterKey)
+		if err != nil {
+			return fmt.Errorf("VORA_MASTER_KEY: %w", err)
+		}
+		if dsn != "" {
+			pgSecrets, err := secret.OpenPostgres(ctx, dsn, sealer)
+			if err != nil {
+				return fmt.Errorf("secret store: %w", err)
+			}
+			defer pgSecrets.Close()
+			secrets = pgSecrets
+			logger.Info("secret store: postgres")
+		} else {
+			secrets = secret.NewMemStore(sealer)
+			logger.Warn("VORA_MASTER_KEY set without VORA_API_DSN; secrets are in-memory and will not survive a restart")
+		}
+	} else {
+		logger.Warn("VORA_MASTER_KEY not set; credential brokering is disabled")
+	}
+
 	server := api.New(api.Options{
 		Store:        store,
 		Logger:       logger,
 		JoinToken:    os.Getenv("VORA_API_JOIN_TOKEN"),
 		BootstrapKey: os.Getenv("VORA_API_BOOTSTRAP_KEY"),
+		Secrets:      secrets,
 		RunnerTLS: tlsutil.Config{
 			CertFile: os.Getenv("VORA_RUNNER_TLS_CERT"),
 			KeyFile:  os.Getenv("VORA_RUNNER_TLS_KEY"),
@@ -118,6 +146,7 @@ func run() error {
 		"bootstrap_key", os.Getenv("VORA_API_BOOTSTRAP_KEY") != "",
 		"http_tls", httpTLS.Enabled(), "registry_tls", registryTLS.Enabled(),
 		"runner_mtls", os.Getenv("VORA_RUNNER_TLS_CA") != "",
+		"credential_brokering", secrets != nil,
 	)
 
 	errCh := make(chan error, 2)

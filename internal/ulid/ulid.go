@@ -17,6 +17,7 @@ const (
 	PrefixExec    = "exe"
 	PrefixAgent   = "agt"
 	PrefixAPIKey  = "key"
+	PrefixSecret  = "sec"
 )
 
 // entropy is monotonic so that identifiers created within the same millisecond
@@ -54,6 +55,9 @@ func NewAgent() string { return New(PrefixAgent) }
 // NewAPIKeyID returns a new API key identifier.
 func NewAPIKeyID() string { return New(PrefixAPIKey) }
 
+// NewSecretID returns a new brokered credential identifier.
+func NewSecretID() string { return New(PrefixSecret) }
+
 // Valid reports whether id is a well-formed prefixed ULID with one of the
 // known prefixes.
 func Valid(id string) bool {
@@ -62,7 +66,7 @@ func Valid(id string) bool {
 		return false
 	}
 	switch prefix {
-	case PrefixSandbox, PrefixRunner, PrefixExec, PrefixAgent, PrefixAPIKey:
+	case PrefixSandbox, PrefixRunner, PrefixExec, PrefixAgent, PrefixAPIKey, PrefixSecret:
 	default:
 		return false
 	}

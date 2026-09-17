@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -305,6 +306,60 @@ func (c *HTTPClient) ListKeys(ctx context.Context) ([]KeyInfo, error) {
 // RevokeKey revokes an API key.
 func (c *HTTPClient) RevokeKey(ctx context.Context, id string) error {
 	return c.doJSON(ctx, http.MethodDelete, "/v1/keys/"+id, nil, nil)
+}
+
+// SecretInfo is brokered-credential metadata as reported by vora-api. The
+// value is never returned by any endpoint.
+type SecretInfo struct {
+	ID        string    `json:"id"`
+	TenantID  string    `json:"tenant_id"`
+	Alias     string    `json:"alias"`
+	Host      string    `json:"host"`
+	Scheme    string    `json:"scheme"`
+	Header    string    `json:"header,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// CreateSecret stores a brokered credential. The value is write-only.
+func (c *HTTPClient) CreateSecret(ctx context.Context, alias, host, scheme, header, value, tenant string) (SecretInfo, error) {
+	req := map[string]any{
+		"alias": alias, "host": host, "scheme": scheme,
+		"header": header, "value": value, "tenant_id": tenant,
+	}
+	var out struct {
+		Secret SecretInfo `json:"secret"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/secrets", req, &out); err != nil {
+		return SecretInfo{}, err
+	}
+	return out.Secret, nil
+}
+
+// ListSecrets returns brokered-credential metadata (values are never returned).
+// A tenant may be named only by a global administrator.
+func (c *HTTPClient) ListSecrets(ctx context.Context, tenant string) ([]SecretInfo, error) {
+	var out struct {
+		Secrets []SecretInfo `json:"secrets"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, tenantPath("/v1/secrets", tenant), nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Secrets, nil
+}
+
+// DeleteSecret removes a brokered credential by alias. A tenant may be named
+// only by a global administrator.
+func (c *HTTPClient) DeleteSecret(ctx context.Context, alias, tenant string) error {
+	return c.doJSON(ctx, http.MethodDelete, tenantPath("/v1/secrets/"+alias, tenant), nil, nil)
+}
+
+// tenantPath appends a tenant selector when one is given.
+func tenantPath(path, tenant string) string {
+	if tenant == "" {
+		return path
+	}
+	return path + "?tenant_id=" + url.QueryEscape(tenant)
 }
 
 func (c *HTTPClient) doJSON(ctx context.Context, method, path string, body, out any) error {

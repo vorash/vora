@@ -50,6 +50,7 @@ func Execute() int {
 		a.statsCmd(),
 		a.runnersCmd(),
 		a.keysCmd(),
+		a.secretsCmd(),
 		a.versionCmd(),
 	)
 

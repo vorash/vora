@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -11,6 +13,9 @@ import (
 
 	"github.com/vorash/vora/internal/client"
 )
+
+// secretMaxValue matches the control plane's accepted credential size.
+const secretMaxValue = 16 << 10
 
 // apiClient returns a remote client, or an error if --api is not set.
 func (a *app) apiClient() (*client.HTTPClient, error) {
@@ -59,6 +64,132 @@ func (a *app) keysCmd() *cobra.Command {
 		Short: "Manage vora-api keys (requires --api)",
 	}
 	cmd.AddCommand(a.keysCreateCmd(), a.keysListCmd(), a.keysRevokeCmd())
+	return cmd
+}
+
+func (a *app) secretsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "secrets",
+		Short: "Manage brokered credentials for restricted sandboxes (requires --api)",
+	}
+	cmd.AddCommand(a.secretsSetCmd(), a.secretsListCmd(), a.secretsRmCmd())
+	return cmd
+}
+
+func (a *app) secretsSetCmd() *cobra.Command {
+	var (
+		alias, host, scheme, header, value, tenant string
+		stdin                                      bool
+	)
+	cmd := &cobra.Command{
+		Use:   "set",
+		Short: "Store a credential under an alias (the value is never shown again)",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if stdin {
+				if value != "" {
+					return fmt.Errorf("--value and --value-stdin are mutually exclusive")
+				}
+				data, err := io.ReadAll(io.LimitReader(os.Stdin, secretMaxValue+1))
+				if err != nil {
+					return err
+				}
+				if len(data) > secretMaxValue {
+					return fmt.Errorf("stdin value exceeds %d bytes", secretMaxValue)
+				}
+				value = strings.TrimRight(string(data), "\r\n")
+			}
+			if value == "" {
+				return fmt.Errorf("provide --value or --value-stdin")
+			}
+			c, err := a.apiClient()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			stored, err := c.CreateSecret(ctx, alias, host, scheme, header, value, tenant)
+			if err != nil {
+				return err
+			}
+			if a.json {
+				return a.jsonOutAny(map[string]any{"secret": stored})
+			}
+			fmt.Printf("secret %s bound to %s (%s)\n", stored.Alias, stored.Host, stored.Scheme)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&alias, "alias", "", "alias the sandbox uses in the broker route (required)")
+	cmd.Flags().StringVar(&host, "host", "", "upstream host the credential is bound to (required)")
+	cmd.Flags().StringVar(&scheme, "scheme", "bearer", "attachment scheme: bearer or header")
+	cmd.Flags().StringVar(&header, "header", "", "header name for --scheme header")
+	cmd.Flags().StringVar(&value, "value", "", "credential value (visible in shell history; prefer --value-stdin)")
+	cmd.Flags().BoolVar(&stdin, "value-stdin", false, "read the credential value from stdin")
+	cmd.Flags().StringVar(&tenant, "tenant", "", "tenant id (global administrators only)")
+	_ = cmd.MarkFlagRequired("alias")
+	_ = cmd.MarkFlagRequired("host")
+	return cmd
+}
+
+func (a *app) secretsListCmd() *cobra.Command {
+	var tenant string
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List credential metadata (values are never returned)",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			c, err := a.apiClient()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			secrets, err := c.ListSecrets(ctx, tenant)
+			if err != nil {
+				return err
+			}
+			if a.json {
+				return a.jsonOutAny(map[string]any{"secrets": secrets})
+			}
+			if len(secrets) == 0 {
+				fmt.Println("no secrets")
+				return nil
+			}
+			fmt.Printf("%-16s %-28s %-8s %s\n", "ALIAS", "HOST", "SCHEME", "UPDATED")
+			for _, s := range secrets {
+				fmt.Printf("%-16s %-28s %-8s %s\n", s.Alias, s.Host, s.Scheme, s.UpdatedAt.Format(time.RFC3339))
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&tenant, "tenant", "", "tenant id (global administrators only)")
+	return cmd
+}
+
+func (a *app) secretsRmCmd() *cobra.Command {
+	var tenant string
+	cmd := &cobra.Command{
+		Use:   "rm <alias>",
+		Short: "Delete a stored credential",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			c, err := a.apiClient()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := c.DeleteSecret(ctx, args[0], tenant); err != nil {
+				return err
+			}
+			fmt.Printf("Removed %s\n", args[0])
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&tenant, "tenant", "", "tenant id (global administrators only)")
 	return cmd
 }
 

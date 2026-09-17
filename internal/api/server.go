@@ -21,6 +21,7 @@ import (
 
 	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/client"
+	"github.com/vorash/vora/internal/secret"
 	"github.com/vorash/vora/internal/tlsutil"
 	"github.com/vorash/vora/internal/ulid"
 )
@@ -56,6 +57,9 @@ type Options struct {
 	JoinToken string
 	// RunnerTLS enables TLS (mTLS when a CA is set) when dialing runners.
 	RunnerTLS tlsutil.Config
+	// Secrets holds brokered credentials. When nil, the secret endpoints
+	// report that credential brokering is not configured.
+	Secrets secret.Store
 	// BootstrapKey, when set, is accepted as an admin API key.
 	BootstrapKey string
 	Now          func() time.Time
@@ -192,6 +196,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/keys", s.auth(ScopeAdmin, s.createKey))
 	mux.HandleFunc("GET /v1/keys", s.auth(ScopeAdmin, s.listKeys))
 	mux.HandleFunc("DELETE /v1/keys/{id}", s.auth(ScopeAdmin, s.revokeKey))
+	mux.HandleFunc("POST /v1/secrets", s.auth(ScopeAdmin, s.createSecret))
+	mux.HandleFunc("GET /v1/secrets", s.auth(ScopeAdmin, s.listSecrets))
+	mux.HandleFunc("DELETE /v1/secrets/{alias}", s.auth(ScopeAdmin, s.deleteSecret))
 	return mux
 }
 
