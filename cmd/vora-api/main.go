@@ -16,9 +16,11 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/api"
+	"github.com/vorash/vora/internal/tlsutil"
 	"github.com/vorash/vora/internal/version"
 )
 
@@ -58,6 +60,11 @@ func run() error {
 		Logger:       logger,
 		JoinToken:    os.Getenv("VORA_API_JOIN_TOKEN"),
 		BootstrapKey: os.Getenv("VORA_API_BOOTSTRAP_KEY"),
+		RunnerTLS: tlsutil.Config{
+			CertFile: os.Getenv("VORA_RUNNER_TLS_CERT"),
+			KeyFile:  os.Getenv("VORA_RUNNER_TLS_KEY"),
+			CAFile:   os.Getenv("VORA_RUNNER_TLS_CA"),
+		},
 	})
 	defer server.Close()
 
@@ -73,13 +80,28 @@ func run() error {
 	defer grpcLn.Close()
 
 	httpSrv := &http.Server{Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second}
-	grpcSrv := grpc.NewServer()
+
+	apiTLS := tlsutil.Config{
+		CertFile: os.Getenv("VORA_API_TLS_CERT"),
+		KeyFile:  os.Getenv("VORA_API_TLS_KEY"),
+		CAFile:   os.Getenv("VORA_API_TLS_CA"),
+	}
+	var grpcOpts []grpc.ServerOption
+	if apiTLS.Enabled() {
+		cfg, err := apiTLS.Server()
+		if err != nil {
+			return fmt.Errorf("api tls: %w", err)
+		}
+		grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(cfg)))
+	}
+	grpcSrv := grpc.NewServer(grpcOpts...)
 	v1.RegisterRunnerRegistryServer(grpcSrv, server)
 
 	logger.Info("vora-api listening",
 		"version", version.String(), "http", *httpFlag, "grpc", *grpcFlag,
 		"join_token", os.Getenv("VORA_API_JOIN_TOKEN") != "",
 		"bootstrap_key", os.Getenv("VORA_API_BOOTSTRAP_KEY") != "",
+		"tls", apiTLS.Enabled(), "runner_mtls", os.Getenv("VORA_RUNNER_TLS_CA") != "",
 	)
 
 	errCh := make(chan error, 2)

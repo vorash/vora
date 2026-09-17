@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/audit/postgres"
@@ -29,6 +30,7 @@ import (
 	"github.com/vorash/vora/internal/runtime/gvisor"
 	"github.com/vorash/vora/internal/sandbox"
 	"github.com/vorash/vora/internal/telemetry"
+	"github.com/vorash/vora/internal/tlsutil"
 	"github.com/vorash/vora/internal/ulid"
 	"github.com/vorash/vora/internal/version"
 )
@@ -101,10 +103,23 @@ func run() error {
 			return fmt.Errorf("listen tcp %s: %w", addr, err)
 		}
 		defer tcpLn.Close()
-		tcpServer = grpc.NewServer()
+		runnerTLS := tlsutil.Config{
+			CertFile: os.Getenv("VORA_RUNNER_TLS_CERT"),
+			KeyFile:  os.Getenv("VORA_RUNNER_TLS_KEY"),
+			CAFile:   os.Getenv("VORA_RUNNER_TLS_CA"),
+		}
+		var tcpOpts []grpc.ServerOption
+		if runnerTLS.Enabled() {
+			cfg, err := runnerTLS.Server()
+			if err != nil {
+				return fmt.Errorf("runner tls: %w", err)
+			}
+			tcpOpts = append(tcpOpts, grpc.Creds(credentials.NewTLS(cfg)))
+		}
+		tcpServer = grpc.NewServer(tcpOpts...)
 		v1.RegisterRunnerServiceServer(tcpServer, server)
 		go func() { _ = tcpServer.Serve(tcpLn) }()
-		logger.Info("runner gRPC listening", "addr", addr)
+		logger.Info("runner gRPC listening", "addr", addr, "tls", runnerTLS.Enabled())
 	}
 	defer func() {
 		if tcpServer != nil {
@@ -126,7 +141,20 @@ func run() error {
 	// Register with vora-api and heartbeat, when configured. The runner dials
 	// out, so it can sit behind NAT.
 	if apiAddr := os.Getenv("VORA_API_GRPC"); apiAddr != "" {
-		rc, err := runregistry.Dial(apiAddr, os.Getenv("VORA_API_JOIN_TOKEN"))
+		apiTLS := tlsutil.Config{
+			CertFile: os.Getenv("VORA_API_TLS_CERT"),
+			KeyFile:  os.Getenv("VORA_API_TLS_KEY"),
+			CAFile:   os.Getenv("VORA_API_TLS_CA"),
+		}
+		var dialOpts []grpc.DialOption
+		if apiTLS.Enabled() {
+			cfg, err := apiTLS.Client()
+			if err != nil {
+				return fmt.Errorf("api client tls: %w", err)
+			}
+			dialOpts = append(dialOpts, grpc.WithTransportCredentials(credentials.NewTLS(cfg)))
+		}
+		rc, err := runregistry.Dial(apiAddr, os.Getenv("VORA_API_JOIN_TOKEN"), dialOpts...)
 		if err != nil {
 			logger.Warn("runner registry: dial failed", "error", err)
 		} else {

@@ -3,9 +3,11 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
@@ -31,6 +33,15 @@ func Dial(socket string) (*Client, error) {
 func DialAddress(addr string) (*Client, error) {
 	conn, err := grpc.NewClient(addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, fmt.Errorf("client: dial %s: %w", addr, err)
+	}
+	return &Client{conn: conn, stub: v1.NewRunnerServiceClient(conn)}, nil
+}
+
+// DialAddressTLS connects to a runner's TCP gRPC endpoint over TLS.
+func DialAddressTLS(addr string, cfg *tls.Config) (*Client, error) {
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(credentials.NewTLS(cfg)))
 	if err != nil {
 		return nil, fmt.Errorf("client: dial %s: %w", addr, err)
 	}

@@ -20,6 +20,7 @@ import (
 
 	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/client"
+	"github.com/vorash/vora/internal/tlsutil"
 	"github.com/vorash/vora/internal/ulid"
 )
 
@@ -49,6 +50,8 @@ type Options struct {
 	RunnerTTL         time.Duration
 	// JoinToken, when set, must be presented by runners when registering.
 	JoinToken string
+	// RunnerTLS enables TLS (mTLS when a CA is set) when dialing runners.
+	RunnerTLS tlsutil.Config
 	// BootstrapKey, when set, is accepted as an admin API key.
 	BootstrapKey string
 	Now          func() time.Time
@@ -73,7 +76,18 @@ func New(opts Options) *Server {
 		opts.Store = NewMemStore()
 	}
 	if opts.DialRunner == nil {
-		opts.DialRunner = func(addr string) (RunnerClient, error) { return client.DialAddress(addr) }
+		if opts.RunnerTLS.Enabled() {
+			rt := opts.RunnerTLS
+			opts.DialRunner = func(addr string) (RunnerClient, error) {
+				cfg, err := rt.Client()
+				if err != nil {
+					return nil, err
+				}
+				return client.DialAddressTLS(addr, cfg)
+			}
+		} else {
+			opts.DialRunner = func(addr string) (RunnerClient, error) { return client.DialAddress(addr) }
+		}
 	}
 	if opts.HeartbeatInterval <= 0 {
 		opts.HeartbeatInterval = 10 * time.Second

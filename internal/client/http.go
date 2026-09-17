@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
+	"github.com/vorash/vora/internal/tlsutil"
 )
 
 // HTTPClient talks to vora-api over HTTP/JSON with a bearer API key.
@@ -26,14 +28,28 @@ type HTTPClient struct {
 }
 
 // DialAPI returns a client for a vora-api base URL (e.g. http://host:9300).
+// TLS material for an HTTPS API is read from VORA_API_TLS_{CA,CERT,KEY}.
 func DialAPI(baseURL, apiKey string) (*HTTPClient, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, fmt.Errorf("client: empty API URL")
 	}
+	hc := &http.Client{Timeout: 5 * time.Minute}
+	tlsCfg := tlsutil.Config{
+		CertFile: os.Getenv("VORA_API_TLS_CERT"),
+		KeyFile:  os.Getenv("VORA_API_TLS_KEY"),
+		CAFile:   os.Getenv("VORA_API_TLS_CA"),
+	}
+	if tlsCfg.Enabled() {
+		cfg, err := tlsCfg.Client()
+		if err != nil {
+			return nil, err
+		}
+		hc.Transport = &http.Transport{TLSClientConfig: cfg}
+	}
 	return &HTTPClient{
 		base: strings.TrimSuffix(baseURL, "/"),
 		key:  apiKey,
-		hc:   &http.Client{Timeout: 5 * time.Minute},
+		hc:   hc,
 	}, nil
 }
 

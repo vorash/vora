@@ -23,9 +23,13 @@ type Client struct {
 }
 
 // Dial connects to vora-api's gRPC endpoint. joinToken, when set, is sent as a
-// bearer token on every call.
-func Dial(addr, joinToken string) (*Client, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+// bearer token on every call. Dial options set the transport credentials;
+// without any, the connection is plaintext.
+func Dial(addr, joinToken string, opts ...grpc.DialOption) (*Client, error) {
+	if len(opts) == 0 {
+		opts = []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	}
+	conn, err := grpc.NewClient(addr, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("registry: dial %s: %w", addr, err)
 	}
