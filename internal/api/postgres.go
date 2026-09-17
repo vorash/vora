@@ -39,8 +39,11 @@ create table if not exists runners (
 create table if not exists sandbox_routes (
   sandbox_id text primary key,
   runner_id  text not null,
+  tenant_id  text not null default '',
   created_at timestamptz not null default now()
 );
+alter table sandbox_routes add column if not exists tenant_id text not null default '';
+create index if not exists sandbox_routes_tenant_idx on sandbox_routes (tenant_id);
 `
 
 // PostgresStore is a persistent Store backed by PostgreSQL/Supabase.
@@ -96,6 +99,18 @@ func (s *PostgresStore) ListKeys(ctx context.Context, tenant string) ([]APIKey, 
 		out = append(out, k)
 	}
 	return out, rows.Err()
+}
+
+func (s *PostgresStore) Key(ctx context.Context, id string) (APIKey, error) {
+	var k APIKey
+	err := s.pool.QueryRow(ctx,
+		`select id, name, tenant_id, scopes, created_at, coalesce(last_used, 'epoch'::timestamptz), revoked
+		   from api_keys where id = $1`, id).
+		Scan(&k.ID, &k.Name, &k.TenantID, &k.Scopes, &k.CreatedAt, &k.LastUsed, &k.Revoked)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return APIKey{}, ErrNotFound
+	}
+	return k, err
 }
 
 func (s *PostgresStore) KeyByHash(ctx context.Context, hash string) (APIKey, error) {
@@ -176,21 +191,22 @@ func (s *PostgresStore) Runner(ctx context.Context, id string) (Runner, error) {
 	return r, err
 }
 
-func (s *PostgresStore) SetRoute(ctx context.Context, sandboxID, runnerID string) error {
+func (s *PostgresStore) SetRoute(ctx context.Context, route SandboxRoute) error {
 	_, err := s.pool.Exec(ctx,
-		`insert into sandbox_routes (sandbox_id, runner_id) values ($1,$2)
-		 on conflict (sandbox_id) do update set runner_id = excluded.runner_id`,
-		sandboxID, runnerID)
+		`insert into sandbox_routes (sandbox_id, runner_id, tenant_id) values ($1,$2,$3)
+		 on conflict (sandbox_id) do update set runner_id = excluded.runner_id, tenant_id = excluded.tenant_id`,
+		route.SandboxID, route.RunnerID, route.TenantID)
 	return err
 }
 
-func (s *PostgresStore) Route(ctx context.Context, sandboxID string) (string, error) {
-	var runnerID string
-	err := s.pool.QueryRow(ctx, `select runner_id from sandbox_routes where sandbox_id = $1`, sandboxID).Scan(&runnerID)
+func (s *PostgresStore) Route(ctx context.Context, sandboxID string) (SandboxRoute, error) {
+	route := SandboxRoute{SandboxID: sandboxID}
+	err := s.pool.QueryRow(ctx, `select runner_id, tenant_id from sandbox_routes where sandbox_id = $1`, sandboxID).
+		Scan(&route.RunnerID, &route.TenantID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrNotFound
+		return SandboxRoute{}, ErrNotFound
 	}
-	return runnerID, err
+	return route, err
 }
 
 func (s *PostgresStore) DeleteRoute(ctx context.Context, sandboxID string) error {

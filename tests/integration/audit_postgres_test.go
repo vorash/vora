@@ -97,6 +97,28 @@ func TestPostgresAuditStore(t *testing.T) {
 		t.Fatalf("exec record = %+v", execs[0])
 	}
 
+	allowed := sandbox.EgressRecord{
+		SandboxID: sandboxID, Host: "example.com", Remote: "93.184.216.34:443",
+		Allowed: true, Timestamp: now,
+	}
+	denied := sandbox.EgressRecord{
+		SandboxID: sandboxID, Host: "evil.test", Allowed: false,
+		Reason: "domain_not_allowed", Timestamp: now.Add(time.Millisecond),
+	}
+	if err := store.AppendEgress(ctx, sandboxID, allowed); err != nil {
+		t.Fatalf("append allowed egress: %v", err)
+	}
+	if err := store.AppendEgress(ctx, sandboxID, denied); err != nil {
+		t.Fatalf("append denied egress: %v", err)
+	}
+	egress, err := store.Egress(ctx, sandboxID)
+	if err != nil {
+		t.Fatalf("egress: %v", err)
+	}
+	if len(egress) != 2 || !egress[0].Allowed || egress[1].Reason != "domain_not_allowed" {
+		t.Fatalf("egress = %+v", egress)
+	}
+
 	// A different sandbox's records are isolated.
 	other, err := store.Execs(ctx, "sbx_other")
 	if err != nil {

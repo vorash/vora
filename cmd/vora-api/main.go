@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -81,16 +82,30 @@ func run() error {
 
 	httpSrv := &http.Server{Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second}
 
-	apiTLS := tlsutil.Config{
-		CertFile: os.Getenv("VORA_API_TLS_CERT"),
-		KeyFile:  os.Getenv("VORA_API_TLS_KEY"),
-		CAFile:   os.Getenv("VORA_API_TLS_CA"),
+	httpTLS := tlsutil.Config{
+		CertFile: os.Getenv("VORA_API_HTTP_TLS_CERT"),
+		KeyFile:  os.Getenv("VORA_API_HTTP_TLS_KEY"),
+		CAFile:   os.Getenv("VORA_API_HTTP_TLS_CA"),
 	}
-	var grpcOpts []grpc.ServerOption
-	if apiTLS.Enabled() {
-		cfg, err := apiTLS.Server()
+	registryTLS := tlsutil.Config{
+		CertFile: os.Getenv("VORA_API_REGISTRY_TLS_CERT"),
+		KeyFile:  os.Getenv("VORA_API_REGISTRY_TLS_KEY"),
+		CAFile:   os.Getenv("VORA_API_REGISTRY_TLS_CA"),
+	}
+	httpServeLn := net.Listener(httpLn)
+	if httpTLS.Enabled() {
+		cfg, err := httpTLS.Server()
 		if err != nil {
-			return fmt.Errorf("api tls: %w", err)
+			return fmt.Errorf("http tls: %w", err)
+		}
+		httpServeLn = tls.NewListener(httpLn, cfg)
+	}
+
+	var grpcOpts []grpc.ServerOption
+	if registryTLS.Enabled() {
+		cfg, err := registryTLS.Server()
+		if err != nil {
+			return fmt.Errorf("registry tls: %w", err)
 		}
 		grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(cfg)))
 	}
@@ -101,12 +116,13 @@ func run() error {
 		"version", version.String(), "http", *httpFlag, "grpc", *grpcFlag,
 		"join_token", os.Getenv("VORA_API_JOIN_TOKEN") != "",
 		"bootstrap_key", os.Getenv("VORA_API_BOOTSTRAP_KEY") != "",
-		"tls", apiTLS.Enabled(), "runner_mtls", os.Getenv("VORA_RUNNER_TLS_CA") != "",
+		"http_tls", httpTLS.Enabled(), "registry_tls", registryTLS.Enabled(),
+		"runner_mtls", os.Getenv("VORA_RUNNER_TLS_CA") != "",
 	)
 
 	errCh := make(chan error, 2)
 	go func() {
-		if err := httpSrv.Serve(httpLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := httpSrv.Serve(httpServeLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- fmt.Errorf("http serve: %w", err)
 		}
 	}()

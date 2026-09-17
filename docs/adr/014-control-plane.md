@@ -36,10 +36,18 @@ Add a separate **`vora-api`** process (`cmd/vora-api`):
   `VORA_API_JOIN_TOKEN`, `VORA_RUNNER_ADVERTISE_ADDR`).
 - **CLI:** `--api`/`--api-key` switch the client from the local socket to the
   HTTP API; `vora runners` and `vora keys` manage the control plane.
-- **TLS/mTLS:** both channels take optional certificate files — `VORA_API_TLS_*`
-  (API server + runner client) and `VORA_RUNNER_TLS_*` (runner server + API
-  client). When a CA is set on the server side, client certificates are
-  required and verified. An empty config keeps plaintext for local development.
+- **TLS/mTLS:** three independent channels, no aliases for the retired
+  `VORA_API_TLS_*` variables:
+  - `VORA_API_HTTP_TLS_{CERT,KEY,CA}` — external HTTP API and CLI client;
+  - `VORA_API_REGISTRY_TLS_{CERT,KEY,CA}` — registry gRPC server and runner client;
+  - `VORA_RUNNER_TLS_{CERT,KEY,CA}` — runner TCP gRPC server and API client.
+  When a CA is set on the server side, client certificates are required and
+  verified. An empty config keeps plaintext for local development.
+- **Tenancy:** tenant-scoped keys may only access sandboxes and keys in their
+  own tenant. Routes store `sandbox_id`, `runner_id`, and `tenant_id`; empty
+  tenant IDs are global-admin-only. Non-admin keys cannot be created without a
+  `tenant_id`. Runner inventory requires a global administrator (`admin` scope
+  and empty tenant).
 
 ## Consequences
 
@@ -47,10 +55,13 @@ Add a separate **`vora-api`** process (`cmd/vora-api`):
   runner Unix socket.
 - One `runtime.RunnerService` implementation is reused for both transports; the
   CLI shares one `client.API` interface across the gRPC and HTTP clients.
-- **Runner ↔ API and API → runner channels support TLS/mTLS** from certificate
-  files (`VORA_API_TLS_*`, `VORA_RUNNER_TLS_*`). TLS is **off by default**
-  (plaintext), so run the API and runners on a private network unless
-  configured. The join token still gates registration.
+- **HTTP, registry, and API → runner channels support TLS/mTLS** from the
+  channel-specific files above. TLS is **off by default** (plaintext), so run
+  the API and runners on a private network unless configured. The join token
+  still gates registration. `VORA_API_TLS_*` is a breaking removal.
+- Sandbox create is compensating: start or route-persistence failure destroys
+  the runner sandbox on a detached timeout so request cancellation cannot leave
+  an unrouteable workload.
 - **API → runner requires the runner's gRPC address to be reachable.** This is
   NAT-friendly for registration but not for command delivery; a reverse tunnel
   (runner-initiated command stream) is a follow-up for the fully-hosted case.

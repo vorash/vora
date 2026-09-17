@@ -1,6 +1,9 @@
 package network
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 func TestSubnetFor(t *testing.T) {
 	cases := []struct {
@@ -22,9 +25,25 @@ func TestSubnetFor(t *testing.T) {
 	}
 }
 
-func TestNftRulesetRedirectsToGateway(t *testing.T) {
+func TestHolderAliveRejectsCurrentProcess(t *testing.T) {
+	if holderAlive(os.Getpid()) {
+		t.Fatal("current test process should not look like a netns holder")
+	}
+	if holderAlive(0) || holderAlive(-1) {
+		t.Fatal("invalid pids must not look alive")
+	}
+}
+
+func TestNftRulesetRedirectsOnlyTCPToGatewayProxy(t *testing.T) {
 	rules := nftRuleset("10.7.0.1", "8443")
-	for _, want := range []string{"table ip vora", "hook output", "dnat to 10.7.0.1:8443", "ip daddr != 10.7.0.1"} {
+	for _, want := range []string{
+		"table ip vora_nat",
+		"oifname != \"lo\" ip daddr != 10.7.0.1 meta l4proto tcp dnat to 10.7.0.1:8443",
+		"table inet vora_filter",
+		"type filter hook output priority 0; policy drop",
+		"oifname \"lo\" accept",
+		"ip daddr 10.7.0.1 meta l4proto tcp th dport 8443 accept",
+	} {
 		if !contains(rules, want) {
 			t.Errorf("ruleset missing %q:\n%s", want, rules)
 		}

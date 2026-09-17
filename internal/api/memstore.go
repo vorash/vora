@@ -16,7 +16,7 @@ type MemStore struct {
 	mu      sync.RWMutex
 	keys    map[string]APIKey
 	runners map[string]Runner
-	routes  map[string]string
+	routes  map[string]SandboxRoute
 }
 
 // NewMemStore returns an empty in-memory store.
@@ -24,7 +24,7 @@ func NewMemStore() *MemStore {
 	return &MemStore{
 		keys:    map[string]APIKey{},
 		runners: map[string]Runner{},
-		routes:  map[string]string{},
+		routes:  map[string]SandboxRoute{},
 	}
 }
 
@@ -48,6 +48,17 @@ func (m *MemStore) ListKeys(_ context.Context, tenant string) ([]APIKey, error) 
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	return out, nil
+}
+
+func (m *MemStore) Key(_ context.Context, id string) (APIKey, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	key, ok := m.keys[id]
+	if !ok {
+		return APIKey{}, ErrNotFound
+	}
+	key.KeyHash = ""
+	return key, nil
 }
 
 func (m *MemStore) KeyByHash(_ context.Context, hash string) (APIKey, error) {
@@ -118,21 +129,21 @@ func (m *MemStore) Runner(_ context.Context, id string) (Runner, error) {
 	return r, nil
 }
 
-func (m *MemStore) SetRoute(_ context.Context, sandboxID, runnerID string) error {
+func (m *MemStore) SetRoute(_ context.Context, route SandboxRoute) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.routes[sandboxID] = runnerID
+	m.routes[route.SandboxID] = route
 	return nil
 }
 
-func (m *MemStore) Route(_ context.Context, sandboxID string) (string, error) {
+func (m *MemStore) Route(_ context.Context, sandboxID string) (SandboxRoute, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	id, ok := m.routes[sandboxID]
+	route, ok := m.routes[sandboxID]
 	if !ok {
-		return "", ErrNotFound
+		return SandboxRoute{}, ErrNotFound
 	}
-	return id, nil
+	return route, nil
 }
 
 func (m *MemStore) DeleteRoute(_ context.Context, sandboxID string) error {

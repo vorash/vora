@@ -52,10 +52,19 @@ func (r Runner) Healthy(now time.Time, ttl time.Duration) bool {
 	return !r.LastHeartbeat.IsZero() && now.Sub(r.LastHeartbeat) <= ttl
 }
 
+// SandboxRoute records which runner owns a sandbox and which tenant may
+// access it. An empty TenantID is reserved for global-admin-owned sandboxes.
+type SandboxRoute struct {
+	SandboxID string `json:"sandbox_id"`
+	RunnerID  string `json:"runner_id"`
+	TenantID  string `json:"tenant_id"`
+}
+
 // Store persists control-plane state.
 type Store interface {
 	CreateKey(ctx context.Context, key APIKey) error
 	ListKeys(ctx context.Context, tenant string) ([]APIKey, error)
+	Key(ctx context.Context, id string) (APIKey, error)
 	KeyByHash(ctx context.Context, hash string) (APIKey, error)
 	RevokeKey(ctx context.Context, id string) error
 	TouchKey(ctx context.Context, id string, at time.Time) error
@@ -64,8 +73,8 @@ type Store interface {
 	ListRunners(ctx context.Context) ([]Runner, error)
 	Runner(ctx context.Context, id string) (Runner, error)
 
-	SetRoute(ctx context.Context, sandboxID, runnerID string) error
-	Route(ctx context.Context, sandboxID string) (string, error)
+	SetRoute(ctx context.Context, route SandboxRoute) error
+	Route(ctx context.Context, sandboxID string) (SandboxRoute, error)
 	DeleteRoute(ctx context.Context, sandboxID string) error
 
 	Close() error

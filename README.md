@@ -9,10 +9,11 @@ execution audit trail.
 Built with Go, Bubblewrap, Linux namespaces, cgroups v2 (via systemd), gRPC,
 and Prometheus.
 
-> **Status: v0.2 proof of concept.** Two isolation backends (Bubblewrap and
-> gVisor) are functional and covered by a shared isolation test suite. It is
-> **not** production-ready and has not been independently audited. See
-> [Roadmap](#roadmap) and [Limitations](#limitations-honest).
+> **Status: v0.3 proof of concept.** Two isolation backends (Bubblewrap and
+> gVisor), restricted bwrap egress, and a `vora-api` control plane are
+> functional and covered by tests. It is **not** production-ready and has not
+> been independently audited. See [Roadmap](#roadmap) and
+> [Limitations](#limitations-honest).
 
 ## What works today
 
@@ -26,20 +27,24 @@ and Prometheus.
 - A long-lived **in-sandbox agent** (`vora-init`, PID 1) for the bwrap backend;
   gVisor uses native `runsc exec`.
 - **Default-deny networking**. `NetworkNone` (default) gives a sandbox no
-  interfaces or routes. **`NetworkRestricted`** (bwrap) forces all TCP egress
-  through an SNI-inspecting passthrough proxy with a per-sandbox domain
-  allowlist; non-TLS and private/metadata destinations are denied and each
-  decision is logged and metered. See [ADR 012](docs/adr/012-egress-gateway.md).
+  interfaces or routes. **`NetworkRestricted`** (bwrap) DNATs non-loopback TCP
+  through an SNI-inspecting passthrough proxy and **drops every other packet**
+  (including UDP and direct gateway services). Allowed and denied decisions are
+  persisted, metered, and fail closed if an allow cannot be audited. See
+  [ADR 012](docs/adr/012-egress-gateway.md).
 - State persistence, a **TTL reaper**, and startup **reconciliation** (incl.
   reaping orphaned `runsc` containers and systemd units).
 - **Audit trail** behind a `Store` interface: local JSONL, or **PostgreSQL /
-  Supabase** (`VORA_AUDIT_DSN`), with lifecycle events and per-execution records.
+  Supabase** (`VORA_AUDIT_DSN`), with lifecycle events, per-execution records,
+  and restricted-network decisions (`vora logs --egress`).
 - **Prometheus metrics** at `127.0.0.1:9101/metrics`.
 - A dual-backend **isolation security suite** and a **benchmark harness**.
 - A **control plane** (`vora-api`, [ADR 014](docs/adr/014-control-plane.md)):
-  HTTP/JSON API with hashed, scoped **API keys**, and a gRPC runner registry
-  that runners **dial out** to (`Register`/`Heartbeat`, join token). The CLI
-  drives either the local socket or, with `--api`, the control plane.
+  HTTP/JSON API with hashed, scoped **API keys**, **strict tenant isolation**,
+  and a gRPC runner registry that runners **dial out** to (`Register`/`Heartbeat`,
+  join token). Tenant keys can only access their own sandboxes and keys; runner
+  inventory requires a global administrator. The CLI drives either the local
+  socket or, with `--api`, the control plane.
 
 ## Architecture
 
@@ -129,7 +134,7 @@ Destroyed sbx_01M2NVHE1KRD8JT3D6QG6R0EW3
 
 ```text
 api/proto/v1/   protobuf contracts (runner + in-sandbox agent)
-cmd/            vora (CLI), vora-runner (daemon), vora-init (sandbox agent)
+cmd/            vora (CLI), vora-runner (daemon), vora-init (sandbox agent), vora-api
 internal/       runtime, cgroup, images, workspace, sandbox, runner, cli, telemetry
 docs/           architecture docs, ADRs and benchmark reports
 tests/          integration, security and benchmark suites
@@ -168,7 +173,9 @@ vora sandbox create --image vora/base --backend gvisor
 ```
 
 The runner exposes Prometheus metrics at `127.0.0.1:9101/metrics` and a health
-check at `/healthz` (override with `VORA_METRICS_ADDR`).
+check at `/healthz` (override with `VORA_METRICS_ADDR`). Restricted egress is
+bounded by `VORA_EGRESS_MAX_CONNECTIONS` (default 128) and
+`VORA_EGRESS_IDLE_TIMEOUT` (default 5m).
 
 Configuration is via environment variables: `VORA_STATE_DIR`, `VORA_SOCKET`,
 `VORA_SYSTEMD_MODE` (`user`/`system`), `VORA_METRICS_ADDR`, `VORA_INIT_BINARY`,
@@ -199,8 +206,11 @@ Control-plane configuration: `VORA_API_HTTP_ADDR`, `VORA_API_GRPC_ADDR`,
 (initial admin key), `VORA_API_JOIN_TOKEN` (runner registration), and on the
 runner `VORA_RUNNER_ADDR` (TCP gRPC), `VORA_RUNNER_ADVERTISE_ADDR`,
 `VORA_API_GRPC`, `VORA_API_JOIN_TOKEN`. TLS/mTLS is enabled per channel with
-`VORA_API_TLS_{CERT,KEY,CA}` and `VORA_RUNNER_TLS_{CERT,KEY,CA}` (a server-side
-CA requires and verifies client certificates); unset means plaintext.
+`VORA_API_HTTP_TLS_{CERT,KEY,CA}` (external HTTP/CLI),
+`VORA_API_REGISTRY_TLS_{CERT,KEY,CA}` (runner registry), and
+`VORA_RUNNER_TLS_{CERT,KEY,CA}` (API→runner). A server-side CA requires and
+verifies client certificates. Unset means plaintext. `VORA_API_TLS_*` is no
+longer read.
 
 ## Limitations (honest)
 
@@ -227,22 +237,23 @@ CA requires and verifies client certificates); unset means plaintext.
   and `/vora`; custom images must create them.
 - **Sandboxes survive runner death briefly**, then exit via the agent watchdog /
   runsc teardown; orphaned units and containers are cleaned on the next start.
-- **The runner↔API channel is plaintext by default.** Registration is gated by
+- **Control-plane channels are plaintext by default.** Registration is gated by
   a join token, and TLS/mTLS is available per channel
-  (`VORA_API_TLS_*`/`VORA_RUNNER_TLS_*`), but it is off until configured. The
-  API→runner hop needs the runner reachable (no NAT reverse tunnel yet),
-  placement is first-healthy (no capacity-aware scheduling), and the default
-  API store is in-memory ([ADR 014](docs/adr/014-control-plane.md)).
-- **Not production-ready.** No auth on the runner socket, single runner, no
-  multi-tenant scheduling.
+  (`VORA_API_HTTP_TLS_*`, `VORA_API_REGISTRY_TLS_*`, `VORA_RUNNER_TLS_*`), but
+  it is off until configured. The API→runner hop needs the runner reachable (no
+  NAT reverse tunnel yet), placement is first-healthy (no capacity-aware
+  scheduling), and the default API store is in-memory
+  ([ADR 014](docs/adr/014-control-plane.md)).
+- **Not production-ready.** No auth on the runner Unix socket, first-healthy
+  placement only, no independent security audit.
 
 ## Roadmap
 
 | Version | Scope |
 | ------- | ----- |
 | v0.1 | Go runner, Bubblewrap backend, cgroups v2, in-sandbox exec agent, CLI, security suite, benchmarks |
-| **v0.2 (this)** | **gVisor backend (direct `runsc`, Method 2), backend selection, rootlesskit runner service, PostgreSQL/Supabase audit, dual-backend isolation matrix** |
-| v0.3 | **shipped:** containerd-snapshot rootfs (ADR 009), bwrap `NetworkRestricted` egress gateway (ADR 012), `vora-api` control plane + runner registry + API keys (ADR 014). **Deferred:** gVisor egress, credential brokering, multi-runner scheduling, SDK/MCP, Ansible deployment |
+| v0.2 | gVisor backend (direct `runsc`, Method 2), backend selection, rootlesskit runner service, PostgreSQL/Supabase audit, dual-backend isolation matrix |
+| **v0.3 (this)** | **containerd-snapshot rootfs (ADR 009), bwrap `NetworkRestricted` with filter+audit (ADR 012), `vora-api` with tenant isolation, split TLS, and failure-safe create (ADR 014).** **Deferred:** gVisor egress, credential brokering, multi-runner scheduling, SDK/MCP, Ansible deployment |
 | v1.0 | Firecracker microVM tier, snapshots/forks |
 
 ## License

@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -12,7 +13,9 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -22,6 +25,7 @@ import (
 
 	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/api"
+	"github.com/vorash/vora/internal/client"
 	"github.com/vorash/vora/internal/registry"
 	"github.com/vorash/vora/internal/tlsutil"
 )
@@ -92,6 +96,111 @@ func TestRegistryMTLS(t *testing.T) {
 	if _, err := client.Heartbeat(ctx, &v1.HeartbeatRequest{RunnerId: "run_mtls"}); err != nil {
 		t.Fatalf("mTLS heartbeat: %v", err)
 	}
+}
+
+// TestAPIHTTPMTLS runs the real vora-api binary and proves that the external
+// HTTP and runner-registry channels have independent TLS configuration.
+func TestAPIHTTPMTLS(t *testing.T) {
+	certs := generateCerts(t)
+	apiBin := buildBinary(t, "vora-api")
+	httpAddr := freeTCPAddr(t)
+	registryAddr := freeTCPAddr(t)
+	const bootstrapKey = "vora_bootstrap_mtls"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := exec.CommandContext(ctx, apiBin, "--http", httpAddr, "--grpc", registryAddr)
+	cmd.Env = append(os.Environ(),
+		"VORA_API_BOOTSTRAP_KEY="+bootstrapKey,
+		"VORA_API_HTTP_TLS_CERT="+certs.serverCert,
+		"VORA_API_HTTP_TLS_KEY="+certs.serverKey,
+		"VORA_API_HTTP_TLS_CA="+certs.ca,
+	)
+	var logs bytes.Buffer
+	cmd.Stdout = &logs
+	cmd.Stderr = &logs
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start vora-api: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		_ = cmd.Wait()
+	})
+
+	// The registry has no registry TLS variables, so it remains independently
+	// available over plaintext even while HTTP requires mTLS.
+	reg, err := registry.Dial(registryAddr, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reg.Close()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		_, err = reg.Register(context.Background(), &v1.RegisterRunnerRequest{RunnerId: "run_http_mtls", Address: "127.0.0.1:9200"})
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("plaintext registry did not start: %v\n%s", err, logs.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Plain HTTP must not succeed against the TLS listener.
+	plainClient := &http.Client{Timeout: time.Second}
+	if resp, err := plainClient.Get("http://" + httpAddr + "/v1/runners"); err == nil {
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			t.Fatal("plaintext request unexpectedly succeeded")
+		}
+	}
+
+	// A TLS client that trusts the server but presents no certificate is
+	// rejected because the HTTP channel is configured for mTLS.
+	noCertTLS, err := tlsutil.Config{CAFile: certs.ca}.Client()
+	if err != nil {
+		t.Fatal(err)
+	}
+	noCertHTTP := &http.Client{Transport: &http.Transport{TLSClientConfig: noCertTLS}, Timeout: time.Second}
+	if resp, err := noCertHTTP.Get("https://" + httpAddr + "/v1/runners"); err == nil {
+		resp.Body.Close()
+		t.Fatal("HTTPS request without a client certificate unexpectedly succeeded")
+	}
+
+	untrustedTLS, err := tlsutil.Config{CertFile: certs.clientCert, KeyFile: certs.clientKey}.Client()
+	if err != nil {
+		t.Fatal(err)
+	}
+	untrustedHTTP := &http.Client{Transport: &http.Transport{TLSClientConfig: untrustedTLS}, Timeout: time.Second}
+	if resp, err := untrustedHTTP.Get("https://" + httpAddr + "/v1/runners"); err == nil {
+		resp.Body.Close()
+		t.Fatal("HTTPS request without the trusted CA unexpectedly succeeded")
+	}
+
+	// The real HTTP client reads the new channel-specific variables and
+	// succeeds with a trusted client certificate and API key.
+	t.Setenv("VORA_API_HTTP_TLS_CA", certs.ca)
+	t.Setenv("VORA_API_HTTP_TLS_CERT", certs.clientCert)
+	t.Setenv("VORA_API_HTTP_TLS_KEY", certs.clientKey)
+	httpAPI, err := client.DialAPI("https://"+httpAddr, bootstrapKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer httpAPI.Close()
+	if _, err := httpAPI.ListRunners(context.Background()); err != nil {
+		t.Fatalf("mTLS HTTP request: %v\n%s", err, logs.String())
+	}
+}
+
+func freeTCPAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	return addr
 }
 
 type certFiles struct {

@@ -235,6 +235,21 @@ func execsToProto(execs []sandbox.ExecRecord) []*v1.SandboxExec {
 	return out
 }
 
+func egressToProto(records []sandbox.EgressRecord) []*v1.SandboxEgress {
+	out := make([]*v1.SandboxEgress, 0, len(records))
+	for _, r := range records {
+		out = append(out, &v1.SandboxEgress{
+			SandboxId:       r.SandboxID,
+			Host:            r.Host,
+			Remote:          r.Remote,
+			Allowed:         r.Allowed,
+			Reason:          r.Reason,
+			TimestampUnixMs: r.Timestamp.UnixMilli(),
+		})
+	}
+	return out
+}
+
 func envMap(env []string) map[string]string {
 	if len(env) == 0 {
 		return nil

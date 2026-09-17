@@ -856,6 +856,179 @@ func (x *SandboxExec) GetStderrBytes() int64 {
 	return 0
 }
 
+type GetSandboxEgressRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SandboxId     string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSandboxEgressRequest) Reset() {
+	*x = GetSandboxEgressRequest{}
+	mi := &file_api_proto_v1_runner_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSandboxEgressRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSandboxEgressRequest) ProtoMessage() {}
+
+func (x *GetSandboxEgressRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_v1_runner_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSandboxEgressRequest.ProtoReflect.Descriptor instead.
+func (*GetSandboxEgressRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_v1_runner_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *GetSandboxEgressRequest) GetSandboxId() string {
+	if x != nil {
+		return x.SandboxId
+	}
+	return ""
+}
+
+type GetSandboxEgressResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Records       []*SandboxEgress       `protobuf:"bytes,1,rep,name=records,proto3" json:"records,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSandboxEgressResponse) Reset() {
+	*x = GetSandboxEgressResponse{}
+	mi := &file_api_proto_v1_runner_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSandboxEgressResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSandboxEgressResponse) ProtoMessage() {}
+
+func (x *GetSandboxEgressResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_v1_runner_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSandboxEgressResponse.ProtoReflect.Descriptor instead.
+func (*GetSandboxEgressResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_v1_runner_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *GetSandboxEgressResponse) GetRecords() []*SandboxEgress {
+	if x != nil {
+		return x.Records
+	}
+	return nil
+}
+
+// SandboxEgress is one restricted-network policy decision.
+type SandboxEgress struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	SandboxId       string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
+	Host            string                 `protobuf:"bytes,2,opt,name=host,proto3" json:"host,omitempty"`
+	Remote          string                 `protobuf:"bytes,3,opt,name=remote,proto3" json:"remote,omitempty"`
+	Allowed         bool                   `protobuf:"varint,4,opt,name=allowed,proto3" json:"allowed,omitempty"`
+	Reason          string                 `protobuf:"bytes,5,opt,name=reason,proto3" json:"reason,omitempty"`
+	TimestampUnixMs int64                  `protobuf:"varint,6,opt,name=timestamp_unix_ms,json=timestampUnixMs,proto3" json:"timestamp_unix_ms,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *SandboxEgress) Reset() {
+	*x = SandboxEgress{}
+	mi := &file_api_proto_v1_runner_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SandboxEgress) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SandboxEgress) ProtoMessage() {}
+
+func (x *SandboxEgress) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_v1_runner_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SandboxEgress.ProtoReflect.Descriptor instead.
+func (*SandboxEgress) Descriptor() ([]byte, []int) {
+	return file_api_proto_v1_runner_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *SandboxEgress) GetSandboxId() string {
+	if x != nil {
+		return x.SandboxId
+	}
+	return ""
+}
+
+func (x *SandboxEgress) GetHost() string {
+	if x != nil {
+		return x.Host
+	}
+	return ""
+}
+
+func (x *SandboxEgress) GetRemote() string {
+	if x != nil {
+		return x.Remote
+	}
+	return ""
+}
+
+func (x *SandboxEgress) GetAllowed() bool {
+	if x != nil {
+		return x.Allowed
+	}
+	return false
+}
+
+func (x *SandboxEgress) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *SandboxEgress) GetTimestampUnixMs() int64 {
+	if x != nil {
+		return x.TimestampUnixMs
+	}
+	return 0
+}
+
 type DestroySandboxRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SandboxId     string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
@@ -865,7 +1038,7 @@ type DestroySandboxRequest struct {
 
 func (x *DestroySandboxRequest) Reset() {
 	*x = DestroySandboxRequest{}
-	mi := &file_api_proto_v1_runner_proto_msgTypes[16]
+	mi := &file_api_proto_v1_runner_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -877,7 +1050,7 @@ func (x *DestroySandboxRequest) String() string {
 func (*DestroySandboxRequest) ProtoMessage() {}
 
 func (x *DestroySandboxRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_v1_runner_proto_msgTypes[16]
+	mi := &file_api_proto_v1_runner_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -890,7 +1063,7 @@ func (x *DestroySandboxRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DestroySandboxRequest.ProtoReflect.Descriptor instead.
 func (*DestroySandboxRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_v1_runner_proto_rawDescGZIP(), []int{16}
+	return file_api_proto_v1_runner_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *DestroySandboxRequest) GetSandboxId() string {
@@ -908,7 +1081,7 @@ type DestroySandboxResponse struct {
 
 func (x *DestroySandboxResponse) Reset() {
 	*x = DestroySandboxResponse{}
-	mi := &file_api_proto_v1_runner_proto_msgTypes[17]
+	mi := &file_api_proto_v1_runner_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -920,7 +1093,7 @@ func (x *DestroySandboxResponse) String() string {
 func (*DestroySandboxResponse) ProtoMessage() {}
 
 func (x *DestroySandboxResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_v1_runner_proto_msgTypes[17]
+	mi := &file_api_proto_v1_runner_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -933,7 +1106,7 @@ func (x *DestroySandboxResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DestroySandboxResponse.ProtoReflect.Descriptor instead.
 func (*DestroySandboxResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_v1_runner_proto_rawDescGZIP(), []int{17}
+	return file_api_proto_v1_runner_proto_rawDescGZIP(), []int{20}
 }
 
 var File_api_proto_v1_runner_proto protoreflect.FileDescriptor
@@ -997,11 +1170,24 @@ const file_api_proto_v1_runner_proto_rawDesc = "" +
 	"\x06reason\x18\b \x01(\x0e2\x13.vora.v1.ExitReasonR\x06reason\x12!\n" +
 	"\fstdout_bytes\x18\t \x01(\x03R\vstdoutBytes\x12!\n" +
 	"\fstderr_bytes\x18\n" +
-	" \x01(\x03R\vstderrBytes\"6\n" +
+	" \x01(\x03R\vstderrBytes\"8\n" +
+	"\x17GetSandboxEgressRequest\x12\x1d\n" +
+	"\n" +
+	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\"L\n" +
+	"\x18GetSandboxEgressResponse\x120\n" +
+	"\arecords\x18\x01 \x03(\v2\x16.vora.v1.SandboxEgressR\arecords\"\xb8\x01\n" +
+	"\rSandboxEgress\x12\x1d\n" +
+	"\n" +
+	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12\x12\n" +
+	"\x04host\x18\x02 \x01(\tR\x04host\x12\x16\n" +
+	"\x06remote\x18\x03 \x01(\tR\x06remote\x12\x18\n" +
+	"\aallowed\x18\x04 \x01(\bR\aallowed\x12\x16\n" +
+	"\x06reason\x18\x05 \x01(\tR\x06reason\x12*\n" +
+	"\x11timestamp_unix_ms\x18\x06 \x01(\x03R\x0ftimestampUnixMs\"6\n" +
 	"\x15DestroySandboxRequest\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\"\x18\n" +
-	"\x16DestroySandboxResponse2\xfd\x05\n" +
+	"\x16DestroySandboxResponse2\xd6\x06\n" +
 	"\rRunnerService\x12N\n" +
 	"\rCreateSandbox\x12\x1d.vora.v1.CreateSandboxRequest\x1a\x1e.vora.v1.CreateSandboxResponse\x12:\n" +
 	"\n" +
@@ -1012,7 +1198,8 @@ const file_api_proto_v1_runner_proto_rawDesc = "" +
 	"\rSignalSandbox\x12\x1d.vora.v1.SignalSandboxRequest\x1a\x1e.vora.v1.SignalSandboxResponse\x12<\n" +
 	"\fStatsSandbox\x12\x1c.vora.v1.StatsSandboxRequest\x1a\x0e.vora.v1.Stats\x12W\n" +
 	"\x10GetSandboxEvents\x12 .vora.v1.GetSandboxEventsRequest\x1a!.vora.v1.GetSandboxEventsResponse\x12T\n" +
-	"\x0fGetSandboxExecs\x12\x1f.vora.v1.GetSandboxExecsRequest\x1a .vora.v1.GetSandboxExecsResponse\x12Q\n" +
+	"\x0fGetSandboxExecs\x12\x1f.vora.v1.GetSandboxExecsRequest\x1a .vora.v1.GetSandboxExecsResponse\x12W\n" +
+	"\x10GetSandboxEgress\x12 .vora.v1.GetSandboxEgressRequest\x1a!.vora.v1.GetSandboxEgressResponse\x12Q\n" +
 	"\x0eDestroySandbox\x12\x1e.vora.v1.DestroySandboxRequest\x1a\x1f.vora.v1.DestroySandboxResponseB(Z&github.com/vorash/vora/api/proto/v1;v1b\x06proto3"
 
 var (
@@ -1027,7 +1214,7 @@ func file_api_proto_v1_runner_proto_rawDescGZIP() []byte {
 	return file_api_proto_v1_runner_proto_rawDescData
 }
 
-var file_api_proto_v1_runner_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_api_proto_v1_runner_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_api_proto_v1_runner_proto_goTypes = []any{
 	(*CreateSandboxRequest)(nil),     // 0: vora.v1.CreateSandboxRequest
 	(*CreateSandboxResponse)(nil),    // 1: vora.v1.CreateSandboxResponse
@@ -1045,50 +1232,56 @@ var file_api_proto_v1_runner_proto_goTypes = []any{
 	(*GetSandboxExecsRequest)(nil),   // 13: vora.v1.GetSandboxExecsRequest
 	(*GetSandboxExecsResponse)(nil),  // 14: vora.v1.GetSandboxExecsResponse
 	(*SandboxExec)(nil),              // 15: vora.v1.SandboxExec
-	(*DestroySandboxRequest)(nil),    // 16: vora.v1.DestroySandboxRequest
-	(*DestroySandboxResponse)(nil),   // 17: vora.v1.DestroySandboxResponse
-	(*SandboxSpec)(nil),              // 18: vora.v1.SandboxSpec
-	(*Sandbox)(nil),                  // 19: vora.v1.Sandbox
-	(SandboxState)(0),                // 20: vora.v1.SandboxState
-	(*ExecRequest)(nil),              // 21: vora.v1.ExecRequest
-	(ExitReason)(0),                  // 22: vora.v1.ExitReason
-	(*ExecChunk)(nil),                // 23: vora.v1.ExecChunk
-	(*Stats)(nil),                    // 24: vora.v1.Stats
+	(*GetSandboxEgressRequest)(nil),  // 16: vora.v1.GetSandboxEgressRequest
+	(*GetSandboxEgressResponse)(nil), // 17: vora.v1.GetSandboxEgressResponse
+	(*SandboxEgress)(nil),            // 18: vora.v1.SandboxEgress
+	(*DestroySandboxRequest)(nil),    // 19: vora.v1.DestroySandboxRequest
+	(*DestroySandboxResponse)(nil),   // 20: vora.v1.DestroySandboxResponse
+	(*SandboxSpec)(nil),              // 21: vora.v1.SandboxSpec
+	(*Sandbox)(nil),                  // 22: vora.v1.Sandbox
+	(SandboxState)(0),                // 23: vora.v1.SandboxState
+	(*ExecRequest)(nil),              // 24: vora.v1.ExecRequest
+	(ExitReason)(0),                  // 25: vora.v1.ExitReason
+	(*ExecChunk)(nil),                // 26: vora.v1.ExecChunk
+	(*Stats)(nil),                    // 27: vora.v1.Stats
 }
 var file_api_proto_v1_runner_proto_depIdxs = []int32{
-	18, // 0: vora.v1.CreateSandboxRequest.spec:type_name -> vora.v1.SandboxSpec
-	19, // 1: vora.v1.CreateSandboxResponse.sandbox:type_name -> vora.v1.Sandbox
-	20, // 2: vora.v1.ListSandboxesRequest.state:type_name -> vora.v1.SandboxState
-	19, // 3: vora.v1.ListSandboxesResponse.sandboxes:type_name -> vora.v1.Sandbox
-	21, // 4: vora.v1.ExecSandboxRequest.exec:type_name -> vora.v1.ExecRequest
+	21, // 0: vora.v1.CreateSandboxRequest.spec:type_name -> vora.v1.SandboxSpec
+	22, // 1: vora.v1.CreateSandboxResponse.sandbox:type_name -> vora.v1.Sandbox
+	23, // 2: vora.v1.ListSandboxesRequest.state:type_name -> vora.v1.SandboxState
+	22, // 3: vora.v1.ListSandboxesResponse.sandboxes:type_name -> vora.v1.Sandbox
+	24, // 4: vora.v1.ExecSandboxRequest.exec:type_name -> vora.v1.ExecRequest
 	12, // 5: vora.v1.GetSandboxEventsResponse.events:type_name -> vora.v1.SandboxEvent
 	15, // 6: vora.v1.GetSandboxExecsResponse.execs:type_name -> vora.v1.SandboxExec
-	22, // 7: vora.v1.SandboxExec.reason:type_name -> vora.v1.ExitReason
-	0,  // 8: vora.v1.RunnerService.CreateSandbox:input_type -> vora.v1.CreateSandboxRequest
-	2,  // 9: vora.v1.RunnerService.GetSandbox:input_type -> vora.v1.GetSandboxRequest
-	3,  // 10: vora.v1.RunnerService.ListSandboxes:input_type -> vora.v1.ListSandboxesRequest
-	5,  // 11: vora.v1.RunnerService.StartSandbox:input_type -> vora.v1.StartSandboxRequest
-	6,  // 12: vora.v1.RunnerService.ExecSandbox:input_type -> vora.v1.ExecSandboxRequest
-	7,  // 13: vora.v1.RunnerService.SignalSandbox:input_type -> vora.v1.SignalSandboxRequest
-	9,  // 14: vora.v1.RunnerService.StatsSandbox:input_type -> vora.v1.StatsSandboxRequest
-	10, // 15: vora.v1.RunnerService.GetSandboxEvents:input_type -> vora.v1.GetSandboxEventsRequest
-	13, // 16: vora.v1.RunnerService.GetSandboxExecs:input_type -> vora.v1.GetSandboxExecsRequest
-	16, // 17: vora.v1.RunnerService.DestroySandbox:input_type -> vora.v1.DestroySandboxRequest
-	1,  // 18: vora.v1.RunnerService.CreateSandbox:output_type -> vora.v1.CreateSandboxResponse
-	19, // 19: vora.v1.RunnerService.GetSandbox:output_type -> vora.v1.Sandbox
-	4,  // 20: vora.v1.RunnerService.ListSandboxes:output_type -> vora.v1.ListSandboxesResponse
-	19, // 21: vora.v1.RunnerService.StartSandbox:output_type -> vora.v1.Sandbox
-	23, // 22: vora.v1.RunnerService.ExecSandbox:output_type -> vora.v1.ExecChunk
-	8,  // 23: vora.v1.RunnerService.SignalSandbox:output_type -> vora.v1.SignalSandboxResponse
-	24, // 24: vora.v1.RunnerService.StatsSandbox:output_type -> vora.v1.Stats
-	11, // 25: vora.v1.RunnerService.GetSandboxEvents:output_type -> vora.v1.GetSandboxEventsResponse
-	14, // 26: vora.v1.RunnerService.GetSandboxExecs:output_type -> vora.v1.GetSandboxExecsResponse
-	17, // 27: vora.v1.RunnerService.DestroySandbox:output_type -> vora.v1.DestroySandboxResponse
-	18, // [18:28] is the sub-list for method output_type
-	8,  // [8:18] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	25, // 7: vora.v1.SandboxExec.reason:type_name -> vora.v1.ExitReason
+	18, // 8: vora.v1.GetSandboxEgressResponse.records:type_name -> vora.v1.SandboxEgress
+	0,  // 9: vora.v1.RunnerService.CreateSandbox:input_type -> vora.v1.CreateSandboxRequest
+	2,  // 10: vora.v1.RunnerService.GetSandbox:input_type -> vora.v1.GetSandboxRequest
+	3,  // 11: vora.v1.RunnerService.ListSandboxes:input_type -> vora.v1.ListSandboxesRequest
+	5,  // 12: vora.v1.RunnerService.StartSandbox:input_type -> vora.v1.StartSandboxRequest
+	6,  // 13: vora.v1.RunnerService.ExecSandbox:input_type -> vora.v1.ExecSandboxRequest
+	7,  // 14: vora.v1.RunnerService.SignalSandbox:input_type -> vora.v1.SignalSandboxRequest
+	9,  // 15: vora.v1.RunnerService.StatsSandbox:input_type -> vora.v1.StatsSandboxRequest
+	10, // 16: vora.v1.RunnerService.GetSandboxEvents:input_type -> vora.v1.GetSandboxEventsRequest
+	13, // 17: vora.v1.RunnerService.GetSandboxExecs:input_type -> vora.v1.GetSandboxExecsRequest
+	16, // 18: vora.v1.RunnerService.GetSandboxEgress:input_type -> vora.v1.GetSandboxEgressRequest
+	19, // 19: vora.v1.RunnerService.DestroySandbox:input_type -> vora.v1.DestroySandboxRequest
+	1,  // 20: vora.v1.RunnerService.CreateSandbox:output_type -> vora.v1.CreateSandboxResponse
+	22, // 21: vora.v1.RunnerService.GetSandbox:output_type -> vora.v1.Sandbox
+	4,  // 22: vora.v1.RunnerService.ListSandboxes:output_type -> vora.v1.ListSandboxesResponse
+	22, // 23: vora.v1.RunnerService.StartSandbox:output_type -> vora.v1.Sandbox
+	26, // 24: vora.v1.RunnerService.ExecSandbox:output_type -> vora.v1.ExecChunk
+	8,  // 25: vora.v1.RunnerService.SignalSandbox:output_type -> vora.v1.SignalSandboxResponse
+	27, // 26: vora.v1.RunnerService.StatsSandbox:output_type -> vora.v1.Stats
+	11, // 27: vora.v1.RunnerService.GetSandboxEvents:output_type -> vora.v1.GetSandboxEventsResponse
+	14, // 28: vora.v1.RunnerService.GetSandboxExecs:output_type -> vora.v1.GetSandboxExecsResponse
+	17, // 29: vora.v1.RunnerService.GetSandboxEgress:output_type -> vora.v1.GetSandboxEgressResponse
+	20, // 30: vora.v1.RunnerService.DestroySandbox:output_type -> vora.v1.DestroySandboxResponse
+	20, // [20:31] is the sub-list for method output_type
+	9,  // [9:20] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_api_proto_v1_runner_proto_init() }
@@ -1103,7 +1296,7 @@ func file_api_proto_v1_runner_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_proto_v1_runner_proto_rawDesc), len(file_api_proto_v1_runner_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   18,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -316,10 +316,10 @@ func splitEndpoint(s string) (id, path string, isSandbox bool) {
 }
 
 func (a *app) logsCmd() *cobra.Command {
-	var showExecs bool
+	var showExecs, showEgress bool
 	cmd := &cobra.Command{
 		Use:   "logs <sandbox-id>",
-		Short: "Show a sandbox's lifecycle events or execution records",
+		Short: "Show a sandbox's lifecycle events, executions, or egress decisions",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, ctx, cancel, err := a.dial()
@@ -345,6 +345,28 @@ func (a *app) logsCmd() *cobra.Command {
 				}
 				return nil
 			}
+			if showEgress {
+				records, err := c.Egress(ctx, args[0])
+				if err != nil {
+					return err
+				}
+				if a.json {
+					return a.jsonOut(&v1.GetSandboxEgressResponse{Records: records})
+				}
+				for _, e := range records {
+					ts := time.UnixMilli(e.GetTimestampUnixMs()).Format(time.RFC3339)
+					decision := "denied"
+					if e.GetAllowed() {
+						decision = "allowed"
+					}
+					reason := e.GetReason()
+					if reason != "" {
+						reason = " (" + reason + ")"
+					}
+					fmt.Printf("%s  %s %s %s%s\n", ts, decision, e.GetHost(), e.GetRemote(), reason)
+				}
+				return nil
+			}
 
 			events, err := c.Events(ctx, args[0])
 			if err != nil {
@@ -365,6 +387,8 @@ func (a *app) logsCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&showExecs, "execs", false, "show execution records instead of lifecycle events")
+	cmd.Flags().BoolVar(&showEgress, "egress", false, "show restricted-network policy decisions")
+	cmd.MarkFlagsMutuallyExclusive("execs", "egress")
 	return cmd
 }
 

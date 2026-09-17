@@ -74,10 +74,29 @@ func run() error {
 	store := sandbox.NewStore(cfg.SandboxesDir())
 	registry := runtime.NewRegistry()
 	metrics := telemetry.New()
-	manager := registerBackends(cfg, registry, metrics, logger)
 	runnerID := ulid.NewRunner()
 	server := runner.NewServer(cfg, store, registry, runnerID, logger)
 	server.SetMetrics(metrics)
+
+	// Configure durable audit before exposing any runner endpoint or starting a
+	// restricted-network proxy.
+	if dsn := os.Getenv("VORA_AUDIT_DSN"); dsn != "" {
+		auditCtx, auditCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		auditStore, err := postgres.Open(auditCtx, dsn)
+		if err != nil {
+			logger.Warn("audit: postgres unavailable, using jsonl", "error", err)
+		} else if err := auditStore.Migrate(auditCtx); err != nil {
+			logger.Warn("audit: migration failed, using jsonl", "error", err)
+			auditStore.Close()
+		} else {
+			server.SetAudit(auditStore)
+			defer auditStore.Close()
+			logger.Info("audit store: postgres")
+		}
+		auditCancel()
+	}
+
+	manager := registerBackends(cfg, registry, logger, server.RecordEgress)
 	if manager != nil {
 		server.SetCgroups(manager)
 	}
@@ -142,9 +161,9 @@ func run() error {
 	// out, so it can sit behind NAT.
 	if apiAddr := os.Getenv("VORA_API_GRPC"); apiAddr != "" {
 		apiTLS := tlsutil.Config{
-			CertFile: os.Getenv("VORA_API_TLS_CERT"),
-			KeyFile:  os.Getenv("VORA_API_TLS_KEY"),
-			CAFile:   os.Getenv("VORA_API_TLS_CA"),
+			CertFile: os.Getenv("VORA_API_REGISTRY_TLS_CERT"),
+			KeyFile:  os.Getenv("VORA_API_REGISTRY_TLS_KEY"),
+			CAFile:   os.Getenv("VORA_API_REGISTRY_TLS_CA"),
 		}
 		var dialOpts []grpc.DialOption
 		if apiTLS.Enabled() {
@@ -174,22 +193,6 @@ func run() error {
 			}
 			go reporter.Run(ctx)
 			logger.Info("registering with vora-api", "api", apiAddr, "advertise", advertise)
-		}
-	}
-
-	// PostgreSQL/Supabase audit store, when a DSN is configured. Failure is not
-	// fatal: the runner falls back to the JSONL store.
-	if dsn := os.Getenv("VORA_AUDIT_DSN"); dsn != "" {
-		auditStore, err := postgres.Open(ctx, dsn)
-		if err != nil {
-			logger.Warn("audit: postgres unavailable, using jsonl", "error", err)
-		} else if err := auditStore.Migrate(ctx); err != nil {
-			logger.Warn("audit: migration failed, using jsonl", "error", err)
-			auditStore.Close()
-		} else {
-			server.SetAudit(auditStore)
-			defer auditStore.Close()
-			logger.Info("audit store: postgres")
 		}
 	}
 
@@ -253,7 +256,7 @@ func run() error {
 // registerBackends registers the isolation backends available on this host.
 // A missing backend is not fatal: the runner still serves create/get/list, and
 // start returns a clear error.
-func registerBackends(cfg config.Config, registry *runtime.Registry, metrics *telemetry.Metrics, logger *slog.Logger) cgroup.Manager {
+func registerBackends(cfg config.Config, registry *runtime.Registry, logger *slog.Logger, egressSink func(egress.Event) error) cgroup.Manager {
 	manager, err := cgroup.New(cfg)
 	if err != nil {
 		logger.Warn("cgroup manager unavailable; bwrap sandboxes cannot be started", "error", err)
@@ -266,14 +269,6 @@ func registerBackends(cfg config.Config, registry *runtime.Registry, metrics *te
 	}
 
 	networks := network.NewManager(cfg.StateDir, network.DefaultProxyPort, logger)
-	egressSink := func(e egress.Event) {
-		if e.Allowed {
-			return
-		}
-		metrics.NetworkDeniedTotal.Inc()
-		metrics.PolicyDeniedTotal.Inc()
-		logger.Info("egress denied", "sandbox_id", e.SandboxID, "host", e.Host, "reason", e.Reason)
-	}
 
 	if manager != nil {
 		if backend, err := bwrap.New(cfg, manager, logger); err != nil {

@@ -1,6 +1,6 @@
 # Threat Model
 
-Status: draft · Applies to: v0.1
+Status: draft · Applies to: v0.3
 
 ## Security objective
 
@@ -16,7 +16,7 @@ explicitly granted to it.
 | Host kernel | shared by every sandbox; a kernel exploit defeats all isolation |
 | Other sandboxes' workspaces and processes | tenant isolation |
 | Runner control socket | grants create/exec/destroy of sandboxes |
-| Credentials | API tokens and secrets (v0.3 brokering) |
+| Credentials | API keys, join tokens, and runner TLS material (secretless brokering is deferred) |
 | Host resources (CPU, memory, PIDs, disk) | availability / denial of service |
 | Audit trail | non-repudiation of executed code |
 
@@ -28,7 +28,9 @@ explicitly granted to it.
 3. **Runner ↔ image cache** — images are read-only inputs; a malicious image
    must not affect the host.
 4. **Sandbox ↔ sandbox** — mutually untrusted.
-5. **Sandbox ↔ network** — deny by default (v0.1 has no network at all).
+5. **Sandbox ↔ network** — deny by default (`NetworkNone`), or allowlisted TLS via the egress proxy (`NetworkRestricted`, bwrap).
+6. **Caller ↔ control plane** — API keys authenticate; tenant identity authorizes sandbox and key access.
+7. **Control plane ↔ runner** — join token plus optional mTLS; runners are trusted execution hosts.
 
 ## Adversary model
 
@@ -44,7 +46,7 @@ infallible; the design minimises the trusted surface.
 
 ## Threats and mitigations
 
-| Threat | Mitigation (v0.1) | Boundary |
+| Threat | Mitigation (v0.3) | Boundary |
 | ------ | ----------------- | -------- |
 | Host filesystem read | read-only bind of a minimal rootfs; host paths not mounted | filesystem |
 | Host filesystem write | rootfs read-only; only `/workspace`, `/root`, `/tmp` writable | filesystem |
@@ -56,16 +58,21 @@ infallible; the design minimises the trusted surface.
 | Fork bomb | `pids.max` via cgroup | cgroup |
 | Memory bomb / OOM | `memory.max`, `memory.swap.max=0` | cgroup |
 | CPU monopolisation | `cpu.max` quota | cgroup |
-| Disk exhaustion | per-sandbox workspace; quota enforcement | storage |
-| Metadata service access | unrestricted network is never granted; `--unshare-net`, or (bwrap `NetworkRestricted`) a DNAT to the egress proxy that denies non-TLS | network |
-| Private-network probing | no network namespace route exists, or egress is proxied with private/link-local/CGNAT destinations blocked | network |
-| Reverse shell / exfiltration | no network egress, or egress restricted to an allowlisted TLS SNI set | network |
+| Disk exhaustion | per-sandbox workspace only; **disk quota is not enforced** | storage |
+| Metadata service access | unrestricted network is never granted; `--unshare-net`, or (bwrap `NetworkRestricted`) filter+DNAT to the egress proxy that denies non-TLS and private IPs | network |
+| Private-network probing | no network namespace route exists, or non-proxy traffic is dropped and private/link-local/CGNAT destinations are blocked | network |
+| Reverse shell / exfiltration | no network egress, or egress restricted to an allowlisted TLS SNI set with durable audit | network |
+| Gateway / UDP bypass | nftables output filter default-drop; only loopback and TCP to the proxy port are accepted | network |
+| Proxy resource exhaustion | per-sandbox connection cap (default 128) and idle timeout (default 5m) | network |
+| Cross-tenant API access | tenant-scoped keys can only see their own sandboxes and keys; unknown IDs return 404 | control plane |
+| Missing audit of allowed egress | allow decisions are persisted before bytes are forwarded; persistence failure denies the connection | audit |
 | Credential theft from env/disk | runner secrets never injected into sandbox | credentials |
+| Credential brokering | **deferred**; workloads must not be given long-lived third-party secrets | credentials |
 | Sandbox survives runner death | in-sandbox agent exits when the runner disappears; reconciler reaps orphans | lifecycle |
 | Malicious image | image rootfs is data only, read-only, no execution at build time | supply chain |
 
-In v0.3, network and credential rows are replaced by an allowlist egress
-gateway with secretless brokering (see ADR 004).
+Secretless credential brokering remains deferred. Restricted egress is delivered
+for bwrap only (see ADR 012); gVisor remains `NetworkNone`.
 
 ## Assumptions
 
@@ -73,10 +80,9 @@ gateway with secretless brokering (see ADR 004).
   for the local backend).
 - The kernel, Bubblewrap, and containerd/gVisor are kept patched.
 - The runner process and its socket are protected by filesystem permissions.
-- Images come from trusted references; content is not independently verified in
-  v0.1.
+- Images come from trusted references; content is not independently verified.
 
-## Out of scope for v0.1
+## Out of scope for v0.3
 
 - Kernel exploits and side channels (Spectre-class).
 - Physical access and host-level compromise.

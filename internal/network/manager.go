@@ -32,7 +32,7 @@ const (
 	ifacePrefix      = "vora-h"
 	peerPrefix       = "vora-s"
 	holderCmd        = "sleep"
-	holderArg        = "100000"
+	holderArg        = "infinity"
 )
 
 // Net describes one prepared sandbox network.
@@ -246,8 +246,10 @@ func (m *Manager) reapLeftovers() {
 			_ = os.Remove(filepath.Join(m.stateDir, e.Name()))
 			continue
 		}
-		if p, err := os.FindProcess(n.NetnsPID); err == nil {
-			_ = p.Kill()
+		if holderAlive(n.NetnsPID) {
+			if p, err := os.FindProcess(n.NetnsPID); err == nil {
+				_ = p.Kill()
+			}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = run(ctx, "ip", "link", "del", n.iface)
@@ -255,6 +257,21 @@ func (m *Manager) reapLeftovers() {
 		m.removeState(id)
 		m.logger.Warn("reaped leftover sandbox network", "sandbox_id", id)
 	}
+}
+
+// holderAlive reports whether pid is still the netns holder we started, not a
+// recycled PID. Missing /proc entries and mismatched command lines are treated
+// as not-ours so reapLeftovers will not SIGKILL an unrelated process.
+func holderAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return false
+	}
+	cmd := strings.ReplaceAll(string(data), "\x00", " ")
+	return strings.Contains(cmd, "unshare") && strings.Contains(cmd, holderCmd) && strings.Contains(cmd, holderArg)
 }
 
 type netState struct {
@@ -281,15 +298,25 @@ func subnetFor(idx uint32) (gateway, sandbox string) {
 	return gw.String(), sb.String()
 }
 
-// nftRuleset forces all outbound TCP to the egress proxy.
+// nftRuleset transparently redirects non-loopback TCP to the egress proxy,
+// then drops every packet that is not loopback traffic or addressed to that
+// exact proxy endpoint. The filter is the enforcement boundary; DNAT alone is
+// insufficient because direct gateway and non-TCP traffic would bypass it.
 func nftRuleset(gateway, port string) string {
-	return fmt.Sprintf(`table ip vora {
+	return fmt.Sprintf(`table ip vora_nat {
 	chain out {
 		type nat hook output priority -100; policy accept;
-		ip daddr != %s meta l4proto tcp dnat to %s:%s
+		oifname != "lo" ip daddr != %s meta l4proto tcp dnat to %s:%s
 	}
 }
-`, gateway, gateway, port)
+table inet vora_filter {
+	chain out {
+		type filter hook output priority 0; policy drop;
+		oifname "lo" accept
+		ip daddr %s meta l4proto tcp th dport %s accept
+	}
+}
+`, gateway, gateway, port, gateway, port)
 }
 
 func run(ctx context.Context, name string, args ...string) error {

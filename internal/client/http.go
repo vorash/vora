@@ -28,16 +28,17 @@ type HTTPClient struct {
 }
 
 // DialAPI returns a client for a vora-api base URL (e.g. http://host:9300).
-// TLS material for an HTTPS API is read from VORA_API_TLS_{CA,CERT,KEY}.
+// TLS material for an HTTPS API is read from
+// VORA_API_HTTP_TLS_{CA,CERT,KEY}.
 func DialAPI(baseURL, apiKey string) (*HTTPClient, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, fmt.Errorf("client: empty API URL")
 	}
 	hc := &http.Client{Timeout: 5 * time.Minute}
 	tlsCfg := tlsutil.Config{
-		CertFile: os.Getenv("VORA_API_TLS_CERT"),
-		KeyFile:  os.Getenv("VORA_API_TLS_KEY"),
-		CAFile:   os.Getenv("VORA_API_TLS_CA"),
+		CertFile: os.Getenv("VORA_API_HTTP_TLS_CERT"),
+		KeyFile:  os.Getenv("VORA_API_HTTP_TLS_KEY"),
+		CAFile:   os.Getenv("VORA_API_HTTP_TLS_CA"),
 	}
 	if tlsCfg.Enabled() {
 		cfg, err := tlsCfg.Client()
@@ -163,6 +164,15 @@ func (c *HTTPClient) Execs(ctx context.Context, id string) ([]*v1.SandboxExec, e
 		return nil, err
 	}
 	return resp.GetExecs(), nil
+}
+
+// Egress returns restricted-network policy decisions.
+func (c *HTTPClient) Egress(ctx context.Context, id string) ([]*v1.SandboxEgress, error) {
+	resp := &v1.GetSandboxEgressResponse{}
+	if err := c.do(ctx, http.MethodGet, "/v1/sandboxes/"+id+"/egress", nil, resp); err != nil {
+		return nil, err
+	}
+	return resp.GetRecords(), nil
 }
 
 // Exec starts a command and returns an NDJSON-backed stream.

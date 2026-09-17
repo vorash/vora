@@ -69,6 +69,9 @@ func TestPostgresAPIStore(t *testing.T) {
 	if err != nil || got.ID != key.ID || !got.HasScope(api.ScopeAdmin) {
 		t.Fatalf("KeyByHash = %+v, %v", got, err)
 	}
+	if byID, err := store.Key(ctx, key.ID); err != nil || byID.ID != key.ID || byID.KeyHash != "" {
+		t.Fatalf("Key = %+v, %v", byID, err)
+	}
 	if err := store.TouchKey(ctx, key.ID, time.Now().UTC()); err != nil {
 		t.Fatalf("touch: %v", err)
 	}
@@ -114,14 +117,22 @@ func TestPostgresAPIStore(t *testing.T) {
 	}
 
 	// --- Sandbox routes ---
-	if err := store.SetRoute(ctx, "sbx_pg_test", "run_pg_test"); err != nil {
+	route := api.SandboxRoute{SandboxID: "sbx_pg_test", RunnerID: "run_pg_test", TenantID: "tenant_pg"}
+	if err := store.SetRoute(ctx, route); err != nil {
 		t.Fatalf("set route: %v", err)
 	}
-	if id, err := store.Route(ctx, "sbx_pg_test"); err != nil || id != "run_pg_test" {
-		t.Fatalf("route = %q, %v", id, err)
+	if got, err := store.Route(ctx, "sbx_pg_test"); err != nil || got != route {
+		t.Fatalf("route = %+v, %v", got, err)
 	}
-	if err := store.SetRoute(ctx, "sbx_pg_test", "run_pg_test"); err != nil {
+	if err := store.SetRoute(ctx, route); err != nil {
 		t.Fatalf("set route (idempotent): %v", err)
+	}
+	legacy := api.SandboxRoute{SandboxID: "sbx_pg_legacy", RunnerID: "run_pg_test"}
+	if err := store.SetRoute(ctx, legacy); err != nil {
+		t.Fatalf("set legacy route: %v", err)
+	}
+	if got, err := store.Route(ctx, legacy.SandboxID); err != nil || got.TenantID != "" {
+		t.Fatalf("legacy route = %+v, %v", got, err)
 	}
 	if err := store.DeleteRoute(ctx, "sbx_pg_test"); err != nil {
 		t.Fatalf("delete route: %v", err)
