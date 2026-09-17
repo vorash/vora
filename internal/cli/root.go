@@ -18,6 +18,8 @@ import (
 
 type app struct {
 	socket string
+	api    string
+	apiKey string
 	json   bool
 }
 
@@ -36,6 +38,8 @@ func Execute() int {
 		SilenceErrors: true,
 	}
 	root.PersistentFlags().StringVar(&a.socket, "socket", defaultSocket(), "runner control socket")
+	root.PersistentFlags().StringVar(&a.api, "api", "", "vora-api base URL (e.g. http://127.0.0.1:9300); uses the remote HTTP API instead of the local socket")
+	root.PersistentFlags().StringVar(&a.apiKey, "api-key", "", "API key for --api")
 	root.PersistentFlags().BoolVar(&a.json, "json", false, "output JSON")
 
 	root.AddCommand(
@@ -44,6 +48,8 @@ func Execute() int {
 		a.cpCmd(),
 		a.logsCmd(),
 		a.statsCmd(),
+		a.runnersCmd(),
+		a.keysCmd(),
 		a.versionCmd(),
 	)
 
@@ -74,9 +80,18 @@ func defaultSocket() string {
 	return cfg.SocketPath
 }
 
-// dial connects to the runner and returns a client and a cancelable context.
-func (a *app) dial() (*client.Client, context.Context, context.CancelFunc, error) {
+// dial connects to the runner or to vora-api. When --api is set the remote
+// HTTP client is used; otherwise the local runner socket.
+func (a *app) dial() (client.API, context.Context, context.CancelFunc, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	if a.api != "" {
+		c, err := client.DialAPI(a.api, a.apiKey)
+		if err != nil {
+			cancel()
+			return nil, nil, nil, err
+		}
+		return c, ctx, cancel, nil
+	}
 	c, err := client.Dial(a.socket)
 	if err != nil {
 		cancel()
