@@ -77,25 +77,26 @@ boundaries are in [docs/architecture](docs/architecture/). The boundary matrix:
 | Host filesystem | read-only image rootfs; host paths never mounted | `TestFilesystemIsolation` |
 | Rootfs writes | `--ro-bind` root; only `/workspace`, `/root`, `/tmp` writable | `TestFilesystemIsolation` |
 | Cross-sandbox files | distinct mount namespaces; no shared writable paths | `TestCrossSandboxFilesystemIsolation` |
-| Processes / signals | PID namespace | `TestPIDNamespaceIsolation` |
-| IPC | IPC namespace | `--unshare-all` |
-| Privilege | unprivileged user namespace | `--unshare-all` |
+| Processes / signals | PID namespace | `TestPIDNamespaceIsolation`, `TestCannotSignalHost` |
+| IPC | IPC namespace | `TestIPCNamespaceIsolation` |
+| UTS | private hostname | `TestUTSNamespaceIsolation` |
+| Privilege | unprivileged user namespace (bwrap) | `TestUnprivilegedUserNamespace` |
 | Memory | `memory.max` (+ `MemorySwapMax=0`) | `TestMemoryBombKilled` |
 | Processes | `pids.max` | `TestForkBombContained` |
 | CPU | `cpu.max` | `TestSystemdUnitLimitsAndTeardown` |
-| Network | `--unshare-net` (no interfaces/routes) | `TestNetworkNone` |
+| Control socket | per-sandbox ipc bind | `TestControlSocketIsolation` |
+| Network | `--unshare-net` / `runsc --network none` | `TestNetworkNone` |
 | Secrets | runner credentials never injected into the sandbox | `TestNoSecretsLeak` |
 
 `tests/security/` is a deliverable, not an afterthought: each test encodes *why*
 the boundary matters and was verified to fail when the corresponding flag is
 removed. `make test-security-all` runs the whole matrix against **both** bwrap
-and gVisor (the gVisor leg inside a `rootlesskit` user namespace). Fork/memory
-resource limits are bwrap-only in v0.2 (see limitations).
+and gVisor (the gVisor leg inside a `rootlesskit` user namespace).
 
 ## Demo
 
 ```console
-$ vora sandbox create --image python:3.13 --memory 512m --cpu 1 --pids 128 --network none
+$ vora sandbox create --image python --memory 512m --cpu 1 --pids 128 --network none
 Sandbox created: sbx_01M2NVHE1KRD8JT3D6QG6R0EW3
 
 $ vora exec sbx_01M2NVHE1KRD8JT3D6QG6R0EW3 -- python3 -c 'print("hello from vora")'
@@ -136,7 +137,7 @@ Docker (to build images), Bubblewrap, `runsc` (gVisor), `rootlesskit`,
 `slirp4netns`, `fuse-overlayfs`, and a systemd user session.
 
 ```bash
-make images            # build the read-only rootfs cache (Docker export; containerd-backed WIP)
+make images            # build the read-only rootfs cache as <name>/latest (Docker export; containerd-backed WIP)
 make binaries          # build bin/{vora,vora-runner,vora-init} (static)
 make test              # unit tests
 make test-integration  # runner + sandbox lifecycle over a real socket (incl. Postgres via testcontainers)
@@ -145,6 +146,10 @@ make test-security-all # isolation matrix against bwrap AND gVisor
 make bench-report      # benchmarks + report in docs/benchmarks/
 make help              # all targets
 ```
+
+GitHub Actions (`.github/workflows/ci.yml`) runs unit tests, then bwrap
+integration and security tests on `ubuntu-latest`. gVisor is skipped there
+(no KVM / rootlesskit userns on hosted runners).
 
 Install and start the rootlesskit-wrapped runner (required for gVisor):
 
@@ -163,13 +168,10 @@ Configuration is via environment variables: `VORA_STATE_DIR`, `VORA_SOCKET`,
 
 ## Limitations (honest)
 
-- **gVisor resource limits are not enforced yet.** The rootless gVisor backend
-  runs `runsc` with `--ignore-cgroups`, so `pids.max`/`memory.max` and the
-  fork/memory-bomb tests apply to bwrap only. Wiring cgroup v2 limits through
-  the rootlesskit userns is a follow-up.
-- **Images still come from the Docker-export cache.** containerd is used as the
-  OCI store for container data, but the rootfs cache is not yet materialised
-  from containerd snapshots (ADR 009) — that migration is pending.
+- **Images still come from the Docker-export cache** as `<name>/<tag>/rootfs`
+  (implicit tag `latest`). containerd is used as the OCI store for container
+  data, but the rootfs cache is not yet materialised from containerd snapshots
+  (ADR 009) — that migration is pending.
 - **No syscall filtering for bwrap.** seccomp is not applied; Bubblewrap
   `--seccomp` is a planned hardening step. gVisor provides its own syscall
   surface.
@@ -191,7 +193,7 @@ Configuration is via environment variables: `VORA_STATE_DIR`, `VORA_SOCKET`,
 | **v0.2 (this)** | **gVisor backend (direct `runsc`, Method 2), backend selection, rootlesskit runner service, PostgreSQL/Supabase audit, dual-backend isolation matrix** |
 | v0.3 | HTTP control plane + remote runner, network policy + egress gateway (SNI allowlist), credential brokering, TS/Python SDK, MCP |
 | v1.0 | Firecracker microVM tier, snapshots/forks |
-| pending | containerd-snapshot rootfs (ADR 009); cgroup limits for gVisor |
+| pending | containerd-snapshot rootfs (ADR 009) |
 
 ## License
 

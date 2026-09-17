@@ -1,6 +1,6 @@
 # Sandbox Lifecycle
 
-Status: draft · Applies to: v0.1
+Status: draft · Applies to: v0.2
 
 ## States
 
@@ -102,12 +102,13 @@ termination reasons are read from the sandbox cgroup:
 
 - A reaper goroutine expires RUNNING sandboxes whose TTL elapsed → `EXPIRED`,
   then destroys them.
-- On runner start the reconciler compares persisted state with reality:
-  - persisted RUNNING but unit gone → mark `FAILED`;
-  - unit present but no config → stop the orphan unit;
-  - state `CREATING`/`STARTING` → clean up partial resources.
-- Orphan units are found via
-  `systemctl --user list-units 'vora-sbx_*.service'`.
+- On runner start the reconciler **fail-closes**. It does not reattach live
+  sandboxes:
+  1. every store record in `CREATING`/`STARTING`/`RUNNING`/`STOPPING` is
+     reaped (`Sweeper.Reap`) and marked `FAILED`, workspace cleaned;
+  2. leftover backend containers (e.g. `runsc list`) not in the store are reaped;
+  3. leftover `vora-sbx_*` systemd units are stopped and reset.
+- Handles are in-memory; exec after a restart requires a new sandbox.
 
 ## Cleanup guarantees
 

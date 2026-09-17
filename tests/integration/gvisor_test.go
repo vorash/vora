@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vorash/vora/internal/cgroup"
 	"github.com/vorash/vora/internal/config"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/runtime/gvisor"
@@ -33,7 +34,11 @@ func TestGvisorBackendLifecycle(t *testing.T) {
 
 	cfg := config.Config{StateDir: t.TempDir(), GvisorPlatform: "kvm", GvisorRunRoot: filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "vora-gvisor-itest")}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	backend, err := gvisor.New(cfg, logger)
+	subtree, err := cgroup.NewSubtree()
+	if err != nil {
+		t.Skipf("cgroup subtree unavailable: %v", err)
+	}
+	backend, err := gvisor.New(cfg, logger, subtree)
 	if err != nil {
 		t.Skipf("gvisor backend unavailable: %v", err)
 	}

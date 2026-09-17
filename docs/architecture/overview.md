@@ -1,21 +1,22 @@
 # Architecture Overview
 
-Status: draft · Applies to: v0.1–v0.2
+Status: draft · Applies to: v0.2
 
 ## Purpose
 
 Vora executes untrusted agent-generated code behind a policy-controlled
-execution boundary. This document describes the v0.1 component model and the
+execution boundary. This document describes the v0.2 component model and the
 seams that later versions extend.
 
 ## Scope
 
-**v0.1 (this document).** A single Go runner that creates Bubblewrap sandboxes,
-enforces cgroup v2 limits, provides repeated exec into a live sandbox, persists
-state, and is driven by a CLI over a gRPC Unix socket.
+**v0.2 (this document).** A single Go runner with two isolation backends
+(Bubblewrap and gVisor) behind `runtime.Backend`, cgroup v2 limits on both,
+repeated exec into a live sandbox, persist-before-observe state, fail-closed
+startup reconcile, and a CLI over a gRPC Unix socket.
 
-**Not in v0.1.** gVisor, HTTP control plane, egress gateway, credential
-brokering, snapshots, SDKs, multi-runner scheduling, Kubernetes.
+**Not in v0.2.** HTTP control plane, egress gateway, credential brokering,
+snapshots, SDKs, multi-runner scheduling, Kubernetes.
 
 ## Components
 
@@ -24,27 +25,18 @@ brokering, snapshots, SDKs, multi-runner scheduling, Kubernetes.
                              │  gRPC over unix socket
                              ▼
                     ┌─────────────────────┐
-                    │    vora-runner      │  /var/run/vora/runner.sock
-                    │                     │
-                    │ sandbox state mch.  │  /var/lib/vora/…
+                    │    vora-runner      │  runtime/vora/runner.sock
+                    │  (rootlesskit userns)│
+                    │ sandbox state mch.  │  state/<sandbox>/
                     │ TTL reaper          │
                     │ reconciler          │
                     │ runtime.Registry    │
                     └─────────┬───────────┘
                               │ runtime.Backend
-                     ┌────────┴────────┐
-                     ▼                 ▼
-              bwrap backend      cgroup.Manager (systemd service)
-                     │                 │
-                     │  systemd-run --user -p MemoryMax … -- bwrap …
-                     ▼
-              ┌──────────────────────────────────────────────┐
-              │ bubblewrap sandbox                            │
-              │  namespaces: user/pid/net/ipc/uts/mnt         │
-              │  ro rootfs (shared image cache)               │
-              │  rw /workspace, rw /root, tmpfs /tmp          │
-              │  vora-init (PID 1, gRPC agent)                │
-              └──────────────────────────────────────────────┘
+              ┌───────────────┴───────────────┐
+              ▼                               ▼
+       gVisor (runsc Method 2)         bwrap + systemd-run
+       delegated cgroup subtree        -p MemoryMax/TasksMax/CPUQuota
 ```
 
 | Component | Responsibility |
@@ -52,8 +44,8 @@ brokering, snapshots, SDKs, multi-runner scheduling, Kubernetes.
 | `vora` | CLI: create/inspect/exec/copy/logs/stats/destroy |
 | `vora-runner` | daemon: lifecycle, state, TTL, reconciliation, exposes `RunnerService` |
 | `vora-init` | PID 1 inside the sandbox; serves `AgentService` for exec/signal/shutdown |
-| `runtime.Backend` | isolation-technology interface (bwrap today, gVisor later) |
-| `cgroup.Manager` | per-sandbox resource limits and stats via systemd services |
+| `runtime.Backend` | isolation-technology interface (`bwrap`, `gvisor`) |
+| `cgroup.Manager` / `cgroup.Subtree` | bwrap: transient systemd units. gVisor: delegated cgroup v2 subtree |
 | `images` | read-only rootfs cache shared by all sandboxes |
 | `workspace` | per-sandbox mutable directories and mount points |
 | `sandbox.Store` | persisted metadata and state machine |
@@ -88,9 +80,9 @@ type Backend interface {
 }
 ```
 
-`Capabilities` declares whether a backend provides native exec
-(`gVisor: true`, `bwrap: false`), owns cgroups (`containerd-backed: true`), and
-which network modes it supports.
+`Capabilities` declares native exec, cgroup ownership, whether resource limits
+actually bite (`EnforcesResourceLimits`), and which network modes it supports.
+Auto-select prefers gVisor only when UID is 0 and limits are enforced.
 
 ## Deployment modes
 

@@ -70,7 +70,11 @@ func backends() []backendCase {
 				return os.Getuid() == 0
 			},
 			new: func(t *testing.T, cfg config.Config) runtime.Backend {
-				b, err := gvisor.New(cfg, discardLogger())
+				subtree, err := cgroup.NewSubtree()
+				if err != nil {
+					t.Skipf("cgroup subtree unavailable: %v", err)
+				}
+				b, err := gvisor.New(cfg, discardLogger(), subtree)
 				if err != nil {
 					t.Skipf("gvisor backend unavailable: %v", err)
 				}
@@ -163,6 +167,26 @@ func (f *fixture) create(id string, limits runtime.ResourceLimits) runtime.Handl
 // exec runs a command and returns stdout, stderr and the exit code.
 func (f *fixture) exec(h runtime.Handle, command string, args ...string) (string, string, int32) {
 	f.t.Helper()
+	out, errb, code, err := f.execStream(h, command, args...)
+	if err != nil {
+		f.t.Fatalf("recv: %v", err)
+	}
+	return out, errb, code
+}
+
+// execAllowDisconnect is exec, but a dropped stream (OOM killing the agent)
+// is a non-zero exit rather than a test failure.
+func (f *fixture) execAllowDisconnect(h runtime.Handle, command string, args ...string) (string, string, int32) {
+	f.t.Helper()
+	out, errb, code, err := f.execStream(h, command, args...)
+	if err != nil {
+		return out, errb, -1
+	}
+	return out, errb, code
+}
+
+func (f *fixture) execStream(h runtime.Handle, command string, args ...string) (string, string, int32, error) {
+	f.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	stream, err := f.backend.Exec(ctx, h, runtime.ExecRequest{
@@ -181,10 +205,10 @@ func (f *fixture) exec(h runtime.Handle, command string, args ...string) (string
 	for {
 		chunk, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
-			return out.String(), errb.String(), code
+			return out.String(), errb.String(), code, nil
 		}
 		if err != nil {
-			f.t.Fatalf("recv: %v", err)
+			return out.String(), errb.String(), code, err
 		}
 		out.Write(chunk.Stdout)
 		errb.Write(chunk.Stderr)
@@ -242,7 +266,7 @@ func imageRootfs(t *testing.T, name string) string {
 		home, _ := os.UserHomeDir()
 		stateHome = filepath.Join(home, ".local", "state")
 	}
-	rootfs := filepath.Join(stateHome, "vora", "images", name, "rootfs")
+	rootfs := filepath.Join(stateHome, "vora", "images", name, "latest", "rootfs")
 	if info, err := os.Stat(rootfs); err != nil || !info.IsDir() {
 		t.Skipf("image %q not built (run 'make images')", name)
 	}

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -87,9 +88,10 @@ func (b *Backend) Name() string { return "bwrap" }
 // Capabilities implements runtime.Backend.
 func (b *Backend) Capabilities() runtime.Capabilities {
 	return runtime.Capabilities{
-		NativeExec:   false, // exec is mediated by vora-init
-		OwnsCgroups:  false, // the runner applies cgroup limits
-		NetworkModes: []runtime.NetworkMode{runtime.NetworkNone},
+		NativeExec:             false, // exec is mediated by vora-init
+		OwnsCgroups:            false, // systemd-run applies limits
+		EnforcesResourceLimits: true,
+		NetworkModes:           []runtime.NetworkMode{runtime.NetworkNone},
 	}
 }
 
@@ -235,7 +237,9 @@ func (b *Backend) Signal(ctx context.Context, h runtime.Handle, sig int32) error
 	return hd.client.Signal(ctx, sig)
 }
 
-// Stats reads resource usage from the sandbox cgroup.
+// Stats reads resource usage from the sandbox cgroup. After an OOM the cgroup
+// files may already be gone; systemd's Result=oom-kill is retained on the
+// failed unit and is mapped onto OOMKills.
 func (b *Backend) Stats(ctx context.Context, h runtime.Handle) (*runtime.Stats, error) {
 	hd, err := b.handle(h)
 	if err != nil {
@@ -246,7 +250,12 @@ func (b *Backend) Stats(ctx context.Context, h runtime.Handle) (*runtime.Stats, 
 	}
 	st, err := hd.unit.Stats(ctx)
 	if err != nil {
-		return &runtime.Stats{}, nil
+		st = &runtime.Stats{}
+	}
+	if st.OOMKills == 0 {
+		if result, rerr := hd.unit.Result(ctx); rerr == nil && result == "oom-kill" {
+			st.OOMKills = 1
+		}
 	}
 	return st, nil
 }
@@ -288,6 +297,54 @@ func (b *Backend) Destroy(ctx context.Context, h runtime.Handle) error {
 	b.mu.Lock()
 	delete(b.handles, hd.id)
 	b.mu.Unlock()
+	return nil
+}
+
+// List implements runtime.Sweeper.
+func (b *Backend) List(ctx context.Context) ([]string, error) {
+	if b.cgroups == nil {
+		return nil, nil
+	}
+	units, err := b.cgroups.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, name := range units {
+		if !cgroup.IsSandboxUnit(name) {
+			continue
+		}
+		ids = append(ids, strings.TrimPrefix(name, cgroup.UnitPrefix))
+	}
+	return ids, nil
+}
+
+// Reap implements runtime.Sweeper.
+func (b *Backend) Reap(ctx context.Context, id string) error {
+	b.mu.Lock()
+	if hd, ok := b.handles[id]; ok {
+		delete(b.handles, id)
+		b.mu.Unlock()
+		if hd.client != nil {
+			_ = hd.client.Close()
+		}
+		if hd.unit != nil {
+			_ = hd.unit.Stop(ctx)
+			_ = hd.unit.Remove(ctx)
+			return nil
+		}
+	} else {
+		b.mu.Unlock()
+	}
+	if b.cgroups == nil {
+		return nil
+	}
+	u, err := b.cgroups.Attach(ctx, cgroup.UnitName(id))
+	if err != nil {
+		return nil
+	}
+	_ = u.Stop(ctx)
+	_ = u.Remove(ctx)
 	return nil
 }
 

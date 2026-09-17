@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/vorash/vora/internal/cgroup"
 	"github.com/vorash/vora/internal/config"
 	"github.com/vorash/vora/internal/runtime"
 )
@@ -30,6 +31,7 @@ type Backend struct {
 	runsc    string
 	root     string
 	platform string
+	subtree  cgroup.Subtree
 
 	mu      sync.Mutex
 	handles map[string]*handle
@@ -39,12 +41,14 @@ type handle struct {
 	id        string
 	spec      runtime.SandboxSpec
 	bundleDir string
+	group     *cgroup.Group
 }
 
 func (h *handle) ID() string { return h.id }
 
-// New returns a gVisor backend.
-func New(cfg config.Config, logger *slog.Logger) (*Backend, error) {
+// New returns a gVisor backend. subtree may be nil; Start then fails rather
+// than running an unlimited sandbox.
+func New(cfg config.Config, logger *slog.Logger, subtree cgroup.Subtree) (*Backend, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -73,6 +77,7 @@ func New(cfg config.Config, logger *slog.Logger) (*Backend, error) {
 		runsc:    runsc,
 		root:     root,
 		platform: platform,
+		subtree:  subtree,
 		handles:  make(map[string]*handle),
 	}
 	logger.Info("gvisor backend ready", "runsc", runsc, "platform", platform, "root", root)
@@ -106,9 +111,10 @@ func (b *Backend) Name() string { return "gvisor" }
 // Capabilities implements runtime.Backend.
 func (b *Backend) Capabilities() runtime.Capabilities {
 	return runtime.Capabilities{
-		NativeExec:   true,  // runsc exec, no in-sandbox agent
-		OwnsCgroups:  false, // no cgroup limits in rootless mode
-		NetworkModes: []runtime.NetworkMode{runtime.NetworkNone},
+		NativeExec:             true, // runsc exec, no in-sandbox agent
+		OwnsCgroups:            true, // delegated subtree under the runner
+		EnforcesResourceLimits: b.subtree != nil,
+		NetworkModes:           []runtime.NetworkMode{runtime.NetworkNone},
 	}
 }
 
@@ -125,6 +131,10 @@ func (b *Backend) globalFlags() []string {
 // inherits the file descriptors, so an os.Pipe would never close and Wait would
 // hang. The file is read back after the direct child exits.
 func (b *Backend) run(ctx context.Context, args ...string) (string, error) {
+	return b.runIn(ctx, nil, args...)
+}
+
+func (b *Backend) runIn(ctx context.Context, g *cgroup.Group, args ...string) (string, error) {
 	f, err := os.CreateTemp("", "vora-runsc-out-*")
 	if err != nil {
 		return "", err
@@ -135,6 +145,13 @@ func (b *Backend) run(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, b.runsc, append(b.globalFlags(), args...)...)
 	cmd.Stdout = f
 	cmd.Stderr = f
+	if g != nil {
+		closer, err := g.ApplyTo(cmd)
+		if err != nil {
+			return "", err
+		}
+		defer closer()
+	}
 	runErr := cmd.Run()
 
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
@@ -184,14 +201,28 @@ func (b *Backend) Start(ctx context.Context, h runtime.Handle) error {
 	if err != nil {
 		return err
 	}
+	if b.subtree == nil {
+		return fmt.Errorf("gvisor: resource limits unavailable (cgroup subtree not writable)")
+	}
+	group, err := b.subtree.Create(ctx, hd.id, hd.spec.Resources)
+	if err != nil {
+		return fmt.Errorf("gvisor: cgroup: %w", err)
+	}
+	hd.group = group
 	if err := writeBundle(b.runsc, hd.bundleDir, hd.spec); err != nil {
+		_ = group.Destroy()
+		hd.group = nil
 		return err
 	}
-	if out, err := b.run(ctx, "create", "--bundle", hd.bundleDir, hd.id); err != nil {
+	if out, err := b.runIn(ctx, group, "create", "--bundle", hd.bundleDir, hd.id); err != nil {
+		_ = group.Destroy()
+		hd.group = nil
 		return fmt.Errorf("gvisor: create: %w: %s", err, out)
 	}
-	if out, err := b.run(ctx, "start", hd.id); err != nil {
+	if out, err := b.runIn(ctx, group, "start", hd.id); err != nil {
 		_, _ = b.run(ctx, "delete", "--force", hd.id)
+		_ = group.Destroy()
+		hd.group = nil
 		return fmt.Errorf("gvisor: start: %w: %s", err, out)
 	}
 	b.logger.Info("sandbox started", "sandbox_id", hd.id, "backend", "gvisor", "platform", b.platform)
@@ -248,19 +279,20 @@ func (b *Backend) Signal(ctx context.Context, h runtime.Handle, sig int32) error
 	return err
 }
 
-// Stats returns resource usage. gVisor runs without our cgroup limits in
-// rootless mode, so this is best-effort; `runsc events --stats` output is
-// parsed when available.
+// Stats returns resource usage from the sandbox cgroup.
 func (b *Backend) Stats(ctx context.Context, h runtime.Handle) (*runtime.Stats, error) {
 	hd, err := b.handle(h)
 	if err != nil {
 		return nil, err
 	}
-	out, err := b.run(ctx, "events", "--stats", hd.id)
-	if err != nil {
-		return &runtime.Stats{}, nil
+	if hd.group != nil {
+		st, err := hd.group.Stats()
+		if err != nil {
+			return &runtime.Stats{}, nil
+		}
+		return st, nil
 	}
-	return parseStats(out), nil
+	return &runtime.Stats{}, nil
 }
 
 // Stop kills the sandbox.
@@ -285,6 +317,10 @@ func (b *Backend) Destroy(ctx context.Context, h runtime.Handle) error {
 	_, _ = b.run(ctx, "kill", hd.id, "KILL")
 	if out, err := b.run(ctx, "delete", "--force", hd.id); err != nil && !isMissing(out) {
 		b.logger.Warn("gvisor delete failed", "sandbox_id", hd.id, "error", err, "output", out)
+	}
+	if hd.group != nil {
+		_ = hd.group.Destroy()
+		hd.group = nil
 	}
 	_ = os.RemoveAll(hd.bundleDir)
 
@@ -316,6 +352,11 @@ func (b *Backend) List(ctx context.Context) ([]string, error) {
 func (b *Backend) Reap(ctx context.Context, id string) error {
 	_, _ = b.run(ctx, "kill", id, "KILL")
 	_, err := b.run(ctx, "delete", "--force", id)
+	if b.subtree != nil {
+		if g, aerr := b.subtree.Attach(ctx, id); aerr == nil {
+			_ = g.Destroy()
+		}
+	}
 	return err
 }
 

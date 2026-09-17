@@ -3,12 +3,14 @@
 # build-images.sh builds the read-only sandbox rootfs cache.
 #
 # Each images/<name>/Dockerfile is built with Docker, then exported to
-#   $VORA_STATE_DIR/images/<name>/rootfs
+#   $VORA_STATE_DIR/images/<name>/latest/rootfs
 # and tagged with the source image id in
-#   $VORA_STATE_DIR/images/<name>/image-id
+#   $VORA_STATE_DIR/images/<name>/latest/image-id
 #
 # The runner binds this rootfs read-only into sandboxes, so it can be shared
 # by every sandbox that uses the image.
+#
+# Optional args limit which images to build (e.g. ./scripts/build-images.sh base).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -29,7 +31,7 @@ build_image() {
   local ctx tag dir
   ctx="$(dirname "$dockerfile")"
   tag="vora/${name}:latest"
-  dir="$IMAGES_DIR/$name"
+  dir="$IMAGES_DIR/$name/latest"
 
   if [[ ! -f "$dockerfile" ]]; then
     echo "error: missing $dockerfile" >&2
@@ -58,7 +60,7 @@ build_image() {
   local image_id
   image_id="$(docker image inspect --format '{{.Id}}' "$tag")"
 
-  echo "==> exporting rootfs for $name"
+  echo "==> exporting rootfs for $name:latest"
   mkdir -p "$IMAGES_DIR"
   local tmp
   tmp="$(mktemp -d "$IMAGES_DIR/.build-${name}-XXXXXX")"
@@ -81,11 +83,18 @@ build_image() {
 
 main() {
   shopt -s nullglob
-  local found=0
-  for dockerfile in "$REPO_ROOT"/images/*/Dockerfile; do
-    local name
-    name="$(basename "$(dirname "$dockerfile")")"
-    build_image "$name" "$dockerfile"
+  local found=0 names=()
+  if [[ $# -gt 0 ]]; then
+    names=("$@")
+  else
+    local dockerfile
+    for dockerfile in "$REPO_ROOT"/images/*/Dockerfile; do
+      names+=("$(basename "$(dirname "$dockerfile")")")
+    done
+  fi
+  local name
+  for name in "${names[@]}"; do
+    build_image "$name" "$REPO_ROOT/images/$name/Dockerfile"
     found=1
   done
   if [[ "$found" -eq 0 ]]; then

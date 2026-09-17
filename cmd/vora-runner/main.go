@@ -188,13 +188,17 @@ func registerBackends(cfg config.Config, registry *runtime.Registry, logger *slo
 		logger.Info("registered runtime backend", "backend", backend.Name())
 	}
 
-	// gVisor is preferred when available (auto-selection prefers gvisor).
-	if backend, err := gvisor.New(cfg, logger); err != nil {
+	subtree, err := cgroup.NewSubtree()
+	if err != nil {
+		logger.Warn("cgroup subtree unavailable; gVisor cannot enforce resource limits", "error", err)
+		subtree = nil
+	}
+	if backend, err := gvisor.New(cfg, logger, subtree); err != nil {
 		logger.Warn("gvisor backend unavailable", "error", err)
 	} else if err := registry.Register(backend); err != nil {
 		logger.Warn("register backend failed", "backend", backend.Name(), "error", err)
 	} else {
-		logger.Info("registered runtime backend", "backend", backend.Name())
+		logger.Info("registered runtime backend", "backend", backend.Name(), "limits", backend.Capabilities().EnforcesResourceLimits)
 	}
 
 	return manager

@@ -413,27 +413,40 @@ func (s *Server) ReapExpired(ctx context.Context) error {
 	return nil
 }
 
-// Reconcile repairs runner state at startup: it removes runtime units left
-// behind by a previous run and marks orphaned active sandboxes as FAILED.
+// Reconcile fail-closes runner state at startup: active store records are
+// reaped and marked FAILED, then leftover backend containers and systemd
+// units are swept. Live sandboxes are not reattached.
 func (s *Server) Reconcile(ctx context.Context) error {
-	if s.cgroups != nil {
-		units, err := s.cgroups.List(ctx)
-		if err != nil {
-			s.logger.Warn("reconcile: list units failed", "error", err)
+	recs, err := s.store.List()
+	if err != nil {
+		return err
+	}
+	inStore := make(map[string]*sandbox.Record, len(recs))
+	for _, rec := range recs {
+		inStore[rec.ID] = rec
+	}
+
+	for _, rec := range recs {
+		switch rec.State {
+		case sandbox.StateRunning, sandbox.StateStarting, sandbox.StateCreating, sandbox.StateStopping:
+		default:
+			continue
 		}
-		for _, name := range units {
-			if !cgroup.IsSandboxUnit(name) {
-				continue
-			}
-			s.logger.Info("reconcile: removing stale unit", "unit", name)
-			if u, aerr := s.cgroups.Attach(ctx, name); aerr == nil {
-				_ = u.Stop(ctx)
-				_ = u.Remove(ctx)
-			}
+		s.logger.Warn("reconcile: reaping active sandbox", "sandbox_id", rec.ID, "state", rec.State)
+		s.reapRuntime(ctx, rec)
+		s.delHandle(rec.ID)
+		if rec.State == sandbox.StateRunning {
+			s.metrics.SandboxRunning.Dec()
+			s.metrics.RunnerSandboxes.Dec()
+		}
+		if err := s.transition(rec, sandbox.StateFailed, runtime.ReasonRuntimeFailure); err != nil {
+			s.logger.Warn("reconcile: transition failed", "sandbox_id", rec.ID, "error", err)
+		}
+		if err := s.workspaces.Clean(rec.ID); err != nil {
+			s.logger.Warn("reconcile: clean failed", "sandbox_id", rec.ID, "error", err)
 		}
 	}
 
-	// Reap backend-managed sandboxes that are no longer in the store.
 	for _, name := range s.registry.Names() {
 		b, ok := s.registry.Get(name)
 		if !ok {
@@ -449,31 +462,62 @@ func (s *Server) Reconcile(ctx context.Context) error {
 			continue
 		}
 		for _, id := range ids {
-			if _, err := s.store.Load(id); err == nil {
+			if rec, ok := inStore[id]; ok && rec.State.Active() {
 				continue
 			}
-			s.logger.Info("reconcile: reaping orphaned sandbox", "backend", name, "sandbox_id", id)
+			s.logger.Info("reconcile: reaping leftover sandbox", "backend", name, "sandbox_id", id)
 			_ = sw.Reap(ctx, id)
 		}
 	}
 
-	recs, err := s.store.List()
-	if err != nil {
-		return err
-	}
-	for _, rec := range recs {
-		switch rec.State {
-		case sandbox.StateRunning, sandbox.StateStarting, sandbox.StateCreating, sandbox.StateStopping:
-			s.logger.Warn("reconcile: repairing orphaned sandbox to FAILED", "sandbox_id", rec.ID, "state", rec.State)
-			if err := s.transition(rec, sandbox.StateFailed, runtime.ReasonRuntimeFailure); err != nil {
-				s.logger.Warn("reconcile: transition failed", "sandbox_id", rec.ID, "error", err)
-			}
-			if err := s.workspaces.Clean(rec.ID); err != nil {
-				s.logger.Warn("reconcile: clean failed", "sandbox_id", rec.ID, "error", err)
+	if s.cgroups != nil {
+		units, err := s.cgroups.List(ctx)
+		if err != nil {
+			s.logger.Warn("reconcile: list units failed", "error", err)
+		} else {
+			for _, name := range units {
+				if !cgroup.IsSandboxUnit(name) {
+					continue
+				}
+				s.logger.Info("reconcile: removing leftover unit", "unit", name)
+				if u, aerr := s.cgroups.Attach(ctx, name); aerr == nil {
+					_ = u.Stop(ctx)
+					_ = u.Remove(ctx)
+				}
 			}
 		}
 	}
 	return nil
+}
+
+func (s *Server) reapRuntime(ctx context.Context, rec *sandbox.Record) {
+	if rec.Spec.Backend != "" {
+		if b, ok := s.registry.Get(rec.Spec.Backend); ok {
+			if sw, ok := b.(runtime.Sweeper); ok {
+				if err := sw.Reap(ctx, rec.ID); err != nil {
+					s.logger.Warn("reconcile: reap failed", "backend", rec.Spec.Backend, "sandbox_id", rec.ID, "error", err)
+				}
+				return
+			}
+		}
+	}
+	for _, name := range s.registry.Names() {
+		b, ok := s.registry.Get(name)
+		if !ok {
+			continue
+		}
+		sw, ok := b.(runtime.Sweeper)
+		if !ok {
+			continue
+		}
+		_ = sw.Reap(ctx, rec.ID)
+	}
+	if s.cgroups != nil {
+		if u, err := s.cgroups.Attach(ctx, cgroup.UnitName(rec.ID)); err == nil {
+			_ = u.Stop(ctx)
+			_ = u.Remove(ctx)
+		}
+	}
 }
 
 // GetSandboxEvents returns the lifecycle event history for a sandbox.
@@ -491,12 +535,6 @@ func (s *Server) GetSandboxEvents(ctx context.Context, req *v1.GetSandboxEventsR
 	return &v1.GetSandboxEventsResponse{Events: eventsToProto(events)}, nil
 }
 
-// selectBackend resolves the backend for a spec: an explicit spec.Backend wins,
-// otherwise auto-select the strongest usable backend.
-//
-// gVisor is only preferred when the runner is running as UID 0, i.e. as root or
-// inside a rootlesskit user namespace (gVisor Method 2). An unprivileged
-// unwrapped runner falls back to bwrap, which works without a user namespace.
 // GetSandboxExecs returns the execution audit records for a sandbox.
 func (s *Server) GetSandboxExecs(ctx context.Context, req *v1.GetSandboxExecsRequest) (*v1.GetSandboxExecsResponse, error) {
 	if req.GetSandboxId() == "" {
@@ -512,6 +550,13 @@ func (s *Server) GetSandboxExecs(ctx context.Context, req *v1.GetSandboxExecsReq
 	return &v1.GetSandboxExecsResponse{Execs: execsToProto(execs)}, nil
 }
 
+// selectBackend resolves the backend for a spec: an explicit spec.Backend wins,
+// otherwise auto-select the strongest usable backend.
+//
+// gVisor is only preferred when the runner is UID 0 (root or a rootlesskit
+// user namespace) AND the backend reports EnforcesResourceLimits. An
+// unprivileged runner, or a gVisor without a writable cgroup subtree, falls
+// back to bwrap.
 func (s *Server) selectBackend(spec runtime.SandboxSpec) (runtime.Backend, error) {
 	if spec.Backend != "" {
 		if b, ok := s.registry.Get(spec.Backend); ok {
@@ -521,7 +566,9 @@ func (s *Server) selectBackend(spec runtime.SandboxSpec) (runtime.Backend, error
 	}
 	preferred := []string{}
 	if os.Getuid() == 0 {
-		preferred = append(preferred, "gvisor")
+		if b, ok := s.registry.Get("gvisor"); ok && b.Capabilities().EnforcesResourceLimits {
+			preferred = append(preferred, "gvisor")
+		}
 	}
 	preferred = append(preferred, "bwrap")
 	if b, ok := s.registry.Preferred(preferred...); ok {
