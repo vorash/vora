@@ -1,8 +1,8 @@
 # ADR 012 — Egress gateway (NetworkRestricted)
 
-- Status: accepted (bwrap only; gVisor is a documented limitation)
-- Date: 2026-09-17 (amended 2026-09-17 for v0.4: gateway DNS, broker port,
-  gVisor status)
+- Status: accepted (bwrap only; gVisor is a documented limitation; v0.4 adds
+  the broker port and the gateway resolver)
+- Date: 2026-09-17 (amended 2026-09-17 for v0.4)
 
 ## Context
 
@@ -72,23 +72,24 @@ delegated `cgroup.Subtree` gVisor already uses. `NetworkNone` keeps the existing
   auto-select falls back to bwrap for restricted specs. This is a **permanent
   limitation of the current design**, not pending work: the userspace-netstack
   gateway that would close it is out of scope for v0.x.
-- **DNS, decided for v0.4.** v0.3 DNATs only TCP, so a restricted workload must
-  use literal addresses. v0.4 adds an **allowlist-only resolver on the gateway
-  address**: the resolver answers only names matching the sandbox's
-  `AllowedDomains` (everything else returns NXDOMAIN/REFUSED), refuses answers
-  that map to a private/loopback/link-local/CGNAT address (reusing the same
-  `blockedIP` check that guards upstreams), and audits every query as an egress
+- **DNS resolves through the gateway (v0.4).** v0.3 DNAT'd only TCP, so a
+  restricted workload had to use literal addresses. The **allowlist-only
+  resolver on the gateway address** answers only names matching the sandbox's
+  `AllowedDomains` (everything else returns NXDOMAIN before the host resolver is
+  consulted), refuses answers that map to a private/loopback/link-local/CGNAT
+  address (reusing the same `blockedIP` check that guards upstreams), refuses
+  non-address query types, caches briefly, and audits every query as an egress
   decision. `nftRuleset` accepts UDP/53 and TCP/53 (truncated answers) to that
-  exact gateway endpoint, and the runner points the sandbox's resolver
-  configuration at it, so no image change is needed. Optional hardening, off by
-  default: DNAT `udp dport 53` from any destination to the gateway resolver so a
-  workload with a hardcoded resolver still gets fail-closed answers instead of a
-  silent drop.
-- **The broker port is a second gateway service.** v0.4 adds the credential
-  broker on the same gateway address (`:8080`, ADR 013). The `nft` filter
-  accepts the proxy, broker, and DNS endpoints only; every other destination and
-  protocol is still dropped, so a sandbox that speaks plaintext HTTP directly to
-  an arbitrary host remains denied.
+  exact gateway endpoint and DNATs any other UDP/53 destination there, so a
+  workload with a hardcoded resolver gets fail-closed answers instead of a
+  silent drop. The runner writes the sandbox's resolver configuration at start
+  (a bound `/etc/resolv.conf`; the image must provide the mount point), so no
+  image content change is needed.
+- **The broker port is a second gateway service (v0.4).** The credential
+  broker listens on the same gateway address (`:8080`, ADR 013). The `nft`
+  filter accepts the proxy, broker, and DNS endpoints only; every other
+  destination and protocol is still dropped, so a sandbox that speaks plaintext
+  HTTP directly to an arbitrary host remains denied.
 - The manager records live networks under `<state>/netns/` and reaps leftovers
   on runner startup (fail-closed restart), matching the runner's other
   reconcile behaviour.
