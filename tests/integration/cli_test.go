@@ -16,7 +16,7 @@ import (
 // argument-passing behaviour (the `--` separator) and exit-code propagation.
 func TestCLIWorkflow(t *testing.T) {
 	rootfs := imageRootfs(t, "base")
-	realImages := filepath.Dir(filepath.Dir(rootfs))
+	realImages := filepath.Dir(filepath.Dir(filepath.Dir(rootfs))) // .../images
 
 	binDir := t.TempDir()
 	for _, pkg := range []string{"vora", "vora-runner", "vora-init"} {

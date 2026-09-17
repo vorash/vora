@@ -40,7 +40,7 @@ func TestAPIControlPlane(t *testing.T) {
 		t.Skipf("systemd user manager unavailable: %v", err)
 	}
 	rootfs := imageRootfs(t, "base")
-	realImages := filepath.Dir(filepath.Dir(rootfs))
+	realImages := filepath.Dir(filepath.Dir(filepath.Dir(rootfs))) // .../images
 
 	stateDir := t.TempDir()
 	if err := os.Symlink(realImages, filepath.Join(stateDir, "images")); err != nil {
