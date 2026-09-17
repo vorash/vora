@@ -275,13 +275,30 @@ func (s *Server) createSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 	started, err := rc.StartSandbox(r.Context(), created.GetId())
 	if err != nil {
+		s.cleanupRunnerSandbox(rc, created.GetId(), "start failed")
 		writeGRPCError(w, err)
 		return
 	}
-	if err := s.store.SetRoute(r.Context(), SandboxRoute{SandboxID: started.GetId(), RunnerID: runner.ID, TenantID: spec.GetTenantId()}); err != nil {
-		s.logger.Warn("record route failed", "sandbox_id", started.GetId(), "error", err)
+	route := SandboxRoute{SandboxID: started.GetId(), RunnerID: runner.ID, TenantID: spec.GetTenantId()}
+	if err := s.store.SetRoute(r.Context(), route); err != nil {
+		s.cleanupRunnerSandbox(rc, started.GetId(), "route persistence failed")
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if deleteErr := s.store.DeleteRoute(cleanupCtx, started.GetId()); deleteErr != nil {
+			s.logger.Error("remove partial route failed", "sandbox_id", started.GetId(), "error", deleteErr)
+		}
+		cancel()
+		writeError(w, http.StatusInternalServerError, "failed to persist sandbox route")
+		return
 	}
 	writeProto(w, http.StatusCreated, started)
+}
+
+func (s *Server) cleanupRunnerSandbox(rc RunnerClient, sandboxID, cause string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := rc.DestroySandbox(ctx, sandboxID); err != nil {
+		s.logger.Error("compensating sandbox cleanup failed", "sandbox_id", sandboxID, "cause", cause, "error", err)
+	}
 }
 
 func (s *Server) listSandboxes(w http.ResponseWriter, r *http.Request) {

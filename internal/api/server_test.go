@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,18 +27,29 @@ const (
 )
 
 type fakeRunner struct {
-	specs     []*v1.SandboxSpec
-	sandboxes []*v1.Sandbox
-	chunks    []*v1.ExecChunk
-	closed    int
+	specs         []*v1.SandboxSpec
+	sandboxes     []*v1.Sandbox
+	chunks        []*v1.ExecChunk
+	createErr     error
+	startErr      error
+	destroyErr    error
+	destroyed     []string
+	destroyCtxErr error
+	closed        int
 }
 
 func (f *fakeRunner) CreateSandbox(_ context.Context, spec *v1.SandboxSpec) (*v1.Sandbox, error) {
 	f.specs = append(f.specs, spec)
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
 	return &v1.Sandbox{Id: "sbx_test", State: v1.SandboxState_RUNNING}, nil
 }
 
 func (f *fakeRunner) StartSandbox(_ context.Context, id string) (*v1.Sandbox, error) {
+	if f.startErr != nil {
+		return nil, f.startErr
+	}
 	return &v1.Sandbox{Id: id, State: v1.SandboxState_RUNNING}, nil
 }
 
@@ -52,7 +64,11 @@ func (f *fakeRunner) ListSandboxes(_ context.Context, _ bool) ([]*v1.Sandbox, er
 	return []*v1.Sandbox{{Id: "sbx_test"}}, nil
 }
 
-func (f *fakeRunner) DestroySandbox(_ context.Context, _ string) error { return nil }
+func (f *fakeRunner) DestroySandbox(ctx context.Context, id string) error {
+	f.destroyed = append(f.destroyed, id)
+	f.destroyCtxErr = ctx.Err()
+	return f.destroyErr
+}
 
 func (f *fakeRunner) StatsSandbox(_ context.Context, _ string) (*v1.Stats, error) {
 	return &v1.Stats{MemoryBytes: 1}, nil
@@ -89,8 +105,13 @@ func (s *fakeStream) Recv() (*v1.ExecChunk, error) {
 
 func newTestServer(t *testing.T, fr *fakeRunner) (*Server, *httptest.Server) {
 	t.Helper()
+	return newTestServerWithStore(t, fr, NewMemStore())
+}
+
+func newTestServerWithStore(t *testing.T, fr *fakeRunner, store Store) (*Server, *httptest.Server) {
+	t.Helper()
 	s := New(Options{
-		Store:        NewMemStore(),
+		Store:        store,
 		JoinToken:    joinToken,
 		BootstrapKey: bootstrap,
 		Now:          time.Now,
@@ -387,6 +408,75 @@ func TestTenantAdminCannotManageOtherTenants(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("global runner inventory = %d, want 200", resp.StatusCode)
+	}
+}
+
+type failingRouteStore struct {
+	*MemStore
+	setErr    error
+	deleteErr error
+	partial   bool
+}
+
+func (s *failingRouteStore) SetRoute(ctx context.Context, route SandboxRoute) error {
+	if s.partial {
+		_ = s.MemStore.SetRoute(ctx, route)
+	}
+	return s.setErr
+}
+
+func (s *failingRouteStore) DeleteRoute(ctx context.Context, id string) error {
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
+	return s.MemStore.DeleteRoute(ctx, id)
+}
+
+func TestCreateSandboxCompensatesFailures(t *testing.T) {
+	tests := []struct {
+		name        string
+		runner      *fakeRunner
+		store       Store
+		wantDestroy bool
+	}{
+		{name: "create failure", runner: &fakeRunner{createErr: errors.New("create failed")}, store: NewMemStore()},
+		{name: "start failure", runner: &fakeRunner{startErr: errors.New("start failed")}, store: NewMemStore(), wantDestroy: true},
+		{name: "cleanup failure", runner: &fakeRunner{startErr: errors.New("start failed"), destroyErr: errors.New("cleanup failed")}, store: NewMemStore(), wantDestroy: true},
+		{name: "partial route failure", runner: &fakeRunner{}, store: &failingRouteStore{MemStore: NewMemStore(), setErr: errors.New("route failed"), partial: true}, wantDestroy: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, ts := newTestServerWithStore(t, tc.runner, tc.store)
+			resp := do(t, http.MethodPost, ts.URL+"/v1/sandboxes", bootstrap, &v1.SandboxSpec{Image: "vora/base"})
+			resp.Body.Close()
+			if resp.StatusCode < 400 {
+				t.Fatalf("status = %d, want failure", resp.StatusCode)
+			}
+			if got := len(tc.runner.destroyed) > 0; got != tc.wantDestroy {
+				t.Fatalf("destroy attempted = %v, want %v", got, tc.wantDestroy)
+			}
+			if _, err := s.store.Route(context.Background(), "sbx_test"); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("route survived failed create: %v", err)
+			}
+		})
+	}
+}
+
+func TestCreateCleanupIgnoresRequestCancellation(t *testing.T) {
+	fr := &fakeRunner{startErr: context.Canceled}
+	s, _ := newTestServer(t, fr)
+	req := httptest.NewRequest(http.MethodPost, "/v1/sandboxes", bytes.NewReader([]byte(`{"image":"vora/base"}`)))
+	req.Header.Set("Authorization", "Bearer "+bootstrap)
+	ctx, cancel := context.WithCancel(req.Context())
+	cancel()
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code < 400 {
+		t.Fatalf("status = %d, want failure", rr.Code)
+	}
+	if len(fr.destroyed) != 1 || fr.destroyCtxErr != nil {
+		t.Fatalf("cleanup = %v, context error = %v", fr.destroyed, fr.destroyCtxErr)
 	}
 }
 
