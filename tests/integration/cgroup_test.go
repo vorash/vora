@@ -43,25 +43,26 @@ func readCgroupFile(t *testing.T, cgroupPath, name string) string {
 	return strings.TrimSpace(string(data))
 }
 
-func cleanupUnit(t *testing.T, m cgroup.Manager, name string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	u, err := m.Attach(ctx, name)
-	if err == nil {
-		_ = u.Stop(ctx)
-	}
-	done := make(chan struct{})
-	go func() {
-		// Remove is what unloads failed units; retry briefly.
-		if u != nil {
-			_ = u.Remove(ctx)
+func cleanupUnit(t *testing.T, _ cgroup.Manager, name string) {
+	t.Helper()
+	// A unit can become failed only after the first reset-failed, so retry
+	// stop + reset-failed until systemd no longer knows the unit.
+	deadline := time.Now().Add(12 * time.Second)
+	for {
+		_ = exec.Command("systemctl", "--user", "stop", name).Run()
+		_ = exec.Command("systemctl", "--user", "reset-failed", name).Run()
+		if !unitPresent(name) || time.Now().After(deadline) {
+			return
 		}
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
+		time.Sleep(300 * time.Millisecond)
 	}
+}
+
+// unitPresent reports whether systemd still lists the unit.
+func unitPresent(name string) bool {
+	out, err := exec.Command("systemctl", "--user", "list-units", "--type=service",
+		"--all", "--no-legend", "--plain", "--no-pager", name).Output()
+	return err == nil && strings.TrimSpace(string(out)) != ""
 }
 
 func TestSystemdUnitLimitsAndTeardown(t *testing.T) {

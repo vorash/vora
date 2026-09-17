@@ -288,13 +288,18 @@ func mustBuildInit(t *testing.T) string {
 // TestMain fails the suite if any runtime units leak, making cleanup a tested
 // guarantee rather than an assumption.
 func TestMain(m *testing.M) {
+	// The integration suite runs before this one in CI and shares the systemd
+	// user session, so units it left behind must not be attributed to this
+	// suite: only units created *during this run* count as leaks.
+	preexisting := leakedUnitSet()
+
 	code := m.Run()
 
 	// Units may still be deactivating when the last test returns; retry briefly
 	// before declaring a leak.
 	var residual []string
 	for i := 0; i < 25; i++ {
-		residual = leakedUnits()
+		residual = newLeakedUnits(preexisting)
 		if len(residual) == 0 {
 			break
 		}
@@ -311,6 +316,27 @@ func TestMain(m *testing.M) {
 	}
 	cleanupGvisorTestRoot()
 	os.Exit(code)
+}
+
+// leakedUnitSet snapshots the current sandbox units.
+func leakedUnitSet() map[string]bool {
+	set := map[string]bool{}
+	for _, u := range leakedUnits() {
+		set[u] = true
+	}
+	return set
+}
+
+// newLeakedUnits returns sandbox units that are present now but were not in the
+// pre-run snapshot.
+func newLeakedUnits(preexisting map[string]bool) []string {
+	var out []string
+	for _, u := range leakedUnits() {
+		if !preexisting[u] {
+			out = append(out, u)
+		}
+	}
+	return out
 }
 
 // leakedUnits lists bwrap-managed systemd services that are still active or
