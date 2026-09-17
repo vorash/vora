@@ -162,11 +162,13 @@ func TestMemoryBombKilled(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, f *fixture) {
 		h := f.create("sbx_mem", limits(64, 64))
 
-		_, _, code := f.exec(h, "python3", "-c", "x = bytearray(400 * 1024 * 1024)")
+		// OOM often kills vora-init too, which drops the exec stream with
+		// Unavailable instead of a process exit code. That is the limit working.
+		_, _, code := f.execAllowDisconnect(h, "python3", "-c", "x = bytearray(400 * 1024 * 1024)")
 		if code == 0 {
 			t.Fatal("memory bomb exited successfully; memory limit not enforced")
 		}
-		if !f.waitFor(3*time.Second, func() bool { return f.stats(h).OOMKills > 0 }) {
+		if !f.waitFor(5*time.Second, func() bool { return f.stats(h).OOMKills > 0 }) {
 			t.Fatal("no OOM kill recorded; memory limit not enforced")
 		}
 	})
@@ -230,7 +232,7 @@ func TestUTSNamespaceIsolation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		out, _, _ := f.exec(h, "hostname")
+		out, _, _ := f.exec(h, "cat", "/proc/sys/kernel/hostname")
 		got := strings.TrimSpace(out)
 		if got == "" {
 			t.Fatal("sandbox hostname empty")

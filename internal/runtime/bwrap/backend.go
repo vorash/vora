@@ -237,7 +237,9 @@ func (b *Backend) Signal(ctx context.Context, h runtime.Handle, sig int32) error
 	return hd.client.Signal(ctx, sig)
 }
 
-// Stats reads resource usage from the sandbox cgroup.
+// Stats reads resource usage from the sandbox cgroup. After an OOM the cgroup
+// files may already be gone; systemd's Result=oom-kill is retained on the
+// failed unit and is mapped onto OOMKills.
 func (b *Backend) Stats(ctx context.Context, h runtime.Handle) (*runtime.Stats, error) {
 	hd, err := b.handle(h)
 	if err != nil {
@@ -248,7 +250,12 @@ func (b *Backend) Stats(ctx context.Context, h runtime.Handle) (*runtime.Stats, 
 	}
 	st, err := hd.unit.Stats(ctx)
 	if err != nil {
-		return &runtime.Stats{}, nil
+		st = &runtime.Stats{}
+	}
+	if st.OOMKills == 0 {
+		if result, rerr := hd.unit.Result(ctx); rerr == nil && result == "oom-kill" {
+			st.OOMKills = 1
+		}
 	}
 	return st, nil
 }
