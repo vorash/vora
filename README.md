@@ -270,6 +270,36 @@ enabled per channel with
 verifies client certificates. Unset means plaintext. `VORA_API_TLS_*` is no
 longer read.
 
+## Releases
+
+A `v*` tag produces a GitHub release with static `linux/amd64` binaries
+(`vora`, `vora-runner`, `vora-init`, `vora-api`), `SHA256SUMS`, and a tarball
+that also contains `LICENSE` and the systemd units. The same workflow publishes
+the sandbox rootfs images to GHCR as `ghcr.io/vorash/vora-{base,python,node}`,
+which the runner pulls by reference. Re-run it for an existing tag with
+`gh workflow run release.yml -f version=v0.4.0`.
+
+```console
+$ gh release download v0.4.0 --pattern 'vora_*_linux_amd64.tar.gz'
+$ gh release download v0.4.0 --pattern 'SHA256SUMS'
+$ sha256sum --check --ignore-missing SHA256SUMS
+$ tar -xzf vora_v0.4.0_linux_amd64.tar.gz
+
+# system host (root) — see docs/release.md for the env files and prerequisites
+$ sudo install -m 0755 vora vora-runner vora-init vora-api /usr/local/bin/
+$ sudo install -d -m 0750 /etc/vora && sudo install -d -m 0750 /var/lib/vora
+$ sudo install -m 0644 deploy/systemd/vora-runner.system.service /etc/systemd/system/vora-runner.service
+$ sudo systemctl daemon-reload && sudo systemctl enable --now vora-runner
+```
+
+From a checkout the equivalents are `make release-artifacts` and
+`sudo make install-system API=1` (which also writes the `/etc/vora/*.env`
+templates). Host convergence for real machines is
+[`vora-ansible`](https://github.com/vorash/vora-ansible);
+[docs/release.md](docs/release.md) covers what a release contains, the image
+requirement (`/etc/resolv.conf` must exist in the image layers for
+`NetworkRestricted`), and the package-visibility caveat for GHCR.
+
 ## Limitations (honest)
 
 - **Images resolve from containerd snapshots (ADR 009).** OCI images are pulled

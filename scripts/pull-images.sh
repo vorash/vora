@@ -9,8 +9,6 @@
 # Optional args limit which images to import (e.g. ./scripts/pull-images.sh base).
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
 NAMESPACE="${VORA_CONTAINERD_NAMESPACE:-vora}"
 SOCK="${VORA_CONTAINERD_ADDRESS:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/containerd/containerd.sock}"
 
