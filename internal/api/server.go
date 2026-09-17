@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -230,7 +231,7 @@ func (s *Server) authenticate(r *http.Request) (APIKey, bool) {
 	if token == "" {
 		return APIKey{}, false
 	}
-	if s.opts.BootstrapKey != "" && token == s.opts.BootstrapKey {
+	if s.opts.BootstrapKey != "" && subtle.ConstantTimeCompare([]byte(HashKey(token)), []byte(HashKey(s.opts.BootstrapKey))) == 1 {
 		return APIKey{Name: "bootstrap", Scopes: []string{ScopeAdmin, ScopeSandbox}}, true
 	}
 	key, err := s.store.KeyByHash(r.Context(), HashKey(token))
@@ -521,6 +522,10 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 		}
 		body.TenantID = caller.TenantID
 	}
+	if body.TenantID == "" && !hasScope(body.Scopes, ScopeAdmin) {
+		writeError(w, http.StatusBadRequest, "non-admin keys require a tenant_id")
+		return
+	}
 	plaintext, hash, err := NewAPIKey()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "key generation failed")
@@ -625,7 +630,19 @@ func isGlobalAdmin(key APIKey) bool {
 }
 
 func canAccessTenant(key APIKey, tenantID string) bool {
-	return isGlobalAdmin(key) || key.TenantID == tenantID
+	if isGlobalAdmin(key) {
+		return true
+	}
+	return key.TenantID != "" && key.TenantID == tenantID
+}
+
+func hasScope(scopes []string, scope string) bool {
+	for _, s := range scopes {
+		if s == scope {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) authorizedRoute(ctx context.Context, sandboxID string) (SandboxRoute, error) {

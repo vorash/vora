@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"testing"
 	"time"
 )
@@ -378,6 +379,48 @@ func TestProxyCloseTerminatesActiveConnections(t *testing.T) {
 	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
 	if _, err := conn.Read(make([]byte, 1)); err == nil {
 		t.Fatal("connection remained open after proxy cancellation")
+	}
+}
+
+func TestReasonFor(t *testing.T) {
+	for _, tc := range []struct {
+		err    error
+		reason string
+	}{
+		{errNotTLS, ReasonNotTLS},
+		{errNoSNI, ReasonNoSNI},
+		{os.ErrDeadlineExceeded, ReasonHandshakeTimeout},
+		{io.ErrUnexpectedEOF, ReasonHandshakeFailed},
+	} {
+		if got := reasonFor(tc.err); got != tc.reason {
+			t.Errorf("reasonFor(%v) = %q, want %q", tc.err, got, tc.reason)
+		}
+	}
+}
+
+func TestProxyControlRejectsPrivateIP(t *testing.T) {
+	events := make(chan Event, 1)
+	p := New("sbx_test", Policy{AllowedDomains: []string{"example.com"}}, nil, func(e Event) error {
+		events <- e
+		return nil
+	})
+	p.port = "443"
+	p.dialHost = "127.0.0.1"
+	conn := dialProxy(t, p)
+	if _, err := conn.Write(clientHello("example.com")); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("private-IP upstream should be denied before connect")
+	}
+	select {
+	case event := <-events:
+		if event.Allowed || event.Reason != ReasonBlockedIP {
+			t.Fatalf("event = %+v, want blocked_address", event)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("missing blocked-address event")
 	}
 }
 

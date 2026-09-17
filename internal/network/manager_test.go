@@ -1,6 +1,9 @@
 package network
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 func TestSubnetFor(t *testing.T) {
 	cases := []struct {
@@ -19,6 +22,15 @@ func TestSubnetFor(t *testing.T) {
 		if gw != c.gateway || sb != c.sandbox {
 			t.Errorf("subnetFor(%d) = %s, %s; want %s, %s", c.idx, gw, sb, c.gateway, c.sandbox)
 		}
+	}
+}
+
+func TestHolderAliveRejectsCurrentProcess(t *testing.T) {
+	if holderAlive(os.Getpid()) {
+		t.Fatal("current test process should not look like a netns holder")
+	}
+	if holderAlive(0) || holderAlive(-1) {
+		t.Fatal("invalid pids must not look alive")
 	}
 }
 

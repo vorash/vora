@@ -13,8 +13,10 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -28,13 +30,18 @@ const (
 
 // Denial reasons recorded on the audit trail.
 const (
-	ReasonNotAllowed      = "domain_not_allowed"
-	ReasonNotTLS          = "not_tls"
-	ReasonBlockedIP       = "blocked_address"
-	ReasonDialFailed      = "dial_failed"
-	ReasonConnectionLimit = "connection_limit"
-	ReasonAuditFailed     = "audit_failed"
+	ReasonNotAllowed       = "domain_not_allowed"
+	ReasonNotTLS           = "not_tls"
+	ReasonBlockedIP        = "blocked_address"
+	ReasonDialFailed       = "dial_failed"
+	ReasonConnectionLimit  = "connection_limit"
+	ReasonAuditFailed      = "audit_failed"
+	ReasonNoSNI            = "no_sni"
+	ReasonHandshakeTimeout = "handshake_timeout"
+	ReasonHandshakeFailed  = "handshake_failed"
 )
+
+var errBlockedAddr = errors.New("egress: blocked address")
 
 // Policy is the per-sandbox egress allowlist.
 type Policy struct {
@@ -112,7 +119,7 @@ func New(sandboxID string, policy Policy, logger *slog.Logger, onEvent func(Even
 			limits.IdleTimeout = configured[0].IdleTimeout
 		}
 	}
-	return &Proxy{
+	p := &Proxy{
 		sandboxID:      sandboxID,
 		policy:         policy,
 		logger:         logger,
@@ -124,6 +131,22 @@ func New(sandboxID string, policy Policy, logger *slog.Logger, onEvent func(Even
 		slots:          make(chan struct{}, limits.MaxConnections),
 		active:         make(map[net.Conn]struct{}),
 	}
+	p.dialer.Control = p.controlDial
+	return p
+}
+
+func (p *Proxy) controlDial(_ string, address string, _ syscall.RawConn) error {
+	if p.skipIPCheck {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return err
+	}
+	if blockedIP(net.ParseIP(host)) {
+		return errBlockedAddr
+	}
+	return nil
 }
 
 // Listen binds the proxy to addr (the sandbox's gateway address) and starts
@@ -170,6 +193,18 @@ func (p *Proxy) serve(ctx context.Context) {
 		}
 		conn, err := ln.Accept()
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			p.logger.Error("egress accept failed", "sandbox_id", p.sandboxID, "error", err)
+			if errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) || errors.Is(err, syscall.ENOMEM) {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				continue
+			}
 			return
 		}
 		select {
@@ -219,7 +254,11 @@ func (p *Proxy) handle(ctx context.Context, conn net.Conn) {
 	}
 	upstream, err := p.dialer.DialContext(ctx, "tcp", net.JoinHostPort(dialTarget, p.port))
 	if err != nil {
-		p.deny(ctx, host, "", ReasonDialFailed)
+		reason := ReasonDialFailed
+		if errors.Is(err, errBlockedAddr) {
+			reason = ReasonBlockedIP
+		}
+		p.deny(ctx, host, "", reason)
 		return
 	}
 	defer upstream.Close()
@@ -354,10 +393,20 @@ func readClientHello(r io.Reader) (string, []byte, error) {
 var errNotTLS = errors.New("egress: not a TLS handshake")
 
 func reasonFor(err error) string {
-	if errors.Is(err, errNotTLS) {
+	switch {
+	case errors.Is(err, errNotTLS):
 		return ReasonNotTLS
+	case errors.Is(err, errNoSNI):
+		return ReasonNoSNI
+	case errors.Is(err, os.ErrDeadlineExceeded):
+		return ReasonHandshakeTimeout
+	default:
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			return ReasonHandshakeTimeout
+		}
+		return ReasonHandshakeFailed
 	}
-	return ReasonNotTLS
 }
 
 func normalizeHost(h string) string {

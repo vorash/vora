@@ -260,7 +260,9 @@ func TestKeyCreationRequiresAdmin(t *testing.T) {
 	}
 
 	// A sandbox-only key is forbidden from key management.
-	resp = do(t, http.MethodPost, ts.URL+"/v1/keys", bootstrap, map[string]any{"name": "sandbox-only", "scopes": []string{ScopeSandbox}})
+	resp = do(t, http.MethodPost, ts.URL+"/v1/keys", bootstrap, map[string]any{
+		"name": "sandbox-only", "tenant_id": "tenant-a", "scopes": []string{ScopeSandbox},
+	})
 	var sandboxKey struct {
 		Key string `json:"key"`
 	}
@@ -354,6 +356,26 @@ func TestTenantSandboxIsolation(t *testing.T) {
 		if resp.StatusCode != want {
 			t.Errorf("global route with key %q = %d, want %d", key, resp.StatusCode, want)
 		}
+	}
+}
+
+func TestEmptyTenantSandboxKeysAreDenied(t *testing.T) {
+	s, ts := newTestServer(t, &fakeRunner{})
+	_ = s.store.SetRoute(context.Background(), SandboxRoute{SandboxID: "sbx_global", RunnerID: "run_test"})
+
+	resp := do(t, http.MethodPost, ts.URL+"/v1/keys", bootstrap, map[string]any{
+		"name": "untethered", "scopes": []string{ScopeSandbox},
+	})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("create empty-tenant sandbox key = %d, want 400", resp.StatusCode)
+	}
+
+	untethered := addTestKey(t, s, "", ScopeSandbox)
+	resp = do(t, http.MethodGet, ts.URL+"/v1/sandboxes/sbx_global", untethered, nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("empty-tenant sandbox key = %d, want 404", resp.StatusCode)
 	}
 }
 

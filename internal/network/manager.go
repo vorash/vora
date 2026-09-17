@@ -32,7 +32,7 @@ const (
 	ifacePrefix      = "vora-h"
 	peerPrefix       = "vora-s"
 	holderCmd        = "sleep"
-	holderArg        = "100000"
+	holderArg        = "infinity"
 )
 
 // Net describes one prepared sandbox network.
@@ -246,8 +246,10 @@ func (m *Manager) reapLeftovers() {
 			_ = os.Remove(filepath.Join(m.stateDir, e.Name()))
 			continue
 		}
-		if p, err := os.FindProcess(n.NetnsPID); err == nil {
-			_ = p.Kill()
+		if holderAlive(n.NetnsPID) {
+			if p, err := os.FindProcess(n.NetnsPID); err == nil {
+				_ = p.Kill()
+			}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = run(ctx, "ip", "link", "del", n.iface)
@@ -255,6 +257,21 @@ func (m *Manager) reapLeftovers() {
 		m.removeState(id)
 		m.logger.Warn("reaped leftover sandbox network", "sandbox_id", id)
 	}
+}
+
+// holderAlive reports whether pid is still the netns holder we started, not a
+// recycled PID. Missing /proc entries and mismatched command lines are treated
+// as not-ours so reapLeftovers will not SIGKILL an unrelated process.
+func holderAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return false
+	}
+	cmd := strings.ReplaceAll(string(data), "\x00", " ")
+	return strings.Contains(cmd, "unshare") && strings.Contains(cmd, holderCmd) && strings.Contains(cmd, holderArg)
 }
 
 type netState struct {
