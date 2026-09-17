@@ -47,20 +47,34 @@ command -v docker >/dev/null 2>&1 || { echo "error: docker not found" >&2; exit 
 # image_has_file reports whether a path is present in the image **layers**.
 # `docker export` cannot answer this: Docker injects /etc/resolv.conf into every
 # container at start, so an exported rootfs shows a file the image does not
-# have. Layer blobs are gzipped tars inside the OCI layout produced by
-# `docker save`, hence the nested tar invocation.
+# have.
+#
+# The archive layout is not fixed. Docker with the containerd image store writes
+# an OCI layout (gzipped blobs under blobs/sha256/), the classic store writes
+# <id>/layer.tar entries, and either may be compressed or not. Every regular
+# entry is therefore tried as a tar, and a change that yields no parsable layer
+# at all is reported as an error rather than as "file missing", so a future
+# layout change cannot silently fail every publish.
 image_has_file() {
-  local ref="$1" want="$2" tmp blob
+  local ref="$1" want="$2" tmp entry layers=0
   tmp="$(mktemp -d)"
   docker save "$ref" -o "$tmp/image.tar"
-  while IFS= read -r blob; do
-    case "$blob" in blobs/sha256/*) ;; *) continue ;; esac
-    if tar -xOf "$tmp/image.tar" "$blob" 2>/dev/null | tar -tzf - 2>/dev/null | grep -qx "$want"; then
-      rm -rf "$tmp"
-      return 0
+  while IFS= read -r entry; do
+    case "$entry" in */) continue ;; esac
+    tar -xOf "$tmp/image.tar" "$entry" >"$tmp/entry" 2>/dev/null || continue
+    if tar -tzf "$tmp/entry" >"$tmp/list" 2>/dev/null || tar -tf "$tmp/entry" >"$tmp/list" 2>/dev/null; then
+      layers=$((layers + 1))
+      if grep -qx "$want" "$tmp/list"; then
+        rm -rf "$tmp"
+        return 0
+      fi
     fi
   done < <(tar -tf "$tmp/image.tar")
   rm -rf "$tmp"
+  if [[ "$layers" -eq 0 ]]; then
+    echo "error: no layer archive found in 'docker save $ref' output; cannot verify $want" >&2
+    return 2
+  fi
   return 1
 }
 
@@ -92,17 +106,21 @@ for name in "${IMAGES[@]}"; do
   local_tag="vora/${name}:latest"
   remote="$REGISTRY/vora-${name}"
 
-  echo "==> building $local_tag"
-  # --network=host: the default bridge resolves IPv6-only for some CDNs.
+  echo "==> building $local_tag"  # --network=host: the default bridge resolves IPv6-only for some CDNs.
   docker build --network=host --quiet -t "$local_tag" -f "$dockerfile" "$(dirname "$dockerfile")" >/dev/null
 
   # The restricted path binds the sandbox resolver config over /etc/resolv.conf,
   # so the mount point must exist in the image itself.
-  if ! image_has_file "$local_tag" 'etc/resolv.conf'; then
-    echo "error: $name has no /etc/resolv.conf in its layers; NetworkRestricted would refuse it" >&2
-    exit 1
-  fi
-  echo "    /etc/resolv.conf present in the image layers"
+  status=0
+  image_has_file "$local_tag" 'etc/resolv.conf' || status=$?
+  case "$status" in
+    0) echo "    /etc/resolv.conf present in the image layers" ;;
+    1)
+      echo "error: $name has no /etc/resolv.conf in its layers; NetworkRestricted would refuse it" >&2
+      exit 1
+      ;;
+    *) exit 1 ;; # image_has_file already explained the problem
+  esac
 
   docker tag "$local_tag" "$remote:$TAG"
   if [[ "$LATEST" -eq 1 ]]; then
