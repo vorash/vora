@@ -78,4 +78,3 @@ jobs:
         env:
           VORA_INIT_BINARY: ${{ github.workspace }}/bin/vora-init
         run: go test -tags=security -count=1 ./tests/security/...
-}
