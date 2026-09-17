@@ -4,6 +4,7 @@ package security
 
 import (
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -142,14 +143,8 @@ func TestNoSecretsLeak(t *testing.T) {
 //
 // Why it matters: an unbounded fork exhausts host PIDs and can make the whole
 // machine unresponsive.
-//
-// Resource limits are applied by the bwrap cgroup manager; the rootless gVisor
-// backend runs with --ignore-cgroups in v0.2, so limits are a follow-up there.
 func TestForkBombContained(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, f *fixture) {
-		if f.backend.Name() != "bwrap" {
-			t.Skip("cgroup limits are enforced by the bwrap backend; gVisor rootless runs --ignore-cgroups (follow-up)")
-		}
 		h := f.create("sbx_fork", limits(128, 16))
 		f.exec(h, "sh", "-c", "for i in $(seq 1 100); do sleep 2 & done; wait")
 
@@ -165,9 +160,6 @@ func TestForkBombContained(t *testing.T) {
 // unrelated workloads.
 func TestMemoryBombKilled(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, f *fixture) {
-		if f.backend.Name() != "bwrap" {
-			t.Skip("cgroup limits are enforced by the bwrap backend; gVisor rootless runs --ignore-cgroups (follow-up)")
-		}
 		h := f.create("sbx_mem", limits(64, 64))
 
 		_, _, code := f.exec(h, "python3", "-c", "x = bytearray(400 * 1024 * 1024)")
@@ -176,6 +168,114 @@ func TestMemoryBombKilled(t *testing.T) {
 		}
 		if !f.waitFor(3*time.Second, func() bool { return f.stats(h).OOMKills > 0 }) {
 			t.Fatal("no OOM kill recorded; memory limit not enforced")
+		}
+	})
+}
+
+// TestCannotSignalHost asserts the sandbox cannot signal a host process.
+//
+// Why it matters: without a PID namespace the workload can kill the runner or
+// other tenants by guessing host PIDs.
+func TestCannotSignalHost(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, f *fixture) {
+		h := f.create("sbx_kill", limits(128, 64))
+		hostPID := strconv.Itoa(os.Getpid())
+		_, _, code := f.exec(h, "kill", "-0", hostPID)
+		if code == 0 {
+			t.Fatalf("sandbox could signal host pid %s", hostPID)
+		}
+	})
+}
+
+// TestIPCNamespaceIsolation asserts SysV shm created in A is invisible to B.
+//
+// Why it matters: a shared IPC namespace lets one sandbox read or mutate
+// another's shared memory and message queues.
+func TestIPCNamespaceIsolation(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, f *fixture) {
+		a := f.create("sbx_ipc_a", limits(128, 64))
+		b := f.create("sbx_ipc_b", limits(128, 64))
+
+		create := `
+import ctypes, ctypes.util, sys
+libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+key = 0x564F5241
+shmid = libc.shmget(key, 4096, 0o1000 | 0o600)
+sys.exit(0 if shmid >= 0 else 1)
+`
+		if _, errOut, code := f.exec(a, "python3", "-c", create); code != 0 {
+			t.Fatalf("A shmget failed: %s", errOut)
+		}
+		attach := `
+import ctypes, ctypes.util, sys
+libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+key = 0x564F5241
+shmid = libc.shmget(key, 4096, 0)
+sys.exit(0 if shmid >= 0 else 1)
+`
+		if _, _, code := f.exec(b, "python3", "-c", attach); code == 0 {
+			t.Fatal("sandbox B attached to sandbox A's SysV shm")
+		}
+	})
+}
+
+// TestUTSNamespaceIsolation asserts the sandbox hostname is not the host's.
+//
+// Why it matters: UTS leakage reveals host identity and lets a workload
+// impersonate the host in logs and Kerberos-style name checks.
+func TestUTSNamespaceIsolation(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, f *fixture) {
+		h := f.create("sbx_uts", limits(128, 64))
+		host, err := os.Hostname()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, _, _ := f.exec(h, "hostname")
+		got := strings.TrimSpace(out)
+		if got == "" {
+			t.Fatal("sandbox hostname empty")
+		}
+		if got == host {
+			t.Fatalf("sandbox hostname equals host hostname %q", host)
+		}
+	})
+}
+
+// TestUnprivilegedUserNamespace asserts the sandbox is not in the host user ns.
+//
+// Why it matters: sharing the host user namespace gives the workload a path to
+// host uid 0 capabilities. gVisor Method 2 is uid 0 inside its sentry; skip.
+func TestUnprivilegedUserNamespace(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, f *fixture) {
+		if f.backend.Name() != "bwrap" {
+			t.Skip("gVisor Method 2 is uid 0 inside the sentry; user-ns isolation is bwrap's")
+		}
+		hostMap, err := os.ReadFile("/proc/self/uid_map")
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := f.create("sbx_userns", limits(128, 64))
+		got, _, _ := f.exec(h, "cat", "/proc/self/uid_map")
+		if strings.TrimSpace(got) == strings.TrimSpace(string(hostMap)) && strings.Contains(string(hostMap), "4294967295") {
+			t.Fatalf("sandbox uid_map is the host's: %s", got)
+		}
+	})
+}
+
+// TestControlSocketIsolation asserts sandbox A cannot see B's control socket.
+//
+// Why it matters: the control socket is the exec/signal API; reaching another
+// sandbox's socket is equivalent to executing code as that tenant.
+func TestControlSocketIsolation(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, f *fixture) {
+		a := f.create("sbx_sock_a", limits(128, 64))
+		_ = f.create("sbx_sock_b", limits(128, 64))
+		bIPC := f.ws.Paths("sbx_sock_b").IPCDir
+		if _, _, code := f.exec(a, "sh", "-c", "test -e "+bIPC); code == 0 {
+			t.Fatal("sandbox A can see sandbox B's ipc directory")
+		}
+		if _, _, code := f.exec(a, "sh", "-c", "test -e "+bIPC+"/control.sock"); code == 0 {
+			t.Fatal("sandbox A can see sandbox B's control socket")
 		}
 	})
 }

@@ -3,9 +3,9 @@
 # build-images.sh builds the read-only sandbox rootfs cache.
 #
 # Each images/<name>/Dockerfile is built with Docker, then exported to
-#   $VORA_STATE_DIR/images/<name>/rootfs
+#   $VORA_STATE_DIR/images/<name>/latest/rootfs
 # and tagged with the source image id in
-#   $VORA_STATE_DIR/images/<name>/image-id
+#   $VORA_STATE_DIR/images/<name>/latest/image-id
 #
 # The runner binds this rootfs read-only into sandboxes, so it can be shared
 # by every sandbox that uses the image.
@@ -29,7 +29,7 @@ build_image() {
   local ctx tag dir
   ctx="$(dirname "$dockerfile")"
   tag="vora/${name}:latest"
-  dir="$IMAGES_DIR/$name"
+  dir="$IMAGES_DIR/$name/latest"
 
   if [[ ! -f "$dockerfile" ]]; then
     echo "error: missing $dockerfile" >&2
@@ -58,7 +58,7 @@ build_image() {
   local image_id
   image_id="$(docker image inspect --format '{{.Id}}' "$tag")"
 
-  echo "==> exporting rootfs for $name"
+  echo "==> exporting rootfs for $name:latest"
   mkdir -p "$IMAGES_DIR"
   local tmp
   tmp="$(mktemp -d "$IMAGES_DIR/.build-${name}-XXXXXX")"

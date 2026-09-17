@@ -173,6 +173,9 @@ type Capabilities struct {
 	// (containerd-backed). When false the runner applies limits via
 	// cgroup.Manager during Start.
 	OwnsCgroups bool
+	// EnforcesResourceLimits is true when memory / pids / cpu limits actually
+	// bite. Auto-select must not prefer a backend that reports false.
+	EnforcesResourceLimits bool
 	// NetworkModes lists the modes the backend implements.
 	NetworkModes []NetworkMode
 }

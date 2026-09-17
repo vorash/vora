@@ -1,55 +1,56 @@
 # Security Boundaries
 
-Status: draft · Applies to: v0.1
+Status: draft · Applies to: v0.2
 
 This document answers a single question for every resource type:
 
 > What exactly prevents Sandbox A from affecting Sandbox B (or the host)?
 
-Each boundary lists the mechanism, how it is enforced, and the test that proves
-it. If the mechanism is removed, the test must fail.
+Each boundary lists the mechanism, how it is enforced, and the Go test that
+proves it. If the mechanism is removed, the test must fail.
 
 ## Sandbox A vs Sandbox B
 
 | Resource | A cannot reach B because… | Mechanism | Test |
 | -------- | ------------------------- | --------- | ---- |
-| Files | A's mount namespace has no path to B's workspace or rootfs; root rootfs is shared read-only and holds no tenant data | mount namespace, `--ro-bind` rootfs, per-sandbox `--bind` workspace | `security/fs_*` |
-| Processes | A's PID namespace contains only its own processes; B's PIDs are not namespaced into A | `--unshare-pid` | `security/pid_*` |
-| Signals | A cannot `kill` a PID it cannot see | PID namespace | `security/pid_kill_*` |
-| IPC | A has a private SysV/POSIX IPC namespace; B's shared memory and semaphores are invisible | `--unshare-ipc` | `security/ipc_*` |
-| Hostname / domain | A's UTS namespace is private | `--unshare-uts` | `security/uts_*` |
-| Users / capabilities | A runs in an unprivileged user namespace with no host capabilities | `--unshare-user` | `security/userns_*` |
-| Network | A's network namespace has no interfaces and no routes; B is unreachable | `--unshare-net` | `security/net_*` |
-| CPU | A is throttled by its own cgroup quota; B is unaffected by A's load | `cpu.max` | `security/cpu_*` |
-| Memory | A's allocations are capped; exceeding the cap kills A, not B | `memory.max`, `memory.swap.max=0` | `security/memory_bomb` |
-| PIDs | A's fork attempts hit its own `pids.max`; B's process budget is untouched | `pids.max` | `security/fork_bomb` |
-| Disk | A writes only into its own workspace; the host filesystem is read-only to A | bind mounts, read-only rootfs | `security/disk_*` |
-| Control socket | A's control socket lives in its own `ipc/` directory bound only into A; B cannot see or connect to it | per-sandbox bind mount + filesystem permissions | `security/control_socket_*` |
-| Metadata / secrets | A has no network and no runner credentials in env, files or `/proc/self/environ` | no network; secrets stay outside sandbox | `security/secrets_*` |
+| Files | A's mount namespace has no path to B's workspace or rootfs; root rootfs is shared read-only and holds no tenant data | mount namespace, `--ro-bind` / OCI readonly root, per-sandbox workspace bind | `TestFilesystemIsolation` |
+| Processes | A's PID namespace contains only its own processes; B's PIDs are not namespaced into A | PID namespace | `TestPIDNamespaceIsolation` |
+| Signals | A cannot `kill` a PID it cannot see | PID namespace | `TestCannotSignalHost` |
+| IPC | A has a private SysV/POSIX IPC namespace; B's shared memory is invisible | IPC namespace | `TestIPCNamespaceIsolation` |
+| Hostname / domain | A's UTS namespace is private (`hostname=vora`) | UTS namespace | `TestUTSNamespaceIsolation` |
+| Users / capabilities | A runs in an unprivileged user namespace with no host capabilities (bwrap) | user namespace | `TestUnprivilegedUserNamespace` |
+| Network | A's network namespace has no interfaces and no routes; B is unreachable | net namespace / `runsc --network none` | `TestNetworkNone` |
+| Memory | A's allocations are capped; exceeding the cap kills A, not B | `memory.max`, `memory.swap.max=0` | `TestMemoryBombKilled` |
+| PIDs | A's fork attempts hit its own `pids.max`; B's process budget is untouched | `pids.max` | `TestForkBombContained` |
+| Control socket | A's control socket lives in its own `ipc/` directory bound only into A | per-sandbox bind mount | `TestControlSocketIsolation` |
+| Metadata / secrets | A has no network and no runner credentials in env, files or `/proc/self/environ` | no network; secrets stay outside sandbox | `TestNoSecretsLeak` |
+
+CPU quota is set (`cpu.max` / systemd `CPUQuota`) and asserted by
+`TestSystemdUnitLimitsAndTeardown` / the gVisor subtree writer. There is no
+live-throttle security test (too flaky). Disk is directory-bounded, not
+quota-enforced; there is no disk-quota test until a later milestone.
 
 ## Host protection
 
 | Host resource | Protection |
 | ------------- | ---------- |
 | Filesystem | rootfs mounted read-only; host paths never bind-mounted; no host `/` exposure |
-| Kernel | unprivileged user namespace; no `CAP_SYS_ADMIN` from the host; seccomp hardening is a follow-up |
-| PID 1 / init | sandbox has its own PID namespace and its own PID 1 (`vora-init`) |
-| Devices | minimal `/dev` provided by Bubblewrap |
-| cgroup hierarchy | sandbox services are transient systemd units; removing the unit removes the cgroup |
+| Kernel | bwrap: unprivileged user namespace. gVisor: user-space kernel (KVM). seccomp on bwrap is a follow-up |
+| PID 1 / init | sandbox has its own PID namespace |
+| Devices | minimal `/dev` from Bubblewrap / gVisor OCI spec |
+| cgroup hierarchy | bwrap: transient systemd units. gVisor: delegated subtree under `vora-runner.service` (`Delegate=yes`) |
 | Availability | memory/PID caps prevent host exhaustion; CPU quota bounds utilisation |
 
-## Residual risks (accepted in v0.1)
+## Residual risks (accepted in v0.2)
 
-- **Shared kernel.** Bubblewrap isolates namespaces but shares the kernel; a
-  kernel vulnerability could escape. gVisor (v0.2) reduces this surface.
-- **No syscall filtering.** seccomp is not yet applied; Bubblewrap `--seccomp`
-  is a planned hardening step.
+- **Shared kernel on bwrap.** Bubblewrap isolates namespaces but shares the
+  kernel; a kernel vulnerability could escape. gVisor reduces this surface.
+- **No syscall filtering on bwrap.** seccomp is not yet applied.
 - **Read-only rootfs assumptions.** Some toolchains expect writable paths
   outside `/workspace`; those calls fail closed rather than being permitted.
-- **Disk quota is directory-bounded, not enforced by a filesystem quota** in
-  v0.1; the sandbox can fill its workspace up to host free space. A project
-  quota or `io.max` is planned.
-- **Images are trusted.** No signature verification in v0.1.
+- **Disk quota is directory-bounded, not enforced by a filesystem quota**; the
+  sandbox can fill its workspace up to host free space.
+- **Images are trusted.** No signature verification.
 
 ## Verification policy
 
@@ -66,14 +67,9 @@ The matrix runs against **every available backend** as subtests:
 
 | Backend | How it runs | Covered by the matrix |
 | ------- | ----------- | --------------------- |
-| `bwrap` | unprivileged, cgroups v2 via systemd | filesystem, PID, cross-sandbox, network, secrets, **fork/memory limits** |
-| `gVisor` | `runsc` Method 2 inside a `rootlesskit` user namespace | filesystem, PID, cross-sandbox, network, secrets |
+| `bwrap` | unprivileged, cgroups v2 via systemd | full table including fork/memory and user-ns |
+| `gVisor` | `runsc` Method 2 inside a `rootlesskit` user namespace; limits via delegated cgroup subtree | full table except `TestUnprivilegedUserNamespace` |
 
 `make test-security` runs the bwrap leg (and skips the gVisor subtests when the
 runner is unprivileged). `make test-security-all` additionally runs the gVisor
 leg inside a `rootlesskit` userns.
-
-**Resource limits are bwrap-only in v0.2:** the rootless gVisor backend runs
-`runsc` with `--ignore-cgroups`, so `pids.max`/`memory.max` enforcement and the
-fork/memory-bomb tests are a follow-up for gVisor (tracked against the
-cgroup-with-rootless work).

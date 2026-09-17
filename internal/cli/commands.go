@@ -82,7 +82,7 @@ func (a *app) sandboxCreateCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&image, "image", "vora/base", "rootfs image (e.g. python:3.13, node:22, vora/base)")
+	cmd.Flags().StringVar(&image, "image", "vora/base", "rootfs image (e.g. python, node, vora/base); tags must match the cache exactly")
 	cmd.Flags().StringVar(&backend, "backend", "", "runtime backend: gvisor or bwrap (default: auto)")
 	cmd.Flags().StringVar(&memory, "memory", "512m", "memory limit (e.g. 512m, 1Gi)")
 	cmd.Flags().StringVar(&cpu, "cpu", "1", "CPU limit (e.g. 1, 500m)")

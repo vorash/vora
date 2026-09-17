@@ -29,7 +29,7 @@ func imageRootfs(t *testing.T, name string) string {
 		home, _ := os.UserHomeDir()
 		stateHome = filepath.Join(home, ".local", "state")
 	}
-	rootfs := filepath.Join(stateHome, "vora", "images", name, "rootfs")
+	rootfs := filepath.Join(stateHome, "vora", "images", name, "latest", "rootfs")
 	if info, err := os.Stat(rootfs); err != nil || !info.IsDir() {
 		t.Skipf("image %q not built (run 'make images'): %v", name, err)
 	}
