@@ -1,7 +1,8 @@
 # ADR 012 — Egress gateway (NetworkRestricted)
 
-- Status: accepted (bwrap only; gVisor deferred)
-- Date: 2026-09-17
+- Status: accepted (bwrap only; gVisor is a documented limitation)
+- Date: 2026-09-17 (amended 2026-09-17 for v0.4: gateway DNS, broker port,
+  gVisor status)
 
 ## Context
 
@@ -64,16 +65,30 @@ delegated `cgroup.Subtree` gVisor already uses. `NetworkNone` keeps the existing
   `vora_policy_denied_total`, `vora_audit_write_failed_total`).
 - The proxy passes TLS through, so no CA distribution or trust-store change is
   required. Non-TLS/other-port traffic is denied by default.
-- **gVisor is not covered.** `runsc --network=host` resolves to the *runner's*
-  netns (not the prepared one), and joining the netns through the OCI spec's
-  network namespace path makes egress time out because gVisor's netstack
-  bypasses the host-ns DNAT. gVisor therefore still advertises `NetworkNone`
-  only; auto-select falls back to bwrap for restricted specs.
-- **DNS is not routed.** Only TCP is DNAT'd, so workloads must resolve names
-  themselves (or be given literal addresses). A gateway DNS resolver is a
-  follow-up.
-- A sandbox that only speaks plaintext HTTP cannot use the gateway yet; that is
-  a deliberate default-deny.
+- **gVisor is not covered, by decision.** `runsc --network=host` resolves to the
+  *runner's* netns (not the prepared one), and joining the netns through the OCI
+  spec's network namespace path makes egress time out because gVisor's netstack
+  bypasses the host-ns DNAT. gVisor therefore advertises `NetworkNone` only;
+  auto-select falls back to bwrap for restricted specs. This is a **permanent
+  limitation of the current design**, not pending work: the userspace-netstack
+  gateway that would close it is out of scope for v0.x.
+- **DNS, decided for v0.4.** v0.3 DNATs only TCP, so a restricted workload must
+  use literal addresses. v0.4 adds an **allowlist-only resolver on the gateway
+  address**: the resolver answers only names matching the sandbox's
+  `AllowedDomains` (everything else returns NXDOMAIN/REFUSED), refuses answers
+  that map to a private/loopback/link-local/CGNAT address (reusing the same
+  `blockedIP` check that guards upstreams), and audits every query as an egress
+  decision. `nftRuleset` accepts UDP/53 and TCP/53 (truncated answers) to that
+  exact gateway endpoint, and the runner points the sandbox's resolver
+  configuration at it, so no image change is needed. Optional hardening, off by
+  default: DNAT `udp dport 53` from any destination to the gateway resolver so a
+  workload with a hardcoded resolver still gets fail-closed answers instead of a
+  silent drop.
+- **The broker port is a second gateway service.** v0.4 adds the credential
+  broker on the same gateway address (`:8080`, ADR 013). The `nft` filter
+  accepts the proxy, broker, and DNS endpoints only; every other destination and
+  protocol is still dropped, so a sandbox that speaks plaintext HTTP directly to
+  an arbitrary host remains denied.
 - The manager records live networks under `<state>/netns/` and reaps leftovers
   on runner startup (fail-closed restart), matching the runner's other
   reconcile behaviour.

@@ -218,13 +218,15 @@ longer read.
   and unpacked into the rootless containerd `native` snapshotter and the
   snapshot rootfs is bound read-only; the Docker-export cache remains only as a
   fallback when containerd is unavailable.
-- **Egress is bwrap-only.** `NetworkRestricted` is enforced for the bubblewrap
-  backend. gVisor still supports `NetworkNone` only: its host network mode
-  escapes to the runner namespace, and joining a prepared netns via the OCI
-  spec makes netstack egress time out (ADR 012).
-- **No DNS through the gateway.** Only TCP is redirected, so restricted
-  sandboxes must resolve names themselves or use literal addresses; a gateway
-  resolver is a follow-up.
+- **Egress is bwrap-only (documented limitation, not pending work).**
+  `NetworkRestricted` is enforced for the bubblewrap backend. gVisor supports
+  `NetworkNone` only: its host network mode escapes to the runner namespace, and
+  joining a prepared netns via the OCI spec makes netstack egress time out
+  (ADR 012). Closing this would need a userspace-netstack gateway, which is out
+  of scope for v0.x.
+- **No DNS through the gateway yet.** Only TCP is redirected, so restricted
+  sandboxes must resolve names themselves or use literal addresses. An
+  allowlist-only gateway resolver is the v0.4 work item (ADR 012).
 - **Non-TLS egress is denied.** The proxy only understands TLS SNI; plaintext
   HTTP and non-443 ports are blocked by default.
 - **No syscall filtering for bwrap.** seccomp is not applied; Bubblewrap
@@ -253,7 +255,8 @@ longer read.
 | ------- | ----- |
 | v0.1 | Go runner, Bubblewrap backend, cgroups v2, in-sandbox exec agent, CLI, security suite, benchmarks |
 | v0.2 | gVisor backend (direct `runsc`, Method 2), backend selection, rootlesskit runner service, PostgreSQL/Supabase audit, dual-backend isolation matrix |
-| **v0.3 (this)** | **containerd-snapshot rootfs (ADR 009), bwrap `NetworkRestricted` with filter+audit (ADR 012), `vora-api` with tenant isolation, split TLS, and failure-safe create (ADR 014).** **Deferred:** gVisor egress, credential brokering, multi-runner scheduling, SDK/MCP, Ansible deployment |
+| **v0.3** | containerd-snapshot rootfs (ADR 009), bwrap `NetworkRestricted` with filter+audit (ADR 012), `vora-api` with tenant isolation, split TLS, and failure-safe create (ADR 014) |
+| **v0.4 (in progress)** | **Credential brokering (ADR 013) and allowlist-only gateway DNS (ADR 012) — not implemented yet.** gVisor egress recorded as a documented limitation. **Deferred:** multi-runner scheduling, SDK/MCP, Ansible deployment, bwrap seccomp, disk quota, image signing |
 | v1.0 | Firecracker microVM tier, snapshots/forks |
 
 ## License
