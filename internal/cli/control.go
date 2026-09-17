@@ -133,7 +133,8 @@ func (a *app) secretsSetCmd() *cobra.Command {
 }
 
 func (a *app) secretsListCmd() *cobra.Command {
-	return &cobra.Command{
+	var tenant string
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List credential metadata (values are never returned)",
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -145,7 +146,7 @@ func (a *app) secretsListCmd() *cobra.Command {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			secrets, err := c.ListSecrets(ctx)
+			secrets, err := c.ListSecrets(ctx, tenant)
 			if err != nil {
 				return err
 			}
@@ -163,10 +164,13 @@ func (a *app) secretsListCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&tenant, "tenant", "", "tenant id (global administrators only)")
+	return cmd
 }
 
 func (a *app) secretsRmCmd() *cobra.Command {
-	return &cobra.Command{
+	var tenant string
+	cmd := &cobra.Command{
 		Use:   "rm <alias>",
 		Short: "Delete a stored credential",
 		Args:  cobra.ExactArgs(1),
@@ -178,13 +182,15 @@ func (a *app) secretsRmCmd() *cobra.Command {
 			defer c.Close()
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			if err := c.DeleteSecret(ctx, args[0]); err != nil {
+			if err := c.DeleteSecret(ctx, args[0], tenant); err != nil {
 				return err
 			}
 			fmt.Printf("Removed %s\n", args[0])
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&tenant, "tenant", "", "tenant id (global administrators only)")
+	return cmd
 }
 
 func (a *app) keysCreateCmd() *cobra.Command {

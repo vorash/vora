@@ -120,6 +120,24 @@ func TestMemStoreSealsAtRest(t *testing.T) {
 	}
 }
 
+// TestMemStoreCorruptNonce asserts Reveal fails rather than panicking when a
+// stored nonce is truncated, which is what a partial write leaves behind.
+func TestMemStoreCorruptNonce(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemStore(newSealer(t))
+	if err := s.Put(ctx, rec("t1", "github", "api.github.com"), "value"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	key := keyOf("t1", "github")
+	corrupt := s.m[key]
+	corrupt.nonce = corrupt.nonce[:4]
+	s.m[key] = corrupt
+
+	if _, _, err := s.Reveal(ctx, "t1", "github"); err == nil {
+		t.Fatal("Reveal with a truncated nonce succeeded")
+	}
+}
+
 // TestRecordValidate covers the record contract: aliases are opaque labels,
 // hosts are DNS names (never IPs), and the scheme decides the header.
 func TestRecordValidate(t *testing.T) {

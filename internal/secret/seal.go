@@ -70,6 +70,11 @@ func (s *Sealer) Seal(value string) (nonce, ciphertext []byte, err error) {
 // Open decrypts a value. It fails if the ciphertext was tampered with or was
 // sealed under a different master key.
 func (s *Sealer) Open(nonce, ciphertext []byte) (string, error) {
+	// GCM panics on a wrong-length nonce, and a persisted nonce can be
+	// truncated by a partial write or an older record, so reject it here.
+	if len(nonce) != s.aead.NonceSize() {
+		return "", fmt.Errorf("secret: decrypt: invalid nonce length %d", len(nonce))
+	}
 	plaintext, err := s.aead.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
 		return "", fmt.Errorf("secret: decrypt: %w", err)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -335,21 +336,30 @@ func (c *HTTPClient) CreateSecret(ctx context.Context, alias, host, scheme, head
 	return out.Secret, nil
 }
 
-// ListSecrets returns the caller's tenant's brokered credentials (metadata
-// only).
-func (c *HTTPClient) ListSecrets(ctx context.Context) ([]SecretInfo, error) {
+// ListSecrets returns brokered-credential metadata (values are never returned).
+// A tenant may be named only by a global administrator.
+func (c *HTTPClient) ListSecrets(ctx context.Context, tenant string) ([]SecretInfo, error) {
 	var out struct {
 		Secrets []SecretInfo `json:"secrets"`
 	}
-	if err := c.doJSON(ctx, http.MethodGet, "/v1/secrets", nil, &out); err != nil {
+	if err := c.doJSON(ctx, http.MethodGet, tenantPath("/v1/secrets", tenant), nil, &out); err != nil {
 		return nil, err
 	}
 	return out.Secrets, nil
 }
 
-// DeleteSecret removes a brokered credential by alias.
-func (c *HTTPClient) DeleteSecret(ctx context.Context, alias string) error {
-	return c.doJSON(ctx, http.MethodDelete, "/v1/secrets/"+alias, nil, nil)
+// DeleteSecret removes a brokered credential by alias. A tenant may be named
+// only by a global administrator.
+func (c *HTTPClient) DeleteSecret(ctx context.Context, alias, tenant string) error {
+	return c.doJSON(ctx, http.MethodDelete, tenantPath("/v1/secrets/"+alias, tenant), nil, nil)
+}
+
+// tenantPath appends a tenant selector when one is given.
+func tenantPath(path, tenant string) string {
+	if tenant == "" {
+		return path
+	}
+	return path + "?tenant_id=" + url.QueryEscape(tenant)
 }
 
 func (c *HTTPClient) doJSON(ctx context.Context, method, path string, body, out any) error {

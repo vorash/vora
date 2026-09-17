@@ -34,15 +34,16 @@ func TestSecretsCLIWorkflow(t *testing.T) {
 		t.Fatalf("seed key: %v", err)
 	}
 	secrets := secret.NewMemStore(sealer)
-	apiSrv := api.New(api.Options{Store: store, Secrets: secrets})
+	const bootstrap = "vora_bootstrap_cli_test"
+	apiSrv := api.New(api.Options{Store: store, Secrets: secrets, BootstrapKey: bootstrap})
 	t.Cleanup(func() { _ = apiSrv.Close() })
 	ts := httptest.NewServer(apiSrv.Handler())
 	defer ts.Close()
 
 	bin := buildBinary(t, "vora")
-	run := func(stdin string, args ...string) (string, int) {
+	runAs := func(key, stdin string, args ...string) (string, int) {
 		t.Helper()
-		full := append([]string{"--api", ts.URL, "--api-key", plaintext}, args...)
+		full := append([]string{"--api", ts.URL, "--api-key", key}, args...)
 		cmd := exec.Command(bin, full...)
 		if stdin != "" {
 			cmd.Stdin = strings.NewReader(stdin)
@@ -58,6 +59,9 @@ func TestSecretsCLIWorkflow(t *testing.T) {
 			t.Fatalf("run vora %v: %v", args, err)
 		}
 		return out.String(), code
+	}
+	run := func(stdin string, args ...string) (string, int) {
+		return runAs(plaintext, stdin, args...)
 	}
 
 	const value = "ghp_cli_secret_value"
@@ -97,6 +101,31 @@ func TestSecretsCLIWorkflow(t *testing.T) {
 	out, code = run("", "secrets", "list")
 	if code != 0 || !strings.Contains(out, "no secrets") {
 		t.Fatalf("list after rm = %q (%d)", out, code)
+	}
+
+	// A global administrator can act on a named tenant for list and rm, not
+	// only for set.
+	if _, code = run(value+"\n", "secrets", "set", "--alias", "github",
+		"--host", "api.github.com", "--scheme", "bearer", "--value-stdin"); code != 0 {
+		t.Fatalf("re-set failed (%d)", code)
+	}
+	out, code = runAs(bootstrap, "", "secrets", "list", "--tenant", "t1")
+	if code != 0 || !strings.Contains(out, "github") {
+		t.Fatalf("global admin list --tenant = %q (%d)", out, code)
+	}
+	if strings.Contains(out, value) {
+		t.Fatal("global admin list echoed the credential value")
+	}
+	out, code = runAs(bootstrap, "", "secrets", "list")
+	if code == 0 {
+		t.Fatalf("global admin list without --tenant succeeded: %q", out)
+	}
+	out, code = runAs(bootstrap, "", "secrets", "rm", "--tenant", "t1", "github")
+	if code != 0 {
+		t.Fatalf("global admin rm --tenant failed (%d): %s", code, out)
+	}
+	if _, code = run("", "secrets", "list"); code != 0 {
+		t.Fatalf("list after global-admin rm failed (%d)", code)
 	}
 
 	// Without --api the command must refuse instead of silently storing

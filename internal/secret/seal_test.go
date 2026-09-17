@@ -64,6 +64,22 @@ func TestSealerRejectsWrongKey(t *testing.T) {
 	}
 }
 
+// TestSealerRejectsMalformedNonce asserts a truncated or corrupt persisted
+// nonce is a decryption error, not a panic: GCM panics on a wrong-length nonce
+// and a partial write must not take the control plane down.
+func TestSealerRejectsMalformedNonce(t *testing.T) {
+	s := newSealer(t)
+	_, ct, err := s.Seal("value")
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	for _, nonce := range [][]byte{nil, {}, ct[:4], append(make([]byte, s.aead.NonceSize()+1), ct...)} {
+		if _, err := s.Open(nonce, ct); err == nil {
+			t.Fatalf("Open with a %d-byte nonce succeeded", len(nonce))
+		}
+	}
+}
+
 // TestSealerRejectsTamperedCiphertext asserts GCM authentication catches
 // modification of a stored credential.
 func TestSealerRejectsTamperedCiphertext(t *testing.T) {
