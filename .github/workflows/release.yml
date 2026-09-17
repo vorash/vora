@@ -81,16 +81,33 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
+          assets=(
+            dist/vora
+            dist/vora-runner
+            dist/vora-init
+            dist/vora-api
+            dist/SHA256SUMS
+            "dist/vora_${VERSION}_linux_amd64.tar.gz"
+          )
+
+          # The release stays a draft until every asset is up, so a consumer
+          # never sees a half-populated release, and a failed upload leaves the
+          # draft for inspection instead of publishing something broken.
           if gh release view "$VERSION" >/dev/null 2>&1; then
-            echo "release $VERSION exists; uploading assets with --clobber"
-            gh release upload "$VERSION" dist/vora dist/vora-runner dist/vora-init \
-              dist/vora-api dist/SHA256SUMS "dist/vora_${VERSION}_linux_amd64.tar.gz" --clobber
+            echo "release $VERSION already exists; adding assets"
           else
-            gh release create "$VERSION" \
-              dist/vora dist/vora-runner dist/vora-init dist/vora-api \
-              dist/SHA256SUMS "dist/vora_${VERSION}_linux_amd64.tar.gz" \
-              --title "Vora $VERSION" --generate-notes --verify-tag
+            gh release create "$VERSION" --title "Vora $VERSION" --generate-notes --verify-tag --draft
           fi
+
+          # One asset at a time: a single `gh release create` with several large
+          # assets was observed to stall mid-upload on a hosted runner.
+          for asset in "${assets[@]}"; do
+            echo "uploading $asset"
+            gh release upload "$VERSION" "$asset" --clobber
+          done
+
+          gh release edit "$VERSION" --draft=false
+          gh release view "$VERSION" --json tagName,isDraft,assets --jq '"\(.tagName) draft=\(.isDraft) assets=\(.assets | length)"'
 
   images:
     name: sandbox images
