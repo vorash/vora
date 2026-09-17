@@ -9,28 +9,29 @@ execution audit trail.
 Built with Go, Bubblewrap, Linux namespaces, cgroups v2 (via systemd), gRPC,
 and Prometheus.
 
-> **Status: working v0.1 proof of concept.** The local Bubblewrap runtime is
-> functional and covered by isolation tests. It is **not** production-ready and
-> has not been independently audited. Hosted gVisor, network policy, and
-> credential brokering are v0.2/v0.3 (see [Roadmap](#roadmap)).
+> **Status: v0.2 proof of concept.** Two isolation backends (Bubblewrap and
+> gVisor) are functional and covered by a shared isolation test suite. It is
+> **not** production-ready and has not been independently audited. See
+> [Roadmap](#roadmap) and [Limitations](#limitations-honest).
 
 ## What works today
 
 - A Go runner daemon (`vora-runner`) that manages the full sandbox lifecycle
-  over a gRPC Unix socket.
-- A **Bubblewrap backend**: every sandbox runs in its own user, PID, network,
-  IPC, UTS and mount namespaces, with a read-only shared rootfs.
-- A long-lived **in-sandbox agent** (`vora-init`, PID 1) that makes repeated
-  `exec` into a running sandbox possible.
-- **cgroup v2 limits** (`memory.max`, `pids.max`, `cpu.max`) enforced through
-  transient systemd units, with semantic termination reasons (`OOMKilled`,
-  `PidsLimitExceeded`, …).
+  over a gRPC Unix socket, with per-sandbox **backend selection**.
+- **Two isolation backends** behind one `runtime.Backend` interface:
+  - **Bubblewrap** — user/PID/net/IPC/UTS/mount namespaces + cgroup v2 limits
+    via systemd, read-only shared rootfs. Unprivileged, default local backend.
+  - **gVisor (`runsc`)** — a user-space kernel (KVM platform), driven directly
+    via gVisor **Method 2** inside a persistent `rootlesskit` user namespace.
+- A long-lived **in-sandbox agent** (`vora-init`, PID 1) for the bwrap backend;
+  gVisor uses native `runsc exec`.
 - **Default-deny networking**: sandboxes have no interfaces or routes.
-- **State persistence**, a **TTL reaper**, and startup **reconciliation** of
-  orphaned sandboxes.
-- An execution **audit trail** (lifecycle events + per-execution records) and
-  **Prometheus metrics**.
-- An isolation **security suite** and a **benchmark harness**.
+- State persistence, a **TTL reaper**, and startup **reconciliation** (incl.
+  reaping orphaned `runsc` containers and systemd units).
+- **Audit trail** behind a `Store` interface: local JSONL, or **PostgreSQL /
+  Supabase** (`VORA_AUDIT_DSN`), with lifecycle events and per-execution records.
+- **Prometheus metrics** at `127.0.0.1:9101/metrics`.
+- A dual-backend **isolation security suite** and a **benchmark harness**.
 
 ## Architecture
 
@@ -40,26 +41,26 @@ and Prometheus.
                              ▼
                     ┌─────────────────────┐
                     │    vora-runner      │  runtime/vora/runner.sock
-                    │                     │
-                    │ sandbox state mch.  │  state/images, state/sandboxes
+                    │  (rootlesskit userns)│
+                    │ sandbox state mch.  │  state/<sandbox>/
                     │ TTL reaper          │
                     │ reconciler          │
                     │ runtime.Registry    │
                     └─────────┬───────────┘
-                              │ runtime.Backend
-                     ┌────────┴─────────┐
-                     ▼                  ▼
-              bwrap backend      cgroup.Manager (systemd service)
-                     │                  │
-                     │  systemd-run --user --unit=vora-<id> -p MemoryMax… bwrap …
-                     ▼
-              ┌──────────────────────────────────────────────┐
-              │ bubblewrap sandbox                            │
-              │  --unshare-all (user,pid,net,ipc,uts,cgroup)  │
-              │  ro rootfs (shared image cache)               │
-              │  rw /workspace, /root; tmpfs /tmp             │
-              │  vora-init (PID 1, gRPC agent)                │
-              └──────────────────────────────────────────────┘
+                              │ runtime.Backend (auto-selected)
+              ┌───────────────┴───────────────┐
+              ▼                               ▼
+      gvisor backend                   bwrap backend
+      (runsc Method 2, KVM)            (namespaces + cgroup v2)
+              │                               │
+              │  runsc create/start/exec      │  systemd-run --user -p MemoryMax… bwrap
+              ▼                               ▼
+      ┌────────────────────┐        ┌────────────────────────────┐
+      │ gVisor sandbox     │        │ bubblewrap sandbox          │
+      │  user-space kernel │        │  --unshare-all              │
+      │  ro rootfs         │        │  ro rootfs, rw /workspace    │
+      │  rw /workspace     │        │  vora-init (PID 1, agent)    │
+      └────────────────────┘        └────────────────────────────┘
 ```
 
 The control plane never depends on the isolation technology: every backend
@@ -87,7 +88,9 @@ boundaries are in [docs/architecture](docs/architecture/). The boundary matrix:
 
 `tests/security/` is a deliverable, not an afterthought: each test encodes *why*
 the boundary matters and was verified to fail when the corresponding flag is
-removed.
+removed. `make test-security-all` runs the whole matrix against **both** bwrap
+and gVisor (the gVisor leg inside a `rootlesskit` user namespace). Fork/memory
+resource limits are bwrap-only in v0.2 (see limitations).
 
 ## Demo
 
@@ -129,44 +132,54 @@ deploy/         systemd units and Ansible roles (v0.2)
 ## Development
 
 Requirements: Go 1.27+, `protoc` with `protoc-gen-go` and `protoc-gen-go-grpc`,
-Docker (to build images), Bubblewrap, and a systemd user session.
+Docker (to build images), Bubblewrap, `runsc` (gVisor), `rootlesskit`,
+`slirp4netns`, `fuse-overlayfs`, and a systemd user session.
 
 ```bash
-make images      # build the read-only rootfs cache (~/.local/state/vora/images)
-make binaries    # build bin/{vora,vora-runner,vora-init} (static)
-make test        # unit tests
-make test-integration  # runner + sandbox lifecycle over a real socket
-make test-security     # isolation suite
+make images            # build the read-only rootfs cache (Docker export; containerd-backed WIP)
+make binaries          # build bin/{vora,vora-runner,vora-init} (static)
+make test              # unit tests
+make test-integration  # runner + sandbox lifecycle over a real socket (incl. Postgres via testcontainers)
+make test-security     # isolation suite (bwrap; gVisor subtests skipped unprivileged)
+make test-security-all # isolation matrix against bwrap AND gVisor
 make bench-report      # benchmarks + report in docs/benchmarks/
-make help        # all targets
+make help              # all targets
 ```
 
-Run a local runner (rootless, user systemd) and use the CLI:
+Install and start the rootlesskit-wrapped runner (required for gVisor):
 
 ```bash
-./bin/vora-runner &                     # serves ~/.local/state/.../runner.sock
-vora sandbox create --image python:3.13
+make install-rootless   # user systemd service: vora-runner.service
+vora sandbox create --image vora/base --backend gvisor
 ```
 
 The runner exposes Prometheus metrics at `127.0.0.1:9101/metrics` and a health
 check at `/healthz` (override with `VORA_METRICS_ADDR`).
 
 Configuration is via environment variables: `VORA_STATE_DIR`, `VORA_SOCKET`,
-`VORA_SYSTEMD_MODE` (`user`/`system`), `VORA_METRICS_ADDR`, `VORA_INIT_BINARY`.
+`VORA_SYSTEMD_MODE` (`user`/`system`), `VORA_METRICS_ADDR`, `VORA_INIT_BINARY`,
+`VORA_GVISOR_PLATFORM` (`kvm`/`systrap`), `VORA_GVISOR_ROOT`, `VORA_RUNSC`, and
+`VORA_AUDIT_DSN` (PostgreSQL/Supabase; omitted → local JSONL).
 
 ## Limitations (honest)
 
-- **Shared kernel.** Bubblewrap isolates namespaces but shares the Linux kernel;
-  a kernel vulnerability could escape. gVisor (v0.2) reduces this surface.
-- **No syscall filtering yet.** seccomp is not applied; Bubblewrap `--seccomp`
-  is a planned hardening step.
+- **gVisor resource limits are not enforced yet.** The rootless gVisor backend
+  runs `runsc` with `--ignore-cgroups`, so `pids.max`/`memory.max` and the
+  fork/memory-bomb tests apply to bwrap only. Wiring cgroup v2 limits through
+  the rootlesskit userns is a follow-up.
+- **Images still come from the Docker-export cache.** containerd is used as the
+  OCI store for container data, but the rootfs cache is not yet materialised
+  from containerd snapshots (ADR 009) — that migration is pending.
+- **No syscall filtering for bwrap.** seccomp is not applied; Bubblewrap
+  `--seccomp` is a planned hardening step. gVisor provides its own syscall
+  surface.
 - **Disk is not quota-enforced.** A sandbox can fill its workspace up to host
   free space.
 - **Images are trusted.** No signature verification yet.
-- **The image must provide mount points.** Rootfs images created by
-  `make images` include `/workspace` and `/vora`; custom images must create them.
-- **Sandboxes survive runner death briefly**, then exit via the agent's
-  watchdog; orphaned units are cleaned on the next runner start.
+- **The image must provide mount points.** Rootfs images include `/workspace`
+  and `/vora`; custom images must create them.
+- **Sandboxes survive runner death briefly**, then exit via the agent watchdog /
+  runsc teardown; orphaned units and containers are cleaned on the next start.
 - **Not production-ready.** No auth on the runner socket, single runner, no
   multi-tenant scheduling.
 
@@ -174,9 +187,11 @@ Configuration is via environment variables: `VORA_STATE_DIR`, `VORA_SOCKET`,
 
 | Version | Scope |
 | ------- | ----- |
-| **v0.1 (this)** | Go runner, Bubblewrap backend, cgroups v2, in-sandbox exec agent, CLI, security suite, benchmarks |
-| v0.2 | gVisor/containerd backend, HTTP control plane, remote runner, systemd-delegated cgroups |
-| v0.3 | Network policy, egress gateway (SNI allowlist), credential brokering, OTel, TS SDK, MCP |
+| v0.1 | Go runner, Bubblewrap backend, cgroups v2, in-sandbox exec agent, CLI, security suite, benchmarks |
+| **v0.2 (this)** | **gVisor backend (direct `runsc`, Method 2), backend selection, rootlesskit runner service, PostgreSQL/Supabase audit, dual-backend isolation matrix** |
+| v0.3 | HTTP control plane + remote runner, network policy + egress gateway (SNI allowlist), credential brokering, TS/Python SDK, MCP |
+| v1.0 | Firecracker microVM tier, snapshots/forks |
+| pending | containerd-snapshot rootfs (ADR 009); cgroup limits for gVisor |
 
 ## License
 

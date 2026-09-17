@@ -1,6 +1,6 @@
 # Architecture Overview
 
-Status: draft · Applies to: v0.1
+Status: draft · Applies to: v0.1–v0.2
 
 ## Purpose
 
