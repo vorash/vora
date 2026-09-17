@@ -1,0 +1,21 @@
+# Vora runner as a rootlesskit-wrapped systemd *user* service.
+#
+# Installed by `make install-rootless` into ~/.config/systemd/user/. The wrapper
+# runs vora-runner inside a persistent rootlesskit user namespace so the gVisor
+# backend (runsc Method 2) works without root.
+[Unit]
+Description=Vora runner (rootlesskit, gVisor-capable)
+Documentation=https://github.com/vorash/vora
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/vora-rootless.sh
+Restart=on-failure
+RestartSec=2
+TimeoutSec=0
+Delegate=yes
+KillMode=mixed
+
+[Install]
+WantedBy=default.target

@@ -124,6 +124,7 @@ func newFixture(t *testing.T, bc backendCase) *fixture {
 		StateDir:       t.TempDir(),
 		SystemdMode:    config.SystemdUser,
 		GvisorPlatform: "kvm",
+		GvisorRunRoot:  gvisorTestRoot(),
 	}
 	return &fixture{t: t, backend: bc.new(t, cfg), ws: workspace.NewManager(cfg.SandboxesDir()), cfg: cfg}
 }
@@ -217,6 +218,23 @@ func limits(memMB, pids int64) runtime.ResourceLimits {
 	return runtime.ResourceLimits{CPUMillis: 1000, MemoryBytes: memMB << 20, Pids: pids}
 }
 
+// gvisorTestRoot is a per-process runsc state root, so tests do not share state
+// with a running vora-runner service (two runsc instances must not share a root).
+func gvisorTestRoot() string {
+	rd := os.Getenv("XDG_RUNTIME_DIR")
+	if rd == "" {
+		rd = os.TempDir()
+	}
+	return filepath.Join(rd, fmt.Sprintf("vora-gvisor-sec-%d", os.Getpid()))
+}
+
+// cleanupGvisorTestRoot best-effort unmounts and removes the test runsc root.
+func cleanupGvisorTestRoot() {
+	root := gvisorTestRoot()
+	_ = exec.Command("umount", "-l", filepath.Join(root, "null-netns")).Run()
+	_ = os.RemoveAll(root)
+}
+
 func imageRootfs(t *testing.T, name string) string {
 	t.Helper()
 	stateHome := os.Getenv("XDG_STATE_HOME")
@@ -267,6 +285,7 @@ func TestMain(m *testing.M) {
 			code = 1
 		}
 	}
+	cleanupGvisorTestRoot()
 	os.Exit(code)
 }
 
@@ -280,7 +299,7 @@ func leakedUnits() []string {
 	var units []string
 	for _, line := range strings.Split(string(out), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 3 || !strings.HasPrefix(fields[0], cgroup.UnitPrefix) {
+		if len(fields) < 3 || !cgroup.IsSandboxUnit(fields[0]) {
 			continue
 		}
 		switch fields[2] { // ACTIVE column

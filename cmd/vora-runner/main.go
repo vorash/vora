@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -37,9 +38,19 @@ func main() {
 }
 
 func run() error {
+	socketFlag := flag.String("socket", "", "runner control socket (overrides VORA_SOCKET)")
+	stateFlag := flag.String("state-dir", "", "state directory (overrides VORA_STATE_DIR)")
+	flag.Parse()
+
 	cfg, err := config.Default()
 	if err != nil {
 		return err
+	}
+	if *socketFlag != "" {
+		cfg.SocketPath = *socketFlag
+	}
+	if *stateFlag != "" {
+		cfg.StateDir = *stateFlag
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))

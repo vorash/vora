@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -30,7 +31,7 @@ func TestGvisorBackendLifecycle(t *testing.T) {
 	}
 	rootfs := imageRootfs(t, "base")
 
-	cfg := config.Config{StateDir: t.TempDir(), GvisorPlatform: "kvm"}
+	cfg := config.Config{StateDir: t.TempDir(), GvisorPlatform: "kvm", GvisorRunRoot: filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "vora-gvisor-itest")}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	backend, err := gvisor.New(cfg, logger)
 	if err != nil {

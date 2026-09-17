@@ -24,6 +24,18 @@ binaries: ## Build the vora binaries into bin/
 	mkdir -p $(BIN_DIR)
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/ ./cmd/...
 
+.PHONY: install-rootless
+install-rootless: binaries ## Install and start the rootlesskit-wrapped vora-runner user service
+	mkdir -p $(HOME)/.local/bin
+	install -m 0755 bin/vora-runner bin/vora-init $(HOME)/.local/bin/
+	install -m 0755 scripts/vora-rootless.sh $(HOME)/.local/bin/vora-rootless.sh
+	mkdir -p $(HOME)/.config/systemd/user
+	install -m 0644 deploy/systemd/vora-runner.service $(HOME)/.config/systemd/user/vora-runner.service
+	systemctl --user daemon-reload
+	systemctl --user enable vora-runner.service
+	systemctl --user restart vora-runner.service
+	@echo "vora-runner user service started; socket: $$XDG_RUNTIME_DIR/vora/runner.sock"
+
 .PHONY: proto
 proto: ## Generate Go code from protobuf definitions
 	@command -v protoc >/dev/null || { echo "protoc not found"; exit 1; }

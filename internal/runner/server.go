@@ -201,6 +201,10 @@ func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) 
 	if err != nil {
 		return nil, err
 	}
+	// Record the chosen backend so future RPCs and `inspect` are explicit.
+	if rec.Spec.Backend == "" {
+		rec.Spec.Backend = backend.Name()
+	}
 	if !backend.Capabilities().SupportsNetwork(rec.Spec.Network.Mode) {
 		return nil, status.Errorf(codes.InvalidArgument, "backend %s does not support network mode %q", backend.Name(), rec.Spec.Network.Mode)
 	}
@@ -418,6 +422,9 @@ func (s *Server) Reconcile(ctx context.Context) error {
 			s.logger.Warn("reconcile: list units failed", "error", err)
 		}
 		for _, name := range units {
+			if !cgroup.IsSandboxUnit(name) {
+				continue
+			}
 			s.logger.Info("reconcile: removing stale unit", "unit", name)
 			if u, aerr := s.cgroups.Attach(ctx, name); aerr == nil {
 				_ = u.Stop(ctx)

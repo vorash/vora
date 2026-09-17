@@ -9,6 +9,7 @@ package cgroup
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/vorash/vora/internal/config"
 	"github.com/vorash/vora/internal/runtime"
@@ -27,8 +28,15 @@ var (
 // UnitPrefix is prepended to sandbox ids to form systemd unit names.
 const UnitPrefix = "vora-"
 
+// SandboxUnitPrefix matches runtime sandbox units (vora-sbx_*), distinguishing
+// them from the runner's own unit (vora-runner.service).
+const SandboxUnitPrefix = UnitPrefix + "sbx_"
+
 // UnitName returns the systemd unit base name for a sandbox id.
 func UnitName(sandboxID string) string { return UnitPrefix + sandboxID }
+
+// IsSandboxUnit reports whether a unit base name belongs to a sandbox.
+func IsSandboxUnit(name string) bool { return strings.HasPrefix(name, SandboxUnitPrefix) }
 
 // StartRequest describes a sandbox process to launch under a cgroup.
 type StartRequest struct {
