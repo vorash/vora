@@ -57,9 +57,9 @@ infallible; the design minimises the trusted surface.
 | Memory bomb / OOM | `memory.max`, `memory.swap.max=0` | cgroup |
 | CPU monopolisation | `cpu.max` quota | cgroup |
 | Disk exhaustion | per-sandbox workspace; quota enforcement | storage |
-| Metadata service access | unrestricted network is never granted; `--unshare-net` | network |
-| Private-network probing | no network namespace route exists | network |
-| Reverse shell / exfiltration | no network egress | network |
+| Metadata service access | unrestricted network is never granted; `--unshare-net`, or (bwrap `NetworkRestricted`) a DNAT to the egress proxy that denies non-TLS | network |
+| Private-network probing | no network namespace route exists, or egress is proxied with private/link-local/CGNAT destinations blocked | network |
+| Reverse shell / exfiltration | no network egress, or egress restricted to an allowlisted TLS SNI set | network |
 | Credential theft from env/disk | runner secrets never injected into sandbox | credentials |
 | Sandbox survives runner death | in-sandbox agent exits when the runner disappears; reconciler reaps orphans | lifecycle |
 | Malicious image | image rootfs is data only, read-only, no execution at build time | supply chain |

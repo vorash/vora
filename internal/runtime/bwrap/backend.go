@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,8 @@ import (
 	"github.com/vorash/vora/internal/agentproto"
 	"github.com/vorash/vora/internal/cgroup"
 	"github.com/vorash/vora/internal/config"
+	"github.com/vorash/vora/internal/egress"
+	"github.com/vorash/vora/internal/network"
 	"github.com/vorash/vora/internal/runtime"
 )
 
@@ -31,6 +34,12 @@ type Backend struct {
 	cgroups  cgroup.Manager
 	logger   *slog.Logger
 	initPath string
+	bwrapBin string
+
+	// Restricted-network path (NetworkRestricted). Enabled by SetRestricted.
+	subtree   cgroup.Subtree
+	networks  *network.Manager
+	egressSink func(egress.Event)
 
 	mu      sync.Mutex
 	handles map[string]*handle
@@ -40,8 +49,16 @@ type handle struct {
 	id       string
 	spec     runtime.SandboxSpec
 	initPath string
-	unit     *cgroup.Unit
-	client   *agentproto.Client
+	// NetworkNone path: a transient systemd unit + in-sandbox agent.
+	unit   *cgroup.Unit
+	client *agentproto.Client
+	// NetworkRestricted path: a runner-launched sandbox in its own netns.
+	group *cgroup.Group
+	proxy *egress.Proxy
+	net   *network.Net
+	cmd   *exec.Cmd
+	done  chan error
+	cancel context.CancelFunc
 }
 
 func (h *handle) ID() string { return h.id }
@@ -55,13 +72,26 @@ func New(cfg config.Config, cgroups cgroup.Manager, logger *slog.Logger) (*Backe
 	if err != nil {
 		return nil, err
 	}
+	bwrapBin, _ := exec.LookPath("bwrap")
 	return &Backend{
 		cfg:      cfg,
 		cgroups:  cgroups,
 		logger:   logger,
 		initPath: initPath,
+		bwrapBin: bwrapBin,
 		handles:  make(map[string]*handle),
 	}, nil
+}
+
+// SetRestricted enables the NetworkRestricted path: a per-sandbox network
+// namespace, an SNI egress proxy, and cgroup limits from the delegated
+// subtree. The sandbox is launched by the runner (not via systemd-run) so it
+// can join the prepared netns. sink receives each egress decision and may be
+// nil.
+func (b *Backend) SetRestricted(subtree cgroup.Subtree, networks *network.Manager, sink func(egress.Event)) {
+	b.subtree = subtree
+	b.networks = networks
+	b.egressSink = sink
 }
 
 // resolveInit finds the vora-init binary: VORA_INIT_BINARY, then next to the
@@ -87,11 +117,15 @@ func (b *Backend) Name() string { return "bwrap" }
 
 // Capabilities implements runtime.Backend.
 func (b *Backend) Capabilities() runtime.Capabilities {
+	modes := []runtime.NetworkMode{runtime.NetworkNone}
+	if b.subtree != nil && b.networks != nil && b.bwrapBin != "" {
+		modes = append(modes, runtime.NetworkRestricted)
+	}
 	return runtime.Capabilities{
 		NativeExec:             false, // exec is mediated by vora-init
 		OwnsCgroups:            false, // systemd-run applies limits
 		EnforcesResourceLimits: true,
-		NetworkModes:           []runtime.NetworkMode{runtime.NetworkNone},
+		NetworkModes:           modes,
 	}
 }
 
@@ -100,9 +134,12 @@ func (b *Backend) Create(_ context.Context, spec runtime.SandboxSpec) (runtime.H
 	if err := spec.Validate(); err != nil {
 		return nil, err
 	}
-	if spec.Network.Mode != runtime.NetworkNone {
-		return nil, fmt.Errorf("%w: network mode %q (bwrap supports %q)",
-			runtime.ErrUnsupported, spec.Network.Mode, runtime.NetworkNone)
+	if spec.Network.Mode != runtime.NetworkNone && spec.Network.Mode != runtime.NetworkRestricted {
+		return nil, fmt.Errorf("%w: network mode %q (bwrap supports %q and %q)",
+			runtime.ErrUnsupported, spec.Network.Mode, runtime.NetworkNone, runtime.NetworkRestricted)
+	}
+	if spec.Network.Mode == runtime.NetworkRestricted && !b.Capabilities().SupportsNetwork(runtime.NetworkRestricted) {
+		return nil, fmt.Errorf("%w: NetworkRestricted is not configured on this runner", runtime.ErrUnsupported)
 	}
 	rootfs := spec.Workspace.RootfsDir
 	if rootfs == "" {
@@ -122,12 +159,155 @@ func (b *Backend) Create(_ context.Context, spec runtime.SandboxSpec) (runtime.H
 	return h, nil
 }
 
-// Start launches the sandbox under a cgroup and waits for the agent.
+// Start launches the sandbox and waits for the in-sandbox agent.
 func (b *Backend) Start(ctx context.Context, h runtime.Handle) error {
 	hd, err := b.handle(h)
 	if err != nil {
 		return err
 	}
+	if hd.spec.Network.Mode == runtime.NetworkRestricted {
+		return b.startRestricted(ctx, hd)
+	}
+	return b.startUnit(ctx, hd)
+}
+
+// startRestricted launches a NetworkRestricted sandbox from the runner: it
+// joins the prepared netns via nsenter, applies cgroup limits from the
+// delegated subtree, and starts the sandbox's egress proxy before the agent is
+// reachable.
+func (b *Backend) startRestricted(ctx context.Context, hd *handle) error {
+	ws := hd.spec.Workspace
+	if err := os.MkdirAll(ws.IPCDir, 0o755); err != nil {
+		return fmt.Errorf("bwrap: ipc dir: %w", err)
+	}
+	if ws.ControlSocket != "" {
+		_ = os.Remove(ws.ControlSocket)
+	}
+	if err := installInit(hd.initPath, filepath.Join(ws.IPCDir, "vora-init")); err != nil {
+		return err
+	}
+
+	netns, err := b.networks.Create(ctx, hd.id)
+	if err != nil {
+		return fmt.Errorf("bwrap: network: %w", err)
+	}
+	hd.net = netns
+
+	// The sandbox outlives this RPC, so its proxy and process use a context
+	// owned by the handle (cancelled on stop/destroy), not the request ctx.
+	sandboxCtx, cancel := context.WithCancel(context.Background())
+	hd.cancel = cancel
+
+	proxy := egress.New(hd.id, egress.Policy{AllowedDomains: hd.spec.Network.AllowedDomains}, b.logger, b.egressSink)
+	if err := proxy.Listen(sandboxCtx, netns.ProxyAddr()); err != nil {
+		b.cleanupRestricted(ctx, hd)
+		return err
+	}
+	hd.proxy = proxy
+
+	group, err := b.subtree.Create(ctx, hd.id, hd.spec.Resources)
+	if err != nil {
+		b.cleanupRestricted(ctx, hd)
+		return fmt.Errorf("bwrap: cgroup: %w", err)
+	}
+	hd.group = group
+
+	argv, err := Args(BuildOptions{
+		RootfsDir:    ws.RootfsDir,
+		WorkspaceDir: ws.WorkspaceDir,
+		HomeDir:      ws.HomeDir,
+		IPCDir:       ws.IPCDir,
+		Env:          hd.spec.Env,
+		ShareNet:     true,
+	})
+	if err != nil {
+		b.cleanupRestricted(ctx, hd)
+		return err
+	}
+	nsArgs := append([]string{"-t", strconv.Itoa(netns.NetnsPID), "-n", b.bwrapBin}, argv[1:]...)
+	cmd := exec.CommandContext(sandboxCtx, "nsenter", nsArgs...)
+	closer, err := group.ApplyTo(cmd)
+	if err != nil {
+		b.cleanupRestricted(ctx, hd)
+		return fmt.Errorf("bwrap: cgroup apply: %w", err)
+	}
+	defer closer()
+	if err := cmd.Start(); err != nil {
+		b.cleanupRestricted(ctx, hd)
+		return fmt.Errorf("bwrap: start: %w", err)
+	}
+	hd.cmd = cmd
+	hd.done = make(chan error, 1)
+	go func() { hd.done <- cmd.Wait() }()
+
+	client, err := agentproto.Dial(ws.ControlSocket)
+	if err != nil {
+		b.cleanupRestricted(ctx, hd)
+		return err
+	}
+	hd.client = client
+	if err := waitReadyCmd(ctx, hd.done, client, agentReadyTimeout); err != nil {
+		b.cleanupRestricted(ctx, hd)
+		return err
+	}
+	b.logger.Info("sandbox started", "sandbox_id", hd.id, "backend", "bwrap", "network", "restricted", "gateway", netns.GatewayIP)
+	return nil
+}
+
+// cleanupRestricted tears down every resource of a restricted start.
+func (b *Backend) cleanupRestricted(ctx context.Context, hd *handle) {
+	if hd.cancel != nil {
+		hd.cancel()
+		hd.cancel = nil
+	}
+	if hd.proxy != nil {
+		_ = hd.proxy.Close()
+		hd.proxy = nil
+	}
+	if hd.client != nil {
+		_ = hd.client.Close()
+		hd.client = nil
+	}
+	if hd.cmd != nil && hd.cmd.Process != nil {
+		_ = hd.cmd.Process.Kill()
+	}
+	if hd.group != nil {
+		_ = hd.group.Kill()
+		_ = hd.group.Destroy()
+		hd.group = nil
+	}
+	if b.networks != nil && hd.net != nil {
+		_ = b.networks.Destroy(ctx, hd.id)
+		hd.net = nil
+	}
+}
+
+// waitReadyCmd is waitReady for a runner-launched process: it also fails fast
+// when the sandbox exits before the agent is ready.
+func waitReadyCmd(ctx context.Context, done <-chan error, client *agentproto.Client, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		pingCtx, cancel := context.WithTimeout(ctx, time.Second)
+		_, err := client.Ping(pingCtx)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		select {
+		case werr := <-done:
+			return fmt.Errorf("bwrap: sandbox exited before the agent was ready: %w", werr)
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("bwrap: agent not ready after %s: %w", timeout, lastErr)
+}
+
+// startUnit launches the sandbox as a transient systemd unit (NetworkNone).
+func (b *Backend) startUnit(ctx context.Context, hd *handle) error {
 	ws := hd.spec.Workspace
 	if err := os.MkdirAll(ws.IPCDir, 0o755); err != nil {
 		return fmt.Errorf("bwrap: ipc dir: %w", err)
@@ -245,6 +425,9 @@ func (b *Backend) Stats(ctx context.Context, h runtime.Handle) (*runtime.Stats, 
 	if err != nil {
 		return nil, err
 	}
+	if hd.group != nil {
+		return hd.group.Stats()
+	}
 	if hd.unit == nil {
 		return &runtime.Stats{}, nil
 	}
@@ -271,6 +454,10 @@ func (b *Backend) Stop(ctx context.Context, h runtime.Handle) error {
 		_ = hd.client.Shutdown(shutdownCtx)
 		cancel()
 	}
+	if hd.group != nil || hd.net != nil || hd.proxy != nil {
+		b.cleanupRestricted(ctx, hd)
+		return nil
+	}
 	if hd.unit != nil {
 		if err := hd.unit.Stop(ctx); err != nil {
 			return err
@@ -288,6 +475,13 @@ func (b *Backend) Destroy(ctx context.Context, h runtime.Handle) error {
 	if err := b.Stop(ctx, hd); err != nil {
 		b.logger.Warn("stop during destroy failed", "sandbox_id", hd.id, "error", err)
 	}
+	if hd.group != nil || hd.net != nil || hd.proxy != nil {
+		b.cleanupRestricted(ctx, hd)
+		b.mu.Lock()
+		delete(b.handles, hd.id)
+		b.mu.Unlock()
+		return nil
+	}
 	if hd.client != nil {
 		_ = hd.client.Close()
 	}
@@ -302,19 +496,29 @@ func (b *Backend) Destroy(ctx context.Context, h runtime.Handle) error {
 
 // List implements runtime.Sweeper.
 func (b *Backend) List(ctx context.Context) ([]string, error) {
-	if b.cgroups == nil {
-		return nil, nil
-	}
-	units, err := b.cgroups.List(ctx)
-	if err != nil {
-		return nil, err
-	}
+	seen := map[string]bool{}
 	var ids []string
-	for _, name := range units {
-		if !cgroup.IsSandboxUnit(name) {
-			continue
+	add := func(id string) {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
 		}
-		ids = append(ids, strings.TrimPrefix(name, cgroup.UnitPrefix))
+	}
+	if b.cgroups != nil {
+		units, err := b.cgroups.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, name := range units {
+			if cgroup.IsSandboxUnit(name) {
+				add(strings.TrimPrefix(name, cgroup.UnitPrefix))
+			}
+		}
+	}
+	if b.networks != nil {
+		for _, id := range b.networks.List() {
+			add(id)
+		}
 	}
 	return ids, nil
 }
@@ -322,19 +526,24 @@ func (b *Backend) List(ctx context.Context) ([]string, error) {
 // Reap implements runtime.Sweeper.
 func (b *Backend) Reap(ctx context.Context, id string) error {
 	b.mu.Lock()
-	if hd, ok := b.handles[id]; ok {
-		delete(b.handles, id)
-		b.mu.Unlock()
-		if hd.client != nil {
-			_ = hd.client.Close()
+	hd, ok := b.handles[id]
+	delete(b.handles, id)
+	b.mu.Unlock()
+	if ok {
+		if hd.group != nil || hd.net != nil || hd.proxy != nil {
+			b.cleanupRestricted(ctx, hd)
+		} else {
+			if hd.client != nil {
+				_ = hd.client.Close()
+			}
+			if hd.unit != nil {
+				_ = hd.unit.Stop(ctx)
+				_ = hd.unit.Remove(ctx)
+			}
 		}
-		if hd.unit != nil {
-			_ = hd.unit.Stop(ctx)
-			_ = hd.unit.Remove(ctx)
-			return nil
-		}
-	} else {
-		b.mu.Unlock()
+	}
+	if b.networks != nil {
+		_ = b.networks.Destroy(ctx, id)
 	}
 	if b.cgroups == nil {
 		return nil

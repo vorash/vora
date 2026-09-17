@@ -20,6 +20,8 @@ import (
 	"github.com/vorash/vora/internal/audit/postgres"
 	"github.com/vorash/vora/internal/cgroup"
 	"github.com/vorash/vora/internal/config"
+	"github.com/vorash/vora/internal/egress"
+	"github.com/vorash/vora/internal/network"
 	"github.com/vorash/vora/internal/runner"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/runtime/bwrap"
@@ -68,10 +70,10 @@ func run() error {
 
 	store := sandbox.NewStore(cfg.SandboxesDir())
 	registry := runtime.NewRegistry()
-	manager := registerBackends(cfg, registry, logger)
+	metrics := telemetry.New()
+	manager := registerBackends(cfg, registry, metrics, logger)
 	runnerID := ulid.NewRunner()
 	server := runner.NewServer(cfg, store, registry, runnerID, logger)
-	metrics := telemetry.New()
 	server.SetMetrics(metrics)
 	if manager != nil {
 		server.SetCgroups(manager)
@@ -176,23 +178,43 @@ func run() error {
 // registerBackends registers the isolation backends available on this host.
 // A missing backend is not fatal: the runner still serves create/get/list, and
 // start returns a clear error.
-func registerBackends(cfg config.Config, registry *runtime.Registry, logger *slog.Logger) cgroup.Manager {
+func registerBackends(cfg config.Config, registry *runtime.Registry, metrics *telemetry.Metrics, logger *slog.Logger) cgroup.Manager {
 	manager, err := cgroup.New(cfg)
 	if err != nil {
 		logger.Warn("cgroup manager unavailable; bwrap sandboxes cannot be started", "error", err)
-	} else if backend, err := bwrap.New(cfg, manager, logger); err != nil {
-		logger.Warn("bubblewrap backend unavailable", "error", err)
-	} else if err := registry.Register(backend); err != nil {
-		logger.Warn("register backend failed", "backend", backend.Name(), "error", err)
-	} else {
-		logger.Info("registered runtime backend", "backend", backend.Name())
 	}
 
 	subtree, err := cgroup.NewSubtree()
 	if err != nil {
-		logger.Warn("cgroup subtree unavailable; gVisor cannot enforce resource limits", "error", err)
+		logger.Warn("cgroup subtree unavailable; sandbox resource limits cannot be enforced", "error", err)
 		subtree = nil
 	}
+
+	networks := network.NewManager(cfg.StateDir, network.DefaultProxyPort, logger)
+	egressSink := func(e egress.Event) {
+		if e.Allowed {
+			return
+		}
+		metrics.NetworkDeniedTotal.Inc()
+		metrics.PolicyDeniedTotal.Inc()
+		logger.Info("egress denied", "sandbox_id", e.SandboxID, "host", e.Host, "reason", e.Reason)
+	}
+
+	if manager != nil {
+		if backend, err := bwrap.New(cfg, manager, logger); err != nil {
+			logger.Warn("bubblewrap backend unavailable", "error", err)
+		} else {
+			if subtree != nil {
+				backend.SetRestricted(subtree, networks, egressSink)
+			}
+			if err := registry.Register(backend); err != nil {
+				logger.Warn("register backend failed", "backend", backend.Name(), "error", err)
+			} else {
+				logger.Info("registered runtime backend", "backend", backend.Name(), "network_modes", backend.Capabilities().NetworkModes)
+			}
+		}
+	}
+
 	if backend, err := gvisor.New(cfg, logger, subtree); err != nil {
 		logger.Warn("gvisor backend unavailable", "error", err)
 	} else if err := registry.Register(backend); err != nil {

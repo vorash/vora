@@ -39,7 +39,25 @@ type Config struct {
 	GvisorRunRoot string
 	// RunscPath overrides the runsc binary location.
 	RunscPath string
+	// ContainerdAddress is the containerd gRPC socket used as the OCI image
+	// store. Empty selects the rootless socket under $XDG_RUNTIME_DIR, then the
+	// system socket.
+	ContainerdAddress string
+	// ContainerdNamespace is the containerd namespace for Vora images.
+	ContainerdNamespace string
+	// ContainerdSnapshotter is the snapshotter used to unpack images.
+	ContainerdSnapshotter string
+	// ImagesMode selects how an image ref resolves to a rootfs:
+	// "auto" (containerd, then the local cache), "containerd" or "cache".
+	ImagesMode string
 }
+
+// Image mode values for Config.ImagesMode.
+const (
+	ImagesAuto       = "auto"
+	ImagesContainerd = "containerd"
+	ImagesCache      = "cache"
+)
 
 // ImagesDir is the read-only rootfs cache.
 func (c Config) ImagesDir() string { return filepath.Join(c.StateDir, "images") }
@@ -57,8 +75,11 @@ func Default() (Config, error) {
 	c := Config{
 		SystemdMode:    SystemdUser,
 		DefaultTTL:     30 * time.Minute,
-		MetricsAddr:    "127.0.0.1:9101",
-		GvisorPlatform: "kvm",
+		MetricsAddr:           "127.0.0.1:9101",
+		GvisorPlatform:        "kvm",
+		ContainerdNamespace:   "vora",
+		ContainerdSnapshotter: "native",
+		ImagesMode:            ImagesAuto,
 	}
 
 	if os.Geteuid() == 0 {
@@ -97,6 +118,24 @@ func Default() (Config, error) {
 	}
 	if v := os.Getenv("VORA_RUNSC"); v != "" {
 		c.RunscPath = v
+	}
+	if v := os.Getenv("VORA_CONTAINERD_ADDRESS"); v != "" {
+		c.ContainerdAddress = v
+	}
+	if v := os.Getenv("VORA_CONTAINERD_NAMESPACE"); v != "" {
+		c.ContainerdNamespace = v
+	}
+	if v := os.Getenv("VORA_CONTAINERD_SNAPSHOTTER"); v != "" {
+		c.ContainerdSnapshotter = v
+	}
+	if v := os.Getenv("VORA_IMAGES_MODE"); v != "" {
+		switch v {
+		case ImagesAuto, ImagesContainerd, ImagesCache:
+			c.ImagesMode = v
+		default:
+			return Config{}, fmt.Errorf("invalid VORA_IMAGES_MODE %q (want %q, %q or %q)",
+				v, ImagesAuto, ImagesContainerd, ImagesCache)
+		}
 	}
 
 	if c.DefaultTTL <= 0 {

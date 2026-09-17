@@ -28,6 +28,7 @@ func (a *app) sandboxCreateCmd() *cobra.Command {
 		pids                             int64
 		env                              []string
 		tenant, agent                    string
+		allowedDomains                   []string
 	)
 	cmd := &cobra.Command{
 		Use:   "create",
@@ -63,7 +64,7 @@ func (a *app) sandboxCreateCmd() *cobra.Command {
 				TenantId:   tenant,
 				AgentId:    agent,
 				Resources:  &v1.ResourceLimits{CpuMillis: cpuMillis, MemoryBytes: memBytes, Pids: pids},
-				Network:    &v1.NetworkPolicy{Mode: mode},
+				Network:    &v1.NetworkPolicy{Mode: mode, AllowedDomains: allowedDomains},
 				Env:        env,
 				TtlSeconds: int64(ttlDur / time.Second),
 			}
@@ -87,7 +88,8 @@ func (a *app) sandboxCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&memory, "memory", "512m", "memory limit (e.g. 512m, 1Gi)")
 	cmd.Flags().StringVar(&cpu, "cpu", "1", "CPU limit (e.g. 1, 500m)")
 	cmd.Flags().Int64Var(&pids, "pids", 128, "process limit")
-	cmd.Flags().StringVar(&network, "network", "none", "network mode (none)")
+	cmd.Flags().StringVar(&network, "network", "none", "network mode: none or restricted")
+	cmd.Flags().StringArrayVar(&allowedDomains, "allow-domain", nil, "egress allowlist domain for --network restricted (repeatable, e.g. example.com)")
 	cmd.Flags().StringVar(&ttl, "ttl", "30m", "sandbox time to live")
 	cmd.Flags().StringArrayVar(&env, "env", nil, "environment variable KEY=VALUE (repeatable)")
 	cmd.Flags().StringVar(&tenant, "tenant", "", "tenant id")
