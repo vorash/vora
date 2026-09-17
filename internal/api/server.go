@@ -1,0 +1,619 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"strings"
+	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+
+	v1 "github.com/vorash/vora/api/proto/v1"
+	"github.com/vorash/vora/internal/client"
+	"github.com/vorash/vora/internal/tlsutil"
+	"github.com/vorash/vora/internal/ulid"
+)
+
+// ErrNoRunner means no healthy runner is registered.
+var ErrNoRunner = errors.New("api: no healthy runner registered")
+
+// RunnerClient is the subset of the runner gRPC client the API uses.
+type RunnerClient interface {
+	CreateSandbox(ctx context.Context, spec *v1.SandboxSpec) (*v1.Sandbox, error)
+	StartSandbox(ctx context.Context, id string) (*v1.Sandbox, error)
+	GetSandbox(ctx context.Context, id string) (*v1.Sandbox, error)
+	ListSandboxes(ctx context.Context, includeDestroyed bool) ([]*v1.Sandbox, error)
+	DestroySandbox(ctx context.Context, id string) error
+	StatsSandbox(ctx context.Context, id string) (*v1.Stats, error)
+	Events(ctx context.Context, id string) ([]*v1.SandboxEvent, error)
+	Execs(ctx context.Context, id string) ([]*v1.SandboxExec, error)
+	Exec(ctx context.Context, req *v1.ExecSandboxRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ExecChunk], error)
+	Close() error
+}
+
+// Options configures the control plane.
+type Options struct {
+	Store             Store
+	Logger            *slog.Logger
+	DialRunner        func(addr string) (RunnerClient, error)
+	HeartbeatInterval time.Duration
+	RunnerTTL         time.Duration
+	// JoinToken, when set, must be presented by runners when registering.
+	JoinToken string
+	// RunnerTLS enables TLS (mTLS when a CA is set) when dialing runners.
+	RunnerTLS tlsutil.Config
+	// BootstrapKey, when set, is accepted as an admin API key.
+	BootstrapKey string
+	Now          func() time.Time
+}
+
+// Server implements the HTTP/JSON API and the gRPC runner registry.
+type Server struct {
+	v1.UnimplementedRunnerRegistryServer
+
+	opts   Options
+	store  Store
+	logger *slog.Logger
+	now    func() time.Time
+}
+
+// New builds a control-plane server.
+func New(opts Options) *Server {
+	if opts.Logger == nil {
+		opts.Logger = slog.Default()
+	}
+	if opts.Store == nil {
+		opts.Store = NewMemStore()
+	}
+	if opts.DialRunner == nil {
+		if opts.RunnerTLS.Enabled() {
+			rt := opts.RunnerTLS
+			opts.DialRunner = func(addr string) (RunnerClient, error) {
+				cfg, err := rt.Client()
+				if err != nil {
+					return nil, err
+				}
+				return client.DialAddressTLS(addr, cfg)
+			}
+		} else {
+			opts.DialRunner = func(addr string) (RunnerClient, error) { return client.DialAddress(addr) }
+		}
+	}
+	if opts.HeartbeatInterval <= 0 {
+		opts.HeartbeatInterval = 10 * time.Second
+	}
+	if opts.RunnerTTL <= 0 {
+		opts.RunnerTTL = 3 * opts.HeartbeatInterval
+	}
+	if opts.Now == nil {
+		opts.Now = time.Now
+	}
+	return &Server{opts: opts, store: opts.Store, logger: opts.Logger, now: opts.Now}
+}
+
+// Close releases the store.
+func (s *Server) Close() error { return s.store.Close() }
+
+// ---------------------------------------------------------------------------
+// Runner registry (gRPC)
+// ---------------------------------------------------------------------------
+
+func (s *Server) Register(ctx context.Context, req *v1.RegisterRunnerRequest) (*v1.RegisterRunnerResponse, error) {
+	if err := s.checkJoinToken(ctx); err != nil {
+		return nil, err
+	}
+	if req.GetRunnerId() == "" || req.GetAddress() == "" {
+		return nil, status.Error(codes.InvalidArgument, "runner_id and address are required")
+	}
+	now := s.now()
+	r := Runner{
+		ID:            req.GetRunnerId(),
+		Address:       req.GetAddress(),
+		Backends:      req.GetBackends(),
+		CPUMillis:     req.GetCapacity().GetCpuMillis(),
+		MemoryBytes:   req.GetCapacity().GetMemoryBytes(),
+		MaxSandboxes:  req.GetCapacity().GetMaxSandboxes(),
+		Version:       req.GetVersion(),
+		RegisteredAt:  now,
+		LastHeartbeat: now,
+	}
+	if err := s.store.UpsertRunner(ctx, r); err != nil {
+		return nil, status.Errorf(codes.Internal, "register runner: %v", err)
+	}
+	s.logger.Info("runner registered", "runner_id", r.ID, "address", r.Address, "backends", r.Backends)
+	return &v1.RegisterRunnerResponse{HeartbeatIntervalSeconds: int64(s.opts.HeartbeatInterval / time.Second)}, nil
+}
+
+func (s *Server) Heartbeat(ctx context.Context, req *v1.HeartbeatRequest) (*v1.HeartbeatResponse, error) {
+	if err := s.checkJoinToken(ctx); err != nil {
+		return nil, err
+	}
+	existing, err := s.store.Runner(ctx, req.GetRunnerId())
+	if err != nil {
+		return nil, status.Error(codes.NotFound, "runner is not registered")
+	}
+	existing.LastHeartbeat = s.now()
+	existing.Running = req.GetSandboxesRunning()
+	if c := req.GetCapacity(); c != nil {
+		existing.CPUMillis = c.GetCpuMillis()
+		existing.MemoryBytes = c.GetMemoryBytes()
+		existing.MaxSandboxes = c.GetMaxSandboxes()
+	}
+	if err := s.store.UpsertRunner(ctx, existing); err != nil {
+		return nil, status.Errorf(codes.Internal, "heartbeat: %v", err)
+	}
+	return &v1.HeartbeatResponse{}, nil
+}
+
+func (s *Server) checkJoinToken(ctx context.Context) error {
+	if s.opts.JoinToken == "" {
+		return nil
+	}
+	md, _ := metadata.FromIncomingContext(ctx)
+	auth := md.Get("authorization")
+	if len(auth) == 0 || strings.TrimSpace(auth[0]) != "Bearer "+s.opts.JoinToken {
+		return status.Error(codes.Unauthenticated, "invalid runner join token")
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// HTTP/JSON API
+// ---------------------------------------------------------------------------
+
+// Handler returns the authenticated HTTP API.
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/sandboxes", s.auth(ScopeSandbox, s.createSandbox))
+	mux.HandleFunc("GET /v1/sandboxes", s.auth(ScopeSandbox, s.listSandboxes))
+	mux.HandleFunc("GET /v1/sandboxes/{id}", s.auth(ScopeSandbox, s.getSandbox))
+	mux.HandleFunc("DELETE /v1/sandboxes/{id}", s.auth(ScopeSandbox, s.destroySandbox))
+	mux.HandleFunc("POST /v1/sandboxes/{id}/exec", s.auth(ScopeSandbox, s.execSandbox))
+	mux.HandleFunc("GET /v1/sandboxes/{id}/stats", s.auth(ScopeSandbox, s.statsSandbox))
+	mux.HandleFunc("GET /v1/sandboxes/{id}/events", s.auth(ScopeSandbox, s.eventsSandbox))
+	mux.HandleFunc("GET /v1/sandboxes/{id}/execs", s.auth(ScopeSandbox, s.execsSandbox))
+
+	mux.HandleFunc("GET /v1/runners", s.auth(ScopeSandbox, s.listRunners))
+	mux.HandleFunc("POST /v1/keys", s.auth(ScopeAdmin, s.createKey))
+	mux.HandleFunc("GET /v1/keys", s.auth(ScopeAdmin, s.listKeys))
+	mux.HandleFunc("DELETE /v1/keys/{id}", s.auth(ScopeAdmin, s.revokeKey))
+	return mux
+}
+
+type principal struct {
+	key APIKey
+}
+
+type principalKey struct{}
+
+func (s *Server) auth(scope string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		key, ok := s.authenticate(r)
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "invalid or missing API key")
+			return
+		}
+		if scope != "" && !key.HasScope(scope) {
+			writeError(w, http.StatusForbidden, "API key lacks scope "+scope)
+			return
+		}
+		if key.ID != "" {
+			_ = s.store.TouchKey(r.Context(), key.ID, s.now())
+		}
+		next(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, principal{key: key})))
+	}
+}
+
+// authenticate resolves the bearer token to a key. The bootstrap key maps to a
+// synthetic admin key and is never stored.
+func (s *Server) authenticate(r *http.Request) (APIKey, bool) {
+	const bearer = "Bearer "
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, bearer) {
+		return APIKey{}, false
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(h, bearer))
+	if token == "" {
+		return APIKey{}, false
+	}
+	if s.opts.BootstrapKey != "" && token == s.opts.BootstrapKey {
+		return APIKey{Name: "bootstrap", Scopes: []string{ScopeAdmin, ScopeSandbox}}, true
+	}
+	key, err := s.store.KeyByHash(r.Context(), HashKey(token))
+	if err != nil || key.Revoked {
+		return APIKey{}, false
+	}
+	return key, true
+}
+
+func principalFrom(ctx context.Context) principal {
+	p, _ := ctx.Value(principalKey{}).(principal)
+	return p
+}
+
+// ---------------------------------------------------------------------------
+// Sandbox handlers
+// ---------------------------------------------------------------------------
+
+func (s *Server) createSandbox(w http.ResponseWriter, r *http.Request) {
+	spec := &v1.SandboxSpec{}
+	if err := decodeProto(r, spec); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if p := principalFrom(r.Context()); p.key.TenantID != "" && spec.TenantId == "" {
+		spec.TenantId = p.key.TenantID
+	}
+	runner, rc, err := s.pickRunner(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	defer rc.Close()
+
+	created, err := rc.CreateSandbox(r.Context(), spec)
+	if err != nil {
+		writeGRPCError(w, err)
+		return
+	}
+	started, err := rc.StartSandbox(r.Context(), created.GetId())
+	if err != nil {
+		writeGRPCError(w, err)
+		return
+	}
+	if err := s.store.SetRoute(r.Context(), started.GetId(), runner.ID); err != nil {
+		s.logger.Warn("record route failed", "sandbox_id", started.GetId(), "error", err)
+	}
+	writeProto(w, http.StatusCreated, started)
+}
+
+func (s *Server) listSandboxes(w http.ResponseWriter, r *http.Request) {
+	include := r.URL.Query().Get("include_destroyed") == "true"
+	all := &v1.ListSandboxesResponse{}
+	for _, runner := range s.runners(r.Context()) {
+		rc, err := s.opts.DialRunner(runner.Address)
+		if err != nil {
+			continue
+		}
+		items, err := rc.ListSandboxes(r.Context(), include)
+		rc.Close()
+		if err != nil {
+			continue
+		}
+		all.Sandboxes = append(all.Sandboxes, items...)
+	}
+	writeProto(w, http.StatusOK, all)
+}
+
+func (s *Server) getSandbox(w http.ResponseWriter, r *http.Request) {
+	rc, err := s.runnerFor(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	defer rc.Close()
+	sb, err := rc.GetSandbox(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeGRPCError(w, err)
+		return
+	}
+	writeProto(w, http.StatusOK, sb)
+}
+
+func (s *Server) destroySandbox(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	rc, err := s.runnerFor(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	defer rc.Close()
+	if err := rc.DestroySandbox(r.Context(), id); err != nil {
+		writeGRPCError(w, err)
+		return
+	}
+	_ = s.store.DeleteRoute(r.Context(), id)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) statsSandbox(w http.ResponseWriter, r *http.Request) {
+	rc, err := s.runnerFor(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	defer rc.Close()
+	st, err := rc.StatsSandbox(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeGRPCError(w, err)
+		return
+	}
+	writeProto(w, http.StatusOK, st)
+}
+
+func (s *Server) eventsSandbox(w http.ResponseWriter, r *http.Request) {
+	rc, err := s.runnerFor(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	defer rc.Close()
+	events, err := rc.Events(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeGRPCError(w, err)
+		return
+	}
+	writeProto(w, http.StatusOK, &v1.GetSandboxEventsResponse{Events: events})
+}
+
+func (s *Server) execsSandbox(w http.ResponseWriter, r *http.Request) {
+	rc, err := s.runnerFor(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	defer rc.Close()
+	execs, err := rc.Execs(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeGRPCError(w, err)
+		return
+	}
+	writeProto(w, http.StatusOK, &v1.GetSandboxExecsResponse{Execs: execs})
+}
+
+// execSandbox streams one execution as NDJSON of v1.ExecChunk.
+func (s *Server) execSandbox(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	req := &v1.ExecRequest{}
+	if err := decodeProto(r, req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	rc, err := s.runnerFor(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	defer rc.Close()
+
+	stream, err := rc.Exec(r.Context(), &v1.ExecSandboxRequest{SandboxId: id, Exec: req})
+	if err != nil {
+		writeGRPCError(w, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	for {
+		chunk, err := stream.Recv()
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		if err != nil {
+			return
+		}
+		data, err := protoJSON.Marshal(chunk)
+		if err != nil {
+			return
+		}
+		if _, err := w.Write(append(data, '\n')); err != nil {
+			return
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		if chunk.GetExit() != nil {
+			return
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Runner + key handlers
+// ---------------------------------------------------------------------------
+
+func (s *Server) listRunners(w http.ResponseWriter, r *http.Request) {
+	runners, err := s.store.ListRunners(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	now := s.now()
+	type runnerView struct {
+		Runner
+		Healthy bool `json:"healthy"`
+	}
+	out := make([]runnerView, 0, len(runners))
+	for _, rn := range runners {
+		out = append(out, runnerView{Runner: rn, Healthy: rn.Healthy(now, s.opts.RunnerTTL)})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runners": out})
+}
+
+func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name     string   `json:"name"`
+		TenantID string   `json:"tenant_id"`
+		Scopes   []string `json:"scopes"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if len(body.Scopes) == 0 {
+		body.Scopes = []string{ScopeSandbox}
+	}
+	if tenant := principalFrom(r.Context()).key.TenantID; tenant != "" && body.TenantID == "" {
+		body.TenantID = tenant
+	}
+	plaintext, hash, err := NewAPIKey()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "key generation failed")
+		return
+	}
+	key := APIKey{
+		ID:        ulid.NewAPIKeyID(),
+		Name:      body.Name,
+		TenantID:  body.TenantID,
+		KeyHash:   hash,
+		Scopes:    body.Scopes,
+		CreatedAt: s.now(),
+	}
+	if err := s.store.CreateKey(r.Context(), key); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	key.KeyHash = ""
+	writeJSON(w, http.StatusCreated, map[string]any{"key": plaintext, "api_key": key})
+}
+
+func (s *Server) listKeys(w http.ResponseWriter, r *http.Request) {
+	tenant := r.URL.Query().Get("tenant_id")
+	if tenant == "" {
+		tenant = principalFrom(r.Context()).key.TenantID
+	}
+	keys, err := s.store.ListKeys(r.Context(), tenant)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"keys": keys})
+}
+
+func (s *Server) revokeKey(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.RevokeKey(r.Context(), r.PathValue("id")); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeError(w, http.StatusNotFound, "key not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---------------------------------------------------------------------------
+// Runner selection
+// ---------------------------------------------------------------------------
+
+func (s *Server) runners(ctx context.Context) []Runner {
+	runners, err := s.store.ListRunners(ctx)
+	if err != nil {
+		return nil
+	}
+	now := s.now()
+	var healthy []Runner
+	for _, r := range runners {
+		if r.Healthy(now, s.opts.RunnerTTL) {
+			healthy = append(healthy, r)
+		}
+	}
+	return healthy
+}
+
+// pickRunner returns the first healthy runner (scheduling is deferred).
+func (s *Server) pickRunner(ctx context.Context) (Runner, RunnerClient, error) {
+	for _, r := range s.runners(ctx) {
+		rc, err := s.opts.DialRunner(r.Address)
+		if err != nil {
+			s.logger.Warn("runner unreachable", "runner_id", r.ID, "address", r.Address, "error", err)
+			continue
+		}
+		return r, rc, nil
+	}
+	return Runner{}, nil, ErrNoRunner
+}
+
+// runnerFor returns a client for the runner that owns a sandbox.
+func (s *Server) runnerFor(ctx context.Context, sandboxID string) (RunnerClient, error) {
+	runnerID, err := s.store.Route(ctx, sandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("api: unknown sandbox %s", sandboxID)
+	}
+	r, err := s.store.Runner(ctx, runnerID)
+	if err != nil {
+		return nil, fmt.Errorf("api: runner %s unknown", runnerID)
+	}
+	rc, err := s.opts.DialRunner(r.Address)
+	if err != nil {
+		return nil, fmt.Errorf("api: runner %s unreachable: %w", runnerID, err)
+	}
+	return rc, nil
+}
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+var protoJSON = protojson.MarshalOptions{}
+
+func writeProto(w http.ResponseWriter, code int, msg proto.Message) {
+	data, err := protoJSON.Marshal(msg)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_, _ = w.Write(data)
+}
+
+func decodeProto(r *http.Request, msg proto.Message) error {
+	data, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		return err
+	}
+	if len(data) == 0 {
+		return errors.New("empty request body")
+	}
+	return protojson.UnmarshalOptions{DiscardUnknown: true}.Unmarshal(data, msg)
+}
+
+func decodeJSON(r *http.Request, v any) error {
+	return json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(v)
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, code int, msg string) {
+	writeJSON(w, code, map[string]string{"error": msg})
+}
+
+func writeGRPCError(w http.ResponseWriter, err error) {
+	st, ok := status.FromError(err)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	code := http.StatusInternalServerError
+	switch st.Code() {
+	case codes.InvalidArgument:
+		code = http.StatusBadRequest
+	case codes.NotFound:
+		code = http.StatusNotFound
+	case codes.AlreadyExists:
+		code = http.StatusConflict
+	case codes.FailedPrecondition, codes.Unavailable:
+		code = http.StatusServiceUnavailable
+	case codes.Unauthenticated:
+		code = http.StatusUnauthorized
+	case codes.PermissionDenied:
+		code = http.StatusForbidden
+	}
+	writeError(w, code, st.Message())
+}

@@ -73,8 +73,8 @@ func (c Config) SandboxesDir() string { return filepath.Join(c.StateDir, "sandbo
 //	VORA_SYSTEMD_MODE  "user" (default) or "system"
 func Default() (Config, error) {
 	c := Config{
-		SystemdMode:    SystemdUser,
-		DefaultTTL:     30 * time.Minute,
+		SystemdMode:           SystemdUser,
+		DefaultTTL:            30 * time.Minute,
 		MetricsAddr:           "127.0.0.1:9101",
 		GvisorPlatform:        "kvm",
 		ContainerdNamespace:   "vora",

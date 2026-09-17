@@ -3,9 +3,11 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
@@ -23,6 +25,25 @@ func Dial(socket string) (*Client, error) {
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, fmt.Errorf("client: dial %s: %w", socket, err)
+	}
+	return &Client{conn: conn, stub: v1.NewRunnerServiceClient(conn)}, nil
+}
+
+// DialAddress connects to a runner's TCP gRPC endpoint (used by vora-api).
+func DialAddress(addr string) (*Client, error) {
+	conn, err := grpc.NewClient(addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, fmt.Errorf("client: dial %s: %w", addr, err)
+	}
+	return &Client{conn: conn, stub: v1.NewRunnerServiceClient(conn)}, nil
+}
+
+// DialAddressTLS connects to a runner's TCP gRPC endpoint over TLS.
+func DialAddressTLS(addr string, cfg *tls.Config) (*Client, error) {
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(credentials.NewTLS(cfg)))
+	if err != nil {
+		return nil, fmt.Errorf("client: dial %s: %w", addr, err)
 	}
 	return &Client{conn: conn, stub: v1.NewRunnerServiceClient(conn)}, nil
 }
@@ -90,4 +111,10 @@ func (c *Client) Execs(ctx context.Context, id string) ([]*v1.SandboxExec, error
 // Exec starts a command and returns the output stream.
 func (c *Client) Exec(ctx context.Context, req *v1.ExecSandboxRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ExecChunk], error) {
 	return c.stub.ExecSandbox(ctx, req, opts...)
+}
+
+// SignalSandbox sends a signal to a sandbox.
+func (c *Client) SignalSandbox(ctx context.Context, id string, sig int32) error {
+	_, err := c.stub.SignalSandbox(ctx, &v1.SignalSandboxRequest{SandboxId: id, Signal: sig})
+	return err
 }

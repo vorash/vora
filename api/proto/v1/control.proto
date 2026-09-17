@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package vora.v1;
+
+option go_package = "github.com/vorash/vora/api/proto/v1;v1";
+
+// RunnerRegistry is served by vora-api. Runners dial OUT to the API, register,
+// and then heartbeat. The API uses the registered address to reach the
+// runner's RunnerService for sandbox operations.
+service RunnerRegistry {
+  rpc Register(RegisterRunnerRequest) returns (RegisterRunnerResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+// RunnerCapacity reports a runner's headroom.
+message RunnerCapacity {
+  int64 cpu_millis = 1;
+  int64 memory_bytes = 2;
+  int32 max_sandboxes = 3;
+}
+
+message RegisterRunnerRequest {
+  string runner_id = 1;
+  // address is the gRPC endpoint the API dials, e.g. 10.0.0.5:9200.
+  string address = 2;
+  repeated string backends = 3;
+  RunnerCapacity capacity = 4;
+  string version = 5;
+}
+
+message RegisterRunnerResponse {
+  // heartbeat_interval_seconds tells the runner how often to heartbeat.
+  int64 heartbeat_interval_seconds = 1;
+}
+
+message HeartbeatRequest {
+  string runner_id = 1;
+  RunnerCapacity capacity = 2;
+  int32 sandboxes_running = 3;
+}
+
+message HeartbeatResponse {}

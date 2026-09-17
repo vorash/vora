@@ -12,10 +12,10 @@ import (
 
 func TestCandidateRefsAndNormalize(t *testing.T) {
 	cases := map[string]string{
-		"python:3.13-slim": "docker.io/library/python:3.13-slim",
-		"python":           "docker.io/library/python:latest",
-		"vora/base":        "docker.io/vora/base:latest",
-		"ghcr.io/x/y:1":    "ghcr.io/x/y:1",
+		"python:3.13-slim":  "docker.io/library/python:3.13-slim",
+		"python":            "docker.io/library/python:latest",
+		"vora/base":         "docker.io/vora/base:latest",
+		"ghcr.io/x/y:1":     "ghcr.io/x/y:1",
 		"alpine@sha256:abc": "alpine@sha256:abc",
 	}
 	for in, want := range cases {

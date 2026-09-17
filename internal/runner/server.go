@@ -91,6 +91,13 @@ func (s *Server) SetMetrics(m *telemetry.Metrics) {
 // systemd units on startup. It is optional.
 func (s *Server) SetCgroups(m cgroup.Manager) { s.cgroups = m }
 
+// RunningCount returns the number of sandboxes this runner currently tracks.
+func (s *Server) RunningCount() int {
+	s.handlesMu.Lock()
+	defer s.handlesMu.Unlock()
+	return len(s.handles)
+}
+
 // CreateSandbox validates and persists a new sandbox in the REQUESTED state.
 func (s *Server) CreateSandbox(ctx context.Context, req *v1.CreateSandboxRequest) (resp *v1.CreateSandboxResponse, err error) {
 	metricStatus := "requested"

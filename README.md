@@ -36,6 +36,10 @@ and Prometheus.
   Supabase** (`VORA_AUDIT_DSN`), with lifecycle events and per-execution records.
 - **Prometheus metrics** at `127.0.0.1:9101/metrics`.
 - A dual-backend **isolation security suite** and a **benchmark harness**.
+- A **control plane** (`vora-api`, [ADR 014](docs/adr/014-control-plane.md)):
+  HTTP/JSON API with hashed, scoped **API keys**, and a gRPC runner registry
+  that runners **dial out** to (`Register`/`Heartbeat`, join token). The CLI
+  drives either the local socket or, with `--api`, the control plane.
 
 ## Architecture
 
@@ -181,6 +185,23 @@ vora sandbox create --image vora/python --network restricted \
   --allow-domain example.com --backend bwrap
 ```
 
+Control plane (remote HTTP API):
+
+```bash
+vora-api &                       # HTTP :9300, registry gRPC :9301
+vora --api http://127.0.0.1:9300 --api-key "$VORA_API_KEY" runners
+vora --api http://127.0.0.1:9300 --api-key "$VORA_API_KEY" keys create --name ci
+vora --api http://127.0.0.1:9300 --api-key "$VORA_API_KEY" sandbox create --image vora/base
+```
+
+Control-plane configuration: `VORA_API_HTTP_ADDR`, `VORA_API_GRPC_ADDR`,
+`VORA_API_DSN` (PostgreSQL; omitted → in-memory), `VORA_API_BOOTSTRAP_KEY`
+(initial admin key), `VORA_API_JOIN_TOKEN` (runner registration), and on the
+runner `VORA_RUNNER_ADDR` (TCP gRPC), `VORA_RUNNER_ADVERTISE_ADDR`,
+`VORA_API_GRPC`, `VORA_API_JOIN_TOKEN`. TLS/mTLS is enabled per channel with
+`VORA_API_TLS_{CERT,KEY,CA}` and `VORA_RUNNER_TLS_{CERT,KEY,CA}` (a server-side
+CA requires and verifies client certificates); unset means plaintext.
+
 ## Limitations (honest)
 
 - **Images resolve from containerd snapshots (ADR 009).** OCI images are pulled
@@ -206,6 +227,12 @@ vora sandbox create --image vora/python --network restricted \
   and `/vora`; custom images must create them.
 - **Sandboxes survive runner death briefly**, then exit via the agent watchdog /
   runsc teardown; orphaned units and containers are cleaned on the next start.
+- **The runner↔API channel is plaintext by default.** Registration is gated by
+  a join token, and TLS/mTLS is available per channel
+  (`VORA_API_TLS_*`/`VORA_RUNNER_TLS_*`), but it is off until configured. The
+  API→runner hop needs the runner reachable (no NAT reverse tunnel yet),
+  placement is first-healthy (no capacity-aware scheduling), and the default
+  API store is in-memory ([ADR 014](docs/adr/014-control-plane.md)).
 - **Not production-ready.** No auth on the runner socket, single runner, no
   multi-tenant scheduling.
 
@@ -215,7 +242,7 @@ vora sandbox create --image vora/python --network restricted \
 | ------- | ----- |
 | v0.1 | Go runner, Bubblewrap backend, cgroups v2, in-sandbox exec agent, CLI, security suite, benchmarks |
 | **v0.2 (this)** | **gVisor backend (direct `runsc`, Method 2), backend selection, rootlesskit runner service, PostgreSQL/Supabase audit, dual-backend isolation matrix** |
-| v0.3 | **partly shipped:** `NetworkRestricted` egress gateway for bwrap (SNI allowlist, ADR 012). **Pending:** gVisor egress, credential brokering, HTTP control plane + remote runner, TS/Python SDK, MCP |
+| v0.3 | **shipped:** containerd-snapshot rootfs (ADR 009), bwrap `NetworkRestricted` egress gateway (ADR 012), `vora-api` control plane + runner registry + API keys (ADR 014). **Deferred:** gVisor egress, credential brokering, multi-runner scheduling, SDK/MCP, Ansible deployment |
 | v1.0 | Firecracker microVM tier, snapshots/forks |
 
 ## License

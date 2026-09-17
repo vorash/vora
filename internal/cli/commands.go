@@ -237,7 +237,7 @@ func (a *app) execCmd() *cobra.Command {
 }
 
 // runExec streams a command's output to stdout/stderr and returns its exit code.
-func (a *app) runExec(ctx context.Context, c *client.Client, id string, req *v1.ExecRequest, stdout, stderr io.Writer) (int32, error) {
+func (a *app) runExec(ctx context.Context, c client.API, id string, req *v1.ExecRequest, stdout, stderr io.Writer) (int32, error) {
 	stream, err := c.Exec(ctx, &v1.ExecSandboxRequest{SandboxId: id, Exec: req})
 	if err != nil {
 		return 0, err

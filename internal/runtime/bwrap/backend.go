@@ -37,8 +37,8 @@ type Backend struct {
 	bwrapBin string
 
 	// Restricted-network path (NetworkRestricted). Enabled by SetRestricted.
-	subtree   cgroup.Subtree
-	networks  *network.Manager
+	subtree    cgroup.Subtree
+	networks   *network.Manager
 	egressSink func(egress.Event)
 
 	mu      sync.Mutex
@@ -53,11 +53,11 @@ type handle struct {
 	unit   *cgroup.Unit
 	client *agentproto.Client
 	// NetworkRestricted path: a runner-launched sandbox in its own netns.
-	group *cgroup.Group
-	proxy *egress.Proxy
-	net   *network.Net
-	cmd   *exec.Cmd
-	done  chan error
+	group  *cgroup.Group
+	proxy  *egress.Proxy
+	net    *network.Net
+	cmd    *exec.Cmd
+	done   chan error
 	cancel context.CancelFunc
 }
 
