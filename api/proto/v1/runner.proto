@@ -17,6 +17,7 @@ service RunnerService {
   rpc SignalSandbox(SignalSandboxRequest) returns (SignalSandboxResponse);
   rpc StatsSandbox(StatsSandboxRequest) returns (Stats);
   rpc GetSandboxEvents(GetSandboxEventsRequest) returns (GetSandboxEventsResponse);
+  rpc GetSandboxExecs(GetSandboxExecsRequest) returns (GetSandboxExecsResponse);
   rpc DestroySandbox(DestroySandboxRequest) returns (DestroySandboxResponse);
 }
 
@@ -78,6 +79,28 @@ message SandboxEvent {
   string reason = 4;
   string runner_id = 5;
   int64 timestamp_unix_ms = 6;
+}
+
+message GetSandboxExecsRequest {
+  string sandbox_id = 1;
+}
+
+message GetSandboxExecsResponse {
+  repeated SandboxExec execs = 1;
+}
+
+// SandboxExec is one execution audit record.
+message SandboxExec {
+  string execution_id = 1;
+  string command = 2;
+  repeated string args = 3;
+  string cwd = 4;
+  int64 started_at_unix_ms = 5;
+  int64 finished_at_unix_ms = 6;
+  int32 exit_code = 7;
+  ExitReason reason = 8;
+  int64 stdout_bytes = 9;
+  int64 stderr_bytes = 10;
 }
 
 message DestroySandboxRequest {

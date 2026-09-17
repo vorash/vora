@@ -216,6 +216,25 @@ func eventsToProto(events []sandbox.Event) []*v1.SandboxEvent {
 	return out
 }
 
+func execsToProto(execs []sandbox.ExecRecord) []*v1.SandboxExec {
+	out := make([]*v1.SandboxExec, 0, len(execs))
+	for _, e := range execs {
+		out = append(out, &v1.SandboxExec{
+			ExecutionId:      e.ExecutionID,
+			Command:          e.Command,
+			Args:             e.Args,
+			Cwd:              e.Cwd,
+			StartedAtUnixMs:  e.StartedAt.UnixMilli(),
+			FinishedAtUnixMs: e.FinishedAt.UnixMilli(),
+			ExitCode:         int32(e.ExitCode),
+			Reason:           reasonToProto(e.Reason),
+			StdoutBytes:      e.StdoutBytes,
+			StderrBytes:      e.StderrBytes,
+		})
+	}
+	return out
+}
+
 func envMap(env []string) map[string]string {
 	if len(env) == 0 {
 		return nil

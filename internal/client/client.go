@@ -78,6 +78,15 @@ func (c *Client) Events(ctx context.Context, id string) ([]*v1.SandboxEvent, err
 	return resp.GetEvents(), nil
 }
 
+// Execs returns the execution audit records for a sandbox.
+func (c *Client) Execs(ctx context.Context, id string) ([]*v1.SandboxExec, error) {
+	resp, err := c.stub.GetSandboxExecs(ctx, &v1.GetSandboxExecsRequest{SandboxId: id})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetExecs(), nil
+}
+
 // Exec starts a command and returns the output stream.
 func (c *Client) Exec(ctx context.Context, req *v1.ExecSandboxRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ExecChunk], error) {
 	return c.stub.ExecSandbox(ctx, req, opts...)

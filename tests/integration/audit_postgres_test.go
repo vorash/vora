@@ -1,0 +1,108 @@
+//go:build integration
+
+package integration
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/testcontainers/testcontainers-go"
+	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
+	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/vorash/vora/internal/audit/postgres"
+	"github.com/vorash/vora/internal/runtime"
+	"github.com/vorash/vora/internal/sandbox"
+)
+
+// TestPostgresAuditStore runs the audit store against a real PostgreSQL started
+// with testcontainers; this is the same code path used against Supabase.
+func TestPostgresAuditStore(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	ctr, err := tcpostgres.Run(ctx, "postgres:16-alpine",
+		tcpostgres.WithDatabase("vora"),
+		tcpostgres.WithUsername("vora"),
+		tcpostgres.WithPassword("vora"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).WithStartupTimeout(90*time.Second)),
+	)
+	if err != nil {
+		t.Skipf("testcontainers unavailable: %v", err)
+	}
+	t.Cleanup(func() { _ = ctr.Terminate(context.Background()) })
+
+	dsn, err := ctr.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		t.Fatalf("connection string: %v", err)
+	}
+
+	store, err := postgres.Open(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	// Migrate must be idempotent.
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+
+	const sandboxID = "sbx_pg_test"
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	if err := store.AppendEvent(ctx, sandboxID, sandbox.Event{
+		SandboxID: sandboxID, From: sandbox.StateRequested, To: sandbox.StateCreating,
+		RunnerID: "run_test", Timestamp: now,
+	}); err != nil {
+		t.Fatalf("append event: %v", err)
+	}
+
+	rec := sandbox.ExecRecord{
+		ExecutionID: "exe_pg_1", SandboxID: sandboxID, Command: "/bin/echo",
+		Args: []string{"hi"}, Cwd: "/workspace", StartedAt: now, FinishedAt: now.Add(time.Second),
+		ExitCode: 0, Reason: runtime.ReasonExited, StdoutBytes: 3, StderrBytes: 0,
+	}
+	if err := store.AppendExec(ctx, sandboxID, rec); err != nil {
+		t.Fatalf("append exec: %v", err)
+	}
+	// Re-appending the same execution id updates rather than duplicates.
+	rec.ExitCode = 7
+	if err := store.AppendExec(ctx, sandboxID, rec); err != nil {
+		t.Fatalf("re-append exec: %v", err)
+	}
+
+	events, err := store.Events(ctx, sandboxID)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	if len(events) != 1 || events[0].From != sandbox.StateRequested || events[0].To != sandbox.StateCreating {
+		t.Fatalf("events = %+v", events)
+	}
+
+	execs, err := store.Execs(ctx, sandboxID)
+	if err != nil {
+		t.Fatalf("execs: %v", err)
+	}
+	if len(execs) != 1 {
+		t.Fatalf("execs = %d, want 1", len(execs))
+	}
+	if execs[0].ExitCode != 7 || execs[0].Command != "/bin/echo" || len(execs[0].Args) != 1 || execs[0].Args[0] != "hi" {
+		t.Fatalf("exec record = %+v", execs[0])
+	}
+
+	// A different sandbox's records are isolated.
+	other, err := store.Execs(ctx, "sbx_other")
+	if err != nil {
+		t.Fatalf("other execs: %v", err)
+	}
+	if len(other) != 0 {
+		t.Fatalf("unexpected records for other sandbox: %+v", other)
+	}
+}

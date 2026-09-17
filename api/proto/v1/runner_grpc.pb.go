@@ -27,6 +27,7 @@ const (
 	RunnerService_SignalSandbox_FullMethodName    = "/vora.v1.RunnerService/SignalSandbox"
 	RunnerService_StatsSandbox_FullMethodName     = "/vora.v1.RunnerService/StatsSandbox"
 	RunnerService_GetSandboxEvents_FullMethodName = "/vora.v1.RunnerService/GetSandboxEvents"
+	RunnerService_GetSandboxExecs_FullMethodName  = "/vora.v1.RunnerService/GetSandboxExecs"
 	RunnerService_DestroySandbox_FullMethodName   = "/vora.v1.RunnerService/DestroySandbox"
 )
 
@@ -45,6 +46,7 @@ type RunnerServiceClient interface {
 	SignalSandbox(ctx context.Context, in *SignalSandboxRequest, opts ...grpc.CallOption) (*SignalSandboxResponse, error)
 	StatsSandbox(ctx context.Context, in *StatsSandboxRequest, opts ...grpc.CallOption) (*Stats, error)
 	GetSandboxEvents(ctx context.Context, in *GetSandboxEventsRequest, opts ...grpc.CallOption) (*GetSandboxEventsResponse, error)
+	GetSandboxExecs(ctx context.Context, in *GetSandboxExecsRequest, opts ...grpc.CallOption) (*GetSandboxExecsResponse, error)
 	DestroySandbox(ctx context.Context, in *DestroySandboxRequest, opts ...grpc.CallOption) (*DestroySandboxResponse, error)
 }
 
@@ -145,6 +147,16 @@ func (c *runnerServiceClient) GetSandboxEvents(ctx context.Context, in *GetSandb
 	return out, nil
 }
 
+func (c *runnerServiceClient) GetSandboxExecs(ctx context.Context, in *GetSandboxExecsRequest, opts ...grpc.CallOption) (*GetSandboxExecsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSandboxExecsResponse)
+	err := c.cc.Invoke(ctx, RunnerService_GetSandboxExecs_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *runnerServiceClient) DestroySandbox(ctx context.Context, in *DestroySandboxRequest, opts ...grpc.CallOption) (*DestroySandboxResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(DestroySandboxResponse)
@@ -170,6 +182,7 @@ type RunnerServiceServer interface {
 	SignalSandbox(context.Context, *SignalSandboxRequest) (*SignalSandboxResponse, error)
 	StatsSandbox(context.Context, *StatsSandboxRequest) (*Stats, error)
 	GetSandboxEvents(context.Context, *GetSandboxEventsRequest) (*GetSandboxEventsResponse, error)
+	GetSandboxExecs(context.Context, *GetSandboxExecsRequest) (*GetSandboxExecsResponse, error)
 	DestroySandbox(context.Context, *DestroySandboxRequest) (*DestroySandboxResponse, error)
 	mustEmbedUnimplementedRunnerServiceServer()
 }
@@ -204,6 +217,9 @@ func (UnimplementedRunnerServiceServer) StatsSandbox(context.Context, *StatsSand
 }
 func (UnimplementedRunnerServiceServer) GetSandboxEvents(context.Context, *GetSandboxEventsRequest) (*GetSandboxEventsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetSandboxEvents not implemented")
+}
+func (UnimplementedRunnerServiceServer) GetSandboxExecs(context.Context, *GetSandboxExecsRequest) (*GetSandboxExecsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetSandboxExecs not implemented")
 }
 func (UnimplementedRunnerServiceServer) DestroySandbox(context.Context, *DestroySandboxRequest) (*DestroySandboxResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DestroySandbox not implemented")
@@ -366,6 +382,24 @@ func _RunnerService_GetSandboxEvents_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunnerService_GetSandboxExecs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSandboxExecsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).GetSandboxExecs(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_GetSandboxExecs_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).GetSandboxExecs(ctx, req.(*GetSandboxExecsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _RunnerService_DestroySandbox_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(DestroySandboxRequest)
 	if err := dec(in); err != nil {
@@ -418,6 +452,10 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetSandboxEvents",
 			Handler:    _RunnerService_GetSandboxEvents_Handler,
+		},
+		{
+			MethodName: "GetSandboxExecs",
+			Handler:    _RunnerService_GetSandboxExecs_Handler,
 		},
 		{
 			MethodName: "DestroySandbox",

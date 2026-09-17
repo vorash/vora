@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
+	"github.com/vorash/vora/internal/audit/postgres"
 	"github.com/vorash/vora/internal/cgroup"
 	"github.com/vorash/vora/internal/config"
 	"github.com/vorash/vora/internal/runner"
@@ -87,6 +88,22 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// PostgreSQL/Supabase audit store, when a DSN is configured. Failure is not
+	// fatal: the runner falls back to the JSONL store.
+	if dsn := os.Getenv("VORA_AUDIT_DSN"); dsn != "" {
+		auditStore, err := postgres.Open(ctx, dsn)
+		if err != nil {
+			logger.Warn("audit: postgres unavailable, using jsonl", "error", err)
+		} else if err := auditStore.Migrate(ctx); err != nil {
+			logger.Warn("audit: migration failed, using jsonl", "error", err)
+			auditStore.Close()
+		} else {
+			server.SetAudit(auditStore)
+			defer auditStore.Close()
+			logger.Info("audit store: postgres")
+		}
+	}
 
 	if err := server.Reconcile(ctx); err != nil {
 		logger.Warn("startup reconciliation failed", "error", err)

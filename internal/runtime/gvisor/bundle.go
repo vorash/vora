@@ -63,7 +63,6 @@ func writeBundle(runsc, bundleDir string, spec runtime.SandboxSpec) error {
 		return fmt.Errorf("gvisor: write spec: %w", err)
 	}
 	return nil
-	return nil
 }
 
 // runscSpec writes a baseline OCI spec into dir.

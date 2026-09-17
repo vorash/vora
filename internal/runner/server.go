@@ -490,6 +490,21 @@ func (s *Server) GetSandboxEvents(ctx context.Context, req *v1.GetSandboxEventsR
 // gVisor is only preferred when the runner is running as UID 0, i.e. as root or
 // inside a rootlesskit user namespace (gVisor Method 2). An unprivileged
 // unwrapped runner falls back to bwrap, which works without a user namespace.
+// GetSandboxExecs returns the execution audit records for a sandbox.
+func (s *Server) GetSandboxExecs(ctx context.Context, req *v1.GetSandboxExecsRequest) (*v1.GetSandboxExecsResponse, error) {
+	if req.GetSandboxId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "sandbox_id is required")
+	}
+	if _, err := s.store.Load(req.GetSandboxId()); err != nil {
+		return nil, s.loadError(err, req.GetSandboxId())
+	}
+	execs, err := s.audit.Execs(ctx, req.GetSandboxId())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "read execs: %v", err)
+	}
+	return &v1.GetSandboxExecsResponse{Execs: execsToProto(execs)}, nil
+}
+
 func (s *Server) selectBackend(spec runtime.SandboxSpec) (runtime.Backend, error) {
 	if spec.Backend != "" {
 		if b, ok := s.registry.Get(spec.Backend); ok {

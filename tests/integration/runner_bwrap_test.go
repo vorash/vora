@@ -121,6 +121,15 @@ func TestRunnerSandboxLifecycle(t *testing.T) {
 		t.Fatalf("expected positive memory, got %+v", st)
 	}
 
+	// Execution audit records are queryable through the API.
+	execs, err := client.GetSandboxExecs(ctx, &v1.GetSandboxExecsRequest{SandboxId: id})
+	if err != nil {
+		t.Fatalf("GetSandboxExecs: %v", err)
+	}
+	if len(execs.GetExecs()) < 2 {
+		t.Fatalf("expected at least 2 exec records, got %d", len(execs.GetExecs()))
+	}
+
 	if _, err := client.DestroySandbox(ctx, &v1.DestroySandboxRequest{SandboxId: id}); err != nil {
 		t.Fatalf("DestroySandbox: %v", err)
 	}

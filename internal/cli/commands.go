@@ -314,9 +314,10 @@ func splitEndpoint(s string) (id, path string, isSandbox bool) {
 }
 
 func (a *app) logsCmd() *cobra.Command {
-	return &cobra.Command{
+	var showExecs bool
+	cmd := &cobra.Command{
 		Use:   "logs <sandbox-id>",
-		Short: "Show a sandbox's lifecycle event log",
+		Short: "Show a sandbox's lifecycle events or execution records",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, ctx, cancel, err := a.dial()
@@ -325,6 +326,23 @@ func (a *app) logsCmd() *cobra.Command {
 			}
 			defer cancel()
 			defer c.Close()
+
+			if showExecs {
+				records, err := c.Execs(ctx, args[0])
+				if err != nil {
+					return err
+				}
+				if a.json {
+					return a.jsonOut(&v1.GetSandboxExecsResponse{Execs: records})
+				}
+				for _, e := range records {
+					ts := time.UnixMilli(e.GetStartedAtUnixMs()).Format(time.RFC3339)
+					fmt.Printf("%s  %s %s  exit=%d reason=%s stdout=%dB stderr=%dB\n",
+						ts, e.GetCommand(), strings.Join(e.GetArgs(), " "),
+						e.GetExitCode(), shortReason(e.GetReason()), e.GetStdoutBytes(), e.GetStderrBytes())
+				}
+				return nil
+			}
 
 			events, err := c.Events(ctx, args[0])
 			if err != nil {
@@ -344,6 +362,12 @@ func (a *app) logsCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&showExecs, "execs", false, "show execution records instead of lifecycle events")
+	return cmd
+}
+
+func shortReason(r v1.ExitReason) string {
+	return strings.TrimPrefix(r.String(), "EXIT_REASON_")
 }
 
 func (a *app) statsCmd() *cobra.Command {
