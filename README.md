@@ -198,7 +198,9 @@ Control-plane configuration: `VORA_API_HTTP_ADDR`, `VORA_API_GRPC_ADDR`,
 `VORA_API_DSN` (PostgreSQL; omitted → in-memory), `VORA_API_BOOTSTRAP_KEY`
 (initial admin key), `VORA_API_JOIN_TOKEN` (runner registration), and on the
 runner `VORA_RUNNER_ADDR` (TCP gRPC), `VORA_RUNNER_ADVERTISE_ADDR`,
-`VORA_API_GRPC`, `VORA_API_JOIN_TOKEN`.
+`VORA_API_GRPC`, `VORA_API_JOIN_TOKEN`. TLS/mTLS is enabled per channel with
+`VORA_API_TLS_{CERT,KEY,CA}` and `VORA_RUNNER_TLS_{CERT,KEY,CA}` (a server-side
+CA requires and verifies client certificates); unset means plaintext.
 
 ## Limitations (honest)
 
@@ -225,11 +227,12 @@ runner `VORA_RUNNER_ADDR` (TCP gRPC), `VORA_RUNNER_ADVERTISE_ADDR`,
   and `/vora`; custom images must create them.
 - **Sandboxes survive runner death briefly**, then exit via the agent watchdog /
   runsc teardown; orphaned units and containers are cleaned on the next start.
-- **The runner↔API channel is plaintext gRPC.** Registration is gated by a
-  join token, but TLS/mTLS for the runner channel and the API→runner hop is a
-  follow-up; run them on a private network until then. Placement is
-  first-healthy (no capacity-aware scheduling), and the default API store is
-  in-memory ([ADR 014](docs/adr/014-control-plane.md)).
+- **The runner↔API channel is plaintext by default.** Registration is gated by
+  a join token, and TLS/mTLS is available per channel
+  (`VORA_API_TLS_*`/`VORA_RUNNER_TLS_*`), but it is off until configured. The
+  API→runner hop needs the runner reachable (no NAT reverse tunnel yet),
+  placement is first-healthy (no capacity-aware scheduling), and the default
+  API store is in-memory ([ADR 014](docs/adr/014-control-plane.md)).
 - **Not production-ready.** No auth on the runner socket, single runner, no
   multi-tenant scheduling.
 

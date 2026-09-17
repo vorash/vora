@@ -36,6 +36,10 @@ Add a separate **`vora-api`** process (`cmd/vora-api`):
   `VORA_API_JOIN_TOKEN`, `VORA_RUNNER_ADVERTISE_ADDR`).
 - **CLI:** `--api`/`--api-key` switch the client from the local socket to the
   HTTP API; `vora runners` and `vora keys` manage the control plane.
+- **TLS/mTLS:** both channels take optional certificate files — `VORA_API_TLS_*`
+  (API server + runner client) and `VORA_RUNNER_TLS_*` (runner server + API
+  client). When a CA is set on the server side, client certificates are
+  required and verified. An empty config keeps plaintext for local development.
 
 ## Consequences
 
@@ -43,9 +47,10 @@ Add a separate **`vora-api`** process (`cmd/vora-api`):
   runner Unix socket.
 - One `runtime.RunnerService` implementation is reused for both transports; the
   CLI shares one `client.API` interface across the gRPC and HTTP clients.
-- **Runner ↔ API traffic is plaintext gRPC by default.** The join token gates
-  registration, but TLS/mTLS for the runner channel is a follow-up; deploy the
-  API and runners on a private network (or a mesh) until then.
+- **Runner ↔ API and API → runner channels support TLS/mTLS** from certificate
+  files (`VORA_API_TLS_*`, `VORA_RUNNER_TLS_*`). TLS is **off by default**
+  (plaintext), so run the API and runners on a private network unless
+  configured. The join token still gates registration.
 - **API → runner requires the runner's gRPC address to be reachable.** This is
   NAT-friendly for registration but not for command delivery; a reverse tunnel
   (runner-initiated command stream) is a follow-up for the fully-hosted case.
