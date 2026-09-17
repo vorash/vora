@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Format
+        run: |
+          unformatted="$(find . -name '*.go' -not -path './.git/*' -print0 | xargs -0 gofmt -l)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: Vet
+        run: go vet ./...
+      - name: Unit tests
+        run: go test ./...
+
+  isolation:
+    name: isolation
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Install bubblewrap and user systemd
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap dbus-user-session
+          uid="$(id -u)"
+          sudo loginctl enable-linger "$(id -un)"
+          sudo mkdir -p "/run/user/${uid}"
+          sudo chown "${uid}:$(id -g)" "/run/user/${uid}"
+          sudo systemctl start "user@${uid}.service"
+          echo "XDG_RUNTIME_DIR=/run/user/${uid}" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" >> "$GITHUB_ENV"
+
+      - name: Check systemd --user
+        run: |
+          systemctl --user show-environment
+          systemd-run --user --wait --pipe -- /bin/true
+
+      - name: Build binaries
+        run: make binaries
+
+      - name: Build base rootfs
+        run: ./scripts/build-images.sh base
+
+      - name: Integration tests
+        run: go test -tags=integration -count=1 ./tests/integration/...
+
+      - name: Security tests
+        env:
+          VORA_INIT_BINARY: ${{ github.workspace }}/bin/vora-init
+        run: go test -tags=security -count=1 ./tests/security/...
+}

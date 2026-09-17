@@ -147,6 +147,10 @@ make bench-report      # benchmarks + report in docs/benchmarks/
 make help              # all targets
 ```
 
+GitHub Actions (`.github/workflows/ci.yml`) runs unit tests, then bwrap
+integration and security tests on `ubuntu-latest`. gVisor is skipped there
+(no KVM / rootlesskit userns on hosted runners).
+
 Install and start the rootlesskit-wrapped runner (required for gVisor):
 
 ```bash

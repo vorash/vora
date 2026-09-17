@@ -9,6 +9,8 @@
 #
 # The runner binds this rootfs read-only into sandboxes, so it can be shared
 # by every sandbox that uses the image.
+#
+# Optional args limit which images to build (e.g. ./scripts/build-images.sh base).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -81,11 +83,18 @@ build_image() {
 
 main() {
   shopt -s nullglob
-  local found=0
-  for dockerfile in "$REPO_ROOT"/images/*/Dockerfile; do
-    local name
-    name="$(basename "$(dirname "$dockerfile")")"
-    build_image "$name" "$dockerfile"
+  local found=0 names=()
+  if [[ $# -gt 0 ]]; then
+    names=("$@")
+  else
+    local dockerfile
+    for dockerfile in "$REPO_ROOT"/images/*/Dockerfile; do
+      names+=("$(basename "$(dirname "$dockerfile")")")
+    done
+  fi
+  local name
+  for name in "${names[@]}"; do
+    build_image "$name" "$REPO_ROOT/images/$name/Dockerfile"
     found=1
   done
   if [[ "$found" -eq 0 ]]; then
