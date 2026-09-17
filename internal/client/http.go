@@ -307,6 +307,51 @@ func (c *HTTPClient) RevokeKey(ctx context.Context, id string) error {
 	return c.doJSON(ctx, http.MethodDelete, "/v1/keys/"+id, nil, nil)
 }
 
+// SecretInfo is brokered-credential metadata as reported by vora-api. The
+// value is never returned by any endpoint.
+type SecretInfo struct {
+	ID        string    `json:"id"`
+	TenantID  string    `json:"tenant_id"`
+	Alias     string    `json:"alias"`
+	Host      string    `json:"host"`
+	Scheme    string    `json:"scheme"`
+	Header    string    `json:"header,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// CreateSecret stores a brokered credential. The value is write-only.
+func (c *HTTPClient) CreateSecret(ctx context.Context, alias, host, scheme, header, value, tenant string) (SecretInfo, error) {
+	req := map[string]any{
+		"alias": alias, "host": host, "scheme": scheme,
+		"header": header, "value": value, "tenant_id": tenant,
+	}
+	var out struct {
+		Secret SecretInfo `json:"secret"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/secrets", req, &out); err != nil {
+		return SecretInfo{}, err
+	}
+	return out.Secret, nil
+}
+
+// ListSecrets returns the caller's tenant's brokered credentials (metadata
+// only).
+func (c *HTTPClient) ListSecrets(ctx context.Context) ([]SecretInfo, error) {
+	var out struct {
+		Secrets []SecretInfo `json:"secrets"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/v1/secrets", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Secrets, nil
+}
+
+// DeleteSecret removes a brokered credential by alias.
+func (c *HTTPClient) DeleteSecret(ctx context.Context, alias string) error {
+	return c.doJSON(ctx, http.MethodDelete, "/v1/secrets/"+alias, nil, nil)
+}
+
 func (c *HTTPClient) doJSON(ctx context.Context, method, path string, body, out any) error {
 	var r io.Reader
 	if body != nil {
