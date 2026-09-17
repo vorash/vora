@@ -27,6 +27,8 @@ import (
 // ErrNoRunner means no healthy runner is registered.
 var ErrNoRunner = errors.New("api: no healthy runner registered")
 
+var errTenantAccess = errors.New("api: sandbox not found")
+
 // RunnerClient is the subset of the runner gRPC client the API uses.
 type RunnerClient interface {
 	CreateSandbox(ctx context.Context, spec *v1.SandboxSpec) (*v1.Sandbox, error)
@@ -183,7 +185,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/sandboxes/{id}/events", s.auth(ScopeSandbox, s.eventsSandbox))
 	mux.HandleFunc("GET /v1/sandboxes/{id}/execs", s.auth(ScopeSandbox, s.execsSandbox))
 
-	mux.HandleFunc("GET /v1/runners", s.auth(ScopeSandbox, s.listRunners))
+	mux.HandleFunc("GET /v1/runners", s.auth(ScopeAdmin, s.listRunners))
 	mux.HandleFunc("POST /v1/keys", s.auth(ScopeAdmin, s.createKey))
 	mux.HandleFunc("GET /v1/keys", s.auth(ScopeAdmin, s.listKeys))
 	mux.HandleFunc("DELETE /v1/keys/{id}", s.auth(ScopeAdmin, s.revokeKey))
@@ -251,8 +253,13 @@ func (s *Server) createSandbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if p := principalFrom(r.Context()); p.key.TenantID != "" && spec.TenantId == "" {
-		spec.TenantId = p.key.TenantID
+	key := principalFrom(r.Context()).key
+	if !isGlobalAdmin(key) {
+		if spec.GetTenantId() != "" && spec.GetTenantId() != key.TenantID {
+			writeError(w, http.StatusForbidden, "cannot create a sandbox for another tenant")
+			return
+		}
+		spec.TenantId = key.TenantID
 	}
 	runner, rc, err := s.pickRunner(r.Context())
 	if err != nil {
@@ -271,7 +278,7 @@ func (s *Server) createSandbox(w http.ResponseWriter, r *http.Request) {
 		writeGRPCError(w, err)
 		return
 	}
-	if err := s.store.SetRoute(r.Context(), started.GetId(), runner.ID); err != nil {
+	if err := s.store.SetRoute(r.Context(), SandboxRoute{SandboxID: started.GetId(), RunnerID: runner.ID, TenantID: spec.GetTenantId()}); err != nil {
 		s.logger.Warn("record route failed", "sandbox_id", started.GetId(), "error", err)
 	}
 	writeProto(w, http.StatusCreated, started)
@@ -290,7 +297,12 @@ func (s *Server) listSandboxes(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
-		all.Sandboxes = append(all.Sandboxes, items...)
+		key := principalFrom(r.Context()).key
+		for _, sb := range items {
+			if canAccessTenant(key, sb.GetSpec().GetTenantId()) {
+				all.Sandboxes = append(all.Sandboxes, sb)
+			}
+		}
 	}
 	writeProto(w, http.StatusOK, all)
 }
@@ -424,6 +436,10 @@ func (s *Server) execSandbox(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 func (s *Server) listRunners(w http.ResponseWriter, r *http.Request) {
+	if !isGlobalAdmin(principalFrom(r.Context()).key) {
+		writeError(w, http.StatusForbidden, "runner inventory requires a global administrator")
+		return
+	}
 	runners, err := s.store.ListRunners(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -451,11 +467,25 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	body.Name = strings.TrimSpace(body.Name)
+	if body.Name == "" || len(body.Name) > 128 {
+		writeError(w, http.StatusBadRequest, "name must be between 1 and 128 characters")
+		return
+	}
 	if len(body.Scopes) == 0 {
 		body.Scopes = []string{ScopeSandbox}
 	}
-	if tenant := principalFrom(r.Context()).key.TenantID; tenant != "" && body.TenantID == "" {
-		body.TenantID = tenant
+	if err := validateScopes(body.Scopes); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	caller := principalFrom(r.Context()).key
+	if !isGlobalAdmin(caller) {
+		if body.TenantID != "" && body.TenantID != caller.TenantID {
+			writeError(w, http.StatusForbidden, "cannot create a key for another tenant")
+			return
+		}
+		body.TenantID = caller.TenantID
 	}
 	plaintext, hash, err := NewAPIKey()
 	if err != nil {
@@ -479,9 +509,14 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listKeys(w http.ResponseWriter, r *http.Request) {
+	caller := principalFrom(r.Context()).key
 	tenant := r.URL.Query().Get("tenant_id")
-	if tenant == "" {
-		tenant = principalFrom(r.Context()).key.TenantID
+	if !isGlobalAdmin(caller) {
+		if tenant != "" && tenant != caller.TenantID {
+			writeError(w, http.StatusForbidden, "cannot list keys for another tenant")
+			return
+		}
+		tenant = caller.TenantID
 	}
 	keys, err := s.store.ListKeys(r.Context(), tenant)
 	if err != nil {
@@ -492,15 +527,31 @@ func (s *Server) listKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) revokeKey(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.RevokeKey(r.Context(), r.PathValue("id")); err != nil {
-		if errors.Is(err, ErrNotFound) {
-			writeError(w, http.StatusNotFound, "key not found")
-			return
-		}
+	id := r.PathValue("id")
+	target, err := s.store.Key(r.Context(), id)
+	if err != nil || !canAccessTenant(principalFrom(r.Context()).key, target.TenantID) {
+		writeError(w, http.StatusNotFound, "key not found")
+		return
+	}
+	if err := s.store.RevokeKey(r.Context(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func validateScopes(scopes []string) error {
+	seen := make(map[string]struct{}, len(scopes))
+	for _, scope := range scopes {
+		if scope != ScopeAdmin && scope != ScopeSandbox {
+			return fmt.Errorf("unknown scope %q", scope)
+		}
+		if _, ok := seen[scope]; ok {
+			return fmt.Errorf("duplicate scope %q", scope)
+		}
+		seen[scope] = struct{}{}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -535,19 +586,35 @@ func (s *Server) pickRunner(ctx context.Context) (Runner, RunnerClient, error) {
 	return Runner{}, nil, ErrNoRunner
 }
 
-// runnerFor returns a client for the runner that owns a sandbox.
-func (s *Server) runnerFor(ctx context.Context, sandboxID string) (RunnerClient, error) {
-	runnerID, err := s.store.Route(ctx, sandboxID)
-	if err != nil {
-		return nil, fmt.Errorf("api: unknown sandbox %s", sandboxID)
+func isGlobalAdmin(key APIKey) bool {
+	return key.TenantID == "" && key.HasScope(ScopeAdmin)
+}
+
+func canAccessTenant(key APIKey, tenantID string) bool {
+	return isGlobalAdmin(key) || key.TenantID == tenantID
+}
+
+func (s *Server) authorizedRoute(ctx context.Context, sandboxID string) (SandboxRoute, error) {
+	route, err := s.store.Route(ctx, sandboxID)
+	if err != nil || !canAccessTenant(principalFrom(ctx).key, route.TenantID) {
+		return SandboxRoute{}, errTenantAccess
 	}
-	r, err := s.store.Runner(ctx, runnerID)
+	return route, nil
+}
+
+// runnerFor returns a client for the runner that owns an authorized sandbox.
+func (s *Server) runnerFor(ctx context.Context, sandboxID string) (RunnerClient, error) {
+	route, err := s.authorizedRoute(ctx, sandboxID)
 	if err != nil {
-		return nil, fmt.Errorf("api: runner %s unknown", runnerID)
+		return nil, err
+	}
+	r, err := s.store.Runner(ctx, route.RunnerID)
+	if err != nil {
+		return nil, fmt.Errorf("api: runner %s unknown", route.RunnerID)
 	}
 	rc, err := s.opts.DialRunner(r.Address)
 	if err != nil {
-		return nil, fmt.Errorf("api: runner %s unreachable: %w", runnerID, err)
+		return nil, fmt.Errorf("api: runner %s unreachable: %w", route.RunnerID, err)
 	}
 	return rc, nil
 }

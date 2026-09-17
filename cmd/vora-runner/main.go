@@ -142,9 +142,9 @@ func run() error {
 	// out, so it can sit behind NAT.
 	if apiAddr := os.Getenv("VORA_API_GRPC"); apiAddr != "" {
 		apiTLS := tlsutil.Config{
-			CertFile: os.Getenv("VORA_API_TLS_CERT"),
-			KeyFile:  os.Getenv("VORA_API_TLS_KEY"),
-			CAFile:   os.Getenv("VORA_API_TLS_CA"),
+			CertFile: os.Getenv("VORA_API_REGISTRY_TLS_CERT"),
+			KeyFile:  os.Getenv("VORA_API_REGISTRY_TLS_KEY"),
+			CAFile:   os.Getenv("VORA_API_REGISTRY_TLS_CA"),
 		}
 		var dialOpts []grpc.DialOption
 		if apiTLS.Enabled() {

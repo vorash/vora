@@ -17,6 +17,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
+	"github.com/vorash/vora/internal/ulid"
 )
 
 const (
@@ -25,9 +26,10 @@ const (
 )
 
 type fakeRunner struct {
-	specs  []*v1.SandboxSpec
-	chunks []*v1.ExecChunk
-	closed int
+	specs     []*v1.SandboxSpec
+	sandboxes []*v1.Sandbox
+	chunks    []*v1.ExecChunk
+	closed    int
 }
 
 func (f *fakeRunner) CreateSandbox(_ context.Context, spec *v1.SandboxSpec) (*v1.Sandbox, error) {
@@ -44,6 +46,9 @@ func (f *fakeRunner) GetSandbox(_ context.Context, id string) (*v1.Sandbox, erro
 }
 
 func (f *fakeRunner) ListSandboxes(_ context.Context, _ bool) ([]*v1.Sandbox, error) {
+	if f.sandboxes != nil {
+		return f.sandboxes, nil
+	}
 	return []*v1.Sandbox{{Id: "sbx_test"}}, nil
 }
 
@@ -162,8 +167,8 @@ func TestCreateSandboxRoutesToRunner(t *testing.T) {
 	if len(fr.specs) != 1 || fr.specs[0].GetImage() != "vora/base" {
 		t.Fatalf("runner did not receive the spec: %+v", fr.specs)
 	}
-	if route, err := s.store.Route(context.Background(), "sbx_test"); err != nil || route != "run_test" {
-		t.Fatalf("route = %q, %v", route, err)
+	if route, err := s.store.Route(context.Background(), "sbx_test"); err != nil || route.RunnerID != "run_test" {
+		t.Fatalf("route = %+v, %v", route, err)
 	}
 }
 
@@ -265,6 +270,151 @@ func TestRegistryRequiresJoinToken(t *testing.T) {
 	if err != nil || r.Running != 2 {
 		t.Fatalf("runner = %+v, %v", r, err)
 	}
+}
+
+func TestTenantSandboxIsolation(t *testing.T) {
+	fr := &fakeRunner{sandboxes: []*v1.Sandbox{
+		{Id: "sbx_a", Spec: &v1.SandboxSpec{TenantId: "tenant-a"}},
+		{Id: "sbx_b", Spec: &v1.SandboxSpec{TenantId: "tenant-b"}},
+		{Id: "sbx_global", Spec: &v1.SandboxSpec{}},
+	}}
+	s, ts := newTestServer(t, fr)
+	tenantA := addTestKey(t, s, "tenant-a", ScopeSandbox)
+	_ = s.store.SetRoute(context.Background(), SandboxRoute{SandboxID: "sbx_a", RunnerID: "run_test", TenantID: "tenant-a"})
+	_ = s.store.SetRoute(context.Background(), SandboxRoute{SandboxID: "sbx_b", RunnerID: "run_test", TenantID: "tenant-b"})
+	_ = s.store.SetRoute(context.Background(), SandboxRoute{SandboxID: "sbx_global", RunnerID: "run_test"})
+
+	for _, path := range []string{
+		"/v1/sandboxes/sbx_b",
+		"/v1/sandboxes/sbx_b/stats",
+		"/v1/sandboxes/sbx_b/events",
+		"/v1/sandboxes/sbx_b/execs",
+	} {
+		resp := do(t, http.MethodGet, ts.URL+path, tenantA, nil)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404", path, resp.StatusCode)
+		}
+	}
+	resp := do(t, http.MethodDelete, ts.URL+"/v1/sandboxes/sbx_b", tenantA, nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("DELETE foreign sandbox = %d, want 404", resp.StatusCode)
+	}
+	resp = do(t, http.MethodPost, ts.URL+"/v1/sandboxes/sbx_b/exec", tenantA, &v1.ExecRequest{Command: "true"})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("exec foreign sandbox = %d, want 404", resp.StatusCode)
+	}
+
+	resp = do(t, http.MethodGet, ts.URL+"/v1/sandboxes", tenantA, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list = %d", resp.StatusCode)
+	}
+	var listed v1.ListSandboxesResponse
+	if err := protojson.Unmarshal(readBody(t, resp), &listed); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(listed.GetSandboxes()) != 1 || listed.GetSandboxes()[0].GetId() != "sbx_a" {
+		t.Fatalf("tenant list = %+v", listed.GetSandboxes())
+	}
+
+	// Legacy/global routes fail closed for tenant keys but remain available to
+	// the bootstrap global administrator.
+	for key, want := range map[string]int{tenantA: http.StatusNotFound, bootstrap: http.StatusOK} {
+		resp := do(t, http.MethodGet, ts.URL+"/v1/sandboxes/sbx_global", key, nil)
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Errorf("global route with key %q = %d, want %d", key, resp.StatusCode, want)
+		}
+	}
+}
+
+func TestTenantCreateCannotOverrideIdentity(t *testing.T) {
+	fr := &fakeRunner{}
+	s, ts := newTestServer(t, fr)
+	key := addTestKey(t, s, "tenant-a", ScopeSandbox)
+
+	resp := do(t, http.MethodPost, ts.URL+"/v1/sandboxes", key, &v1.SandboxSpec{Image: "vora/base", TenantId: "tenant-b"})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-tenant create = %d, want 403", resp.StatusCode)
+	}
+	resp = do(t, http.MethodPost, ts.URL+"/v1/sandboxes", key, &v1.SandboxSpec{Image: "vora/base"})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("own-tenant create = %d, want 201", resp.StatusCode)
+	}
+	if got := fr.specs[len(fr.specs)-1].GetTenantId(); got != "tenant-a" {
+		t.Fatalf("runner tenant = %q, want tenant-a", got)
+	}
+}
+
+func TestTenantAdminCannotManageOtherTenants(t *testing.T) {
+	fr := &fakeRunner{}
+	s, ts := newTestServer(t, fr)
+	tenantAdmin := addTestKey(t, s, "tenant-a", ScopeAdmin, ScopeSandbox)
+	foreign := addStoredTestKey(t, s, "tenant-b", ScopeSandbox)
+
+	for _, body := range []map[string]any{
+		{"name": "foreign", "tenant_id": "tenant-b"},
+		{"name": "bad-scope", "scopes": []string{"root"}},
+		{"name": "duplicate", "scopes": []string{ScopeSandbox, ScopeSandbox}},
+	} {
+		resp := do(t, http.MethodPost, ts.URL+"/v1/keys", tenantAdmin, body)
+		resp.Body.Close()
+		if resp.StatusCode < 400 {
+			t.Errorf("create key %+v = %d, want rejection", body, resp.StatusCode)
+		}
+	}
+	resp := do(t, http.MethodGet, ts.URL+"/v1/keys?tenant_id=tenant-b", tenantAdmin, nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("list foreign keys = %d, want 403", resp.StatusCode)
+	}
+	resp = do(t, http.MethodDelete, ts.URL+"/v1/keys/"+foreign.ID, tenantAdmin, nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("revoke foreign key = %d, want 404", resp.StatusCode)
+	}
+	resp = do(t, http.MethodGet, ts.URL+"/v1/runners", tenantAdmin, nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("tenant runner inventory = %d, want 403", resp.StatusCode)
+	}
+	resp = do(t, http.MethodGet, ts.URL+"/v1/runners", bootstrap, nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("global runner inventory = %d, want 200", resp.StatusCode)
+	}
+}
+
+func addTestKey(t *testing.T, s *Server, tenant string, scopes ...string) string {
+	t.Helper()
+	plaintext, key := newStoredTestKey(t, tenant, scopes...)
+	if err := s.store.CreateKey(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	return plaintext
+}
+
+func addStoredTestKey(t *testing.T, s *Server, tenant string, scopes ...string) APIKey {
+	t.Helper()
+	_, key := newStoredTestKey(t, tenant, scopes...)
+	if err := s.store.CreateKey(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+func newStoredTestKey(t *testing.T, tenant string, scopes ...string) (string, APIKey) {
+	t.Helper()
+	plaintext, hash, err := NewAPIKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plaintext, APIKey{ID: ulid.NewAPIKeyID(), Name: "test", TenantID: tenant, KeyHash: hash, Scopes: scopes, CreatedAt: time.Now()}
 }
 
 func readBody(t *testing.T, resp *http.Response) []byte {
