@@ -69,6 +69,15 @@ test-security-all: binaries ## Run the isolation matrix against bwrap AND gVisor
 		--copy-up=/etc --copy-up=/run --copy-up=/var/lib --propagation=rslave \
 		bash -c 'cd "$(CURDIR)" && VORA_INIT_BINARY="$(CURDIR)/bin/vora-init" $(GO) test -tags=security -run "Test.*/gvisor" ./tests/security/...'
 
+.PHONY: test-network
+test-network: ## Run the NetworkRestricted netns test under rootlesskit
+	@command -v rootlesskit >/dev/null 2>&1 || { echo "rootlesskit not installed; skipped"; exit 0; }
+	rootlesskit \
+		--state-dir="$${XDG_RUNTIME_DIR}/vora-rootlesskit-net" \
+		--net=slirp4netns --mtu=65520 --disable-host-loopback \
+		--copy-up=/etc --copy-up=/run --copy-up=/var/lib --propagation=rslave \
+		bash -c 'cd "$(CURDIR)" && $(GO) test -tags=integration -run TestNetworkRestricted ./tests/integration/...'
+
 .PHONY: bench
 bench: ## Run the benchmark harness
 	$(GO) test -tags=benchmark -bench=. -run='^$$' ./tests/benchmark/...

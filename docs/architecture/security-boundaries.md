@@ -20,6 +20,7 @@ proves it. If the mechanism is removed, the test must fail.
 | Hostname / domain | A's UTS namespace is private (`hostname=vora`) | UTS namespace | `TestUTSNamespaceIsolation` |
 | Users / capabilities | A runs in an unprivileged user namespace with no host capabilities (bwrap) | user namespace | `TestUnprivilegedUserNamespace` |
 | Network | A's network namespace has no interfaces and no routes; B is unreachable | net namespace / `runsc --network none` | `TestNetworkNone` |
+| Egress (bwrap, `NetworkRestricted`) | A's only route is the gateway; every TCP connection is DNAT'd to the SNI proxy, which allows listed domains and denies the rest | per-sandbox netns + veth + nft DNAT + SNI proxy (ADR 012) | `TestNetworkRestrictedDNAT` + `egress` unit tests |
 | Memory | A's allocations are capped; exceeding the cap kills A, not B | `memory.max`, `memory.swap.max=0` | `TestMemoryBombKilled` |
 | PIDs | A's fork attempts hit its own `pids.max`; B's process budget is untouched | `pids.max` | `TestForkBombContained` |
 | Control socket | A's control socket lives in its own `ipc/` directory bound only into A | per-sandbox bind mount | `TestControlSocketIsolation` |

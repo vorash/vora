@@ -25,7 +25,11 @@ and Prometheus.
     via gVisor **Method 2** inside a persistent `rootlesskit` user namespace.
 - A long-lived **in-sandbox agent** (`vora-init`, PID 1) for the bwrap backend;
   gVisor uses native `runsc exec`.
-- **Default-deny networking**: sandboxes have no interfaces or routes.
+- **Default-deny networking**. `NetworkNone` (default) gives a sandbox no
+  interfaces or routes. **`NetworkRestricted`** (bwrap) forces all TCP egress
+  through an SNI-inspecting passthrough proxy with a per-sandbox domain
+  allowlist; non-TLS and private/metadata destinations are denied and each
+  decision is logged and metered. See [ADR 012](docs/adr/012-egress-gateway.md).
 - State persistence, a **TTL reaper**, and startup **reconciliation** (incl.
   reaping orphaned `runsc` containers and systemd units).
 - **Audit trail** behind a `Store` interface: local JSONL, or **PostgreSQL /
@@ -143,6 +147,7 @@ make test              # unit tests
 make test-integration  # runner + sandbox lifecycle over a real socket (incl. Postgres via testcontainers)
 make test-security     # isolation suite (bwrap; gVisor subtests skipped unprivileged)
 make test-security-all # isolation matrix against bwrap AND gVisor
+make test-network      # NetworkRestricted netns/DNAT test (rootlesskit)
 make bench-report      # benchmarks + report in docs/benchmarks/
 make help              # all targets
 ```
@@ -163,15 +168,34 @@ check at `/healthz` (override with `VORA_METRICS_ADDR`).
 
 Configuration is via environment variables: `VORA_STATE_DIR`, `VORA_SOCKET`,
 `VORA_SYSTEMD_MODE` (`user`/`system`), `VORA_METRICS_ADDR`, `VORA_INIT_BINARY`,
-`VORA_GVISOR_PLATFORM` (`kvm`/`systrap`), `VORA_GVISOR_ROOT`, `VORA_RUNSC`, and
-`VORA_AUDIT_DSN` (PostgreSQL/Supabase; omitted → local JSONL).
+`VORA_GVISOR_PLATFORM` (`kvm`/`systrap`), `VORA_GVISOR_ROOT`, `VORA_RUNSC`,
+`VORA_CONTAINERD_ADDRESS`, `VORA_CONTAINERD_NAMESPACE` (default `vora`),
+`VORA_CONTAINERD_SNAPSHOTTER` (default `native`), `VORA_IMAGES_MODE`
+(`auto`/`containerd`/`cache`), and `VORA_AUDIT_DSN` (PostgreSQL/Supabase;
+omitted → local JSONL).
+
+Network-restricted sandbox:
+
+```bash
+vora sandbox create --image vora/python --network restricted \
+  --allow-domain example.com --backend bwrap
+```
 
 ## Limitations (honest)
 
-- **Images still come from the Docker-export cache** as `<name>/<tag>/rootfs`
-  (implicit tag `latest`). containerd is used as the OCI store for container
-  data, but the rootfs cache is not yet materialised from containerd snapshots
-  (ADR 009) — that migration is pending.
+- **Images resolve from containerd snapshots (ADR 009).** OCI images are pulled
+  and unpacked into the rootless containerd `native` snapshotter and the
+  snapshot rootfs is bound read-only; the Docker-export cache remains only as a
+  fallback when containerd is unavailable.
+- **Egress is bwrap-only.** `NetworkRestricted` is enforced for the bubblewrap
+  backend. gVisor still supports `NetworkNone` only: its host network mode
+  escapes to the runner namespace, and joining a prepared netns via the OCI
+  spec makes netstack egress time out (ADR 012).
+- **No DNS through the gateway.** Only TCP is redirected, so restricted
+  sandboxes must resolve names themselves or use literal addresses; a gateway
+  resolver is a follow-up.
+- **Non-TLS egress is denied.** The proxy only understands TLS SNI; plaintext
+  HTTP and non-443 ports are blocked by default.
 - **No syscall filtering for bwrap.** seccomp is not applied; Bubblewrap
   `--seccomp` is a planned hardening step. gVisor provides its own syscall
   surface.
@@ -191,9 +215,8 @@ Configuration is via environment variables: `VORA_STATE_DIR`, `VORA_SOCKET`,
 | ------- | ----- |
 | v0.1 | Go runner, Bubblewrap backend, cgroups v2, in-sandbox exec agent, CLI, security suite, benchmarks |
 | **v0.2 (this)** | **gVisor backend (direct `runsc`, Method 2), backend selection, rootlesskit runner service, PostgreSQL/Supabase audit, dual-backend isolation matrix** |
-| v0.3 | HTTP control plane + remote runner, network policy + egress gateway (SNI allowlist), credential brokering, TS/Python SDK, MCP |
+| v0.3 | **partly shipped:** `NetworkRestricted` egress gateway for bwrap (SNI allowlist, ADR 012). **Pending:** gVisor egress, credential brokering, HTTP control plane + remote runner, TS/Python SDK, MCP |
 | v1.0 | Firecracker microVM tier, snapshots/forks |
-| pending | containerd-snapshot rootfs (ADR 009) |
 
 ## License
 

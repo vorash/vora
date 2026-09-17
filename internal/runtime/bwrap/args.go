@@ -25,6 +25,10 @@ type BuildOptions struct {
 	IPCDir       string
 	Hostname     string
 	Env          map[string]string
+	// ShareNet keeps the current network namespace instead of unsharing it.
+	// The caller must have placed the process in a prepared netns (see the
+	// NetworkRestricted path and docs/adr/012-egress-gateway.md).
+	ShareNet bool
 }
 
 // Args builds the bubblewrap argv for a sandbox. It is pure so it can be
@@ -61,6 +65,13 @@ func Args(opts BuildOptions) ([]string, error) {
 		"--die-with-parent",
 		"--new-session",
 		"--hostname", hostname,
+	}
+	if opts.ShareNet {
+		// Retain the prepared network namespace; egress is controlled by the
+		// sandbox's nftables DNAT to the egress proxy.
+		argv = append(argv, "--share-net")
+	}
+	argv = append(argv,
 		// Read-only shared root fs.
 		"--ro-bind", opts.RootfsDir, "/",
 		// Per-sandbox writable mounts.
@@ -73,7 +84,7 @@ func Args(opts BuildOptions) ([]string, error) {
 		"--chdir", "/workspace",
 		"--setenv", "HOME", "/root",
 		"--setenv", "PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-	}
+	)
 
 	// Deterministic extra environment.
 	keys := make([]string, 0, len(opts.Env))

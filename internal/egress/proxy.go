@@ -148,11 +148,15 @@ func (p *Proxy) handle(ctx context.Context, conn net.Conn) {
 		_ = tc.SetKeepAlive(true)
 	}
 
+	// Bound how long a peer may hold the connection before sending a
+	// ClientHello; without this an idle client could pin a goroutine.
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	host, raw, err := readClientHello(conn)
 	if err != nil {
 		p.deny(ctx, "", "", reasonFor(err))
 		return
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 	if !p.policy.Allows(host) {
 		p.deny(ctx, host, "", ReasonNotAllowed)
 		return

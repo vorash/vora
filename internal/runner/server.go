@@ -573,12 +573,18 @@ func (s *Server) selectBackend(spec runtime.SandboxSpec) (runtime.Backend, error
 		return nil, status.Errorf(codes.InvalidArgument, "unknown backend %q", spec.Backend)
 	}
 	preferred := []string{}
+	supports := func(name string) bool {
+		b, ok := s.registry.Get(name)
+		return ok && b.Capabilities().SupportsNetwork(spec.Network.Mode)
+	}
 	if os.Getuid() == 0 {
-		if b, ok := s.registry.Get("gvisor"); ok && b.Capabilities().EnforcesResourceLimits {
+		if b, ok := s.registry.Get("gvisor"); ok && b.Capabilities().EnforcesResourceLimits && supports("gvisor") {
 			preferred = append(preferred, "gvisor")
 		}
 	}
-	preferred = append(preferred, "bwrap")
+	if supports("bwrap") {
+		preferred = append(preferred, "bwrap")
+	}
 	if b, ok := s.registry.Preferred(preferred...); ok {
 		return b, nil
 	}

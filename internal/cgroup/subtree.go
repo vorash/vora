@@ -244,6 +244,14 @@ func (g *Group) Stats() (*runtime.Stats, error) {
 	return readStats(g.rel)
 }
 
+// Kill terminates every process in the cgroup (cgroup v2).
+func (g *Group) Kill() error {
+	if err := os.WriteFile(filepath.Join(g.Path(), "cgroup.kill"), []byte("1\n"), 0o644); err != nil {
+		return fmt.Errorf("cgroup: kill %s: %w", g.id, err)
+	}
+	return nil
+}
+
 // Destroy moves leftover processes to the parent and removes the directory.
 func (g *Group) Destroy() error {
 	dir := g.Path()
