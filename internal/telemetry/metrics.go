@@ -26,6 +26,8 @@ type Metrics struct {
 	ExecFailedTotal       *prometheus.CounterVec
 	PolicyDeniedTotal     prometheus.Counter
 	NetworkDeniedTotal    prometheus.Counter
+	NetworkDecisionsTotal *prometheus.CounterVec
+	AuditWriteFailedTotal prometheus.Counter
 	RunnerCapacity        prometheus.Gauge
 	RunnerSandboxes       prometheus.Gauge
 }
@@ -71,7 +73,15 @@ func New() *Metrics {
 	})
 	m.NetworkDeniedTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "vora_network_denied_total",
-		Help: "Total network denials (reserved for v0.3).",
+		Help: "Total denied network policy decisions.",
+	})
+	m.NetworkDecisionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vora_network_decisions_total",
+		Help: "Total network policy decisions by outcome and reason.",
+	}, []string{"decision", "reason"})
+	m.AuditWriteFailedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "vora_audit_write_failed_total",
+		Help: "Total audit records that could not be persisted.",
 	})
 	m.RunnerCapacity = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "vora_runner_capacity",
@@ -85,7 +95,8 @@ func New() *Metrics {
 	reg.MustRegister(
 		m.SandboxCreateTotal, m.SandboxCreateDuration, m.SandboxRunning,
 		m.SandboxFailedTotal, m.ExecTotal, m.ExecDuration, m.ExecFailedTotal,
-		m.PolicyDeniedTotal, m.NetworkDeniedTotal, m.RunnerCapacity, m.RunnerSandboxes,
+		m.PolicyDeniedTotal, m.NetworkDeniedTotal, m.NetworkDecisionsTotal,
+		m.AuditWriteFailedTotal, m.RunnerCapacity, m.RunnerSandboxes,
 	)
 	return m
 }

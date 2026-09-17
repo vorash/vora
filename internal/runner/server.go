@@ -19,6 +19,7 @@ import (
 	"github.com/vorash/vora/internal/audit/jsonl"
 	"github.com/vorash/vora/internal/cgroup"
 	"github.com/vorash/vora/internal/config"
+	"github.com/vorash/vora/internal/egress"
 	"github.com/vorash/vora/internal/images"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/sandbox"
@@ -85,6 +86,35 @@ func (s *Server) SetMetrics(m *telemetry.Metrics) {
 	if m != nil {
 		s.metrics = m
 	}
+}
+
+// RecordEgress persists and meters one restricted-network policy decision.
+// Returning an error makes allowed traffic fail closed in the proxy.
+func (s *Server) RecordEgress(event egress.Event) error {
+	decision, reason := "allowed", "allowed"
+	if !event.Allowed {
+		decision, reason = "denied", event.Reason
+		s.metrics.NetworkDeniedTotal.Inc()
+		s.metrics.PolicyDeniedTotal.Inc()
+	}
+	s.metrics.NetworkDecisionsTotal.WithLabelValues(decision, reason).Inc()
+	record := sandbox.EgressRecord{
+		SandboxID: event.SandboxID,
+		Host:      event.Host,
+		Remote:    event.Remote,
+		Allowed:   event.Allowed,
+		Reason:    event.Reason,
+		Timestamp: event.Time.UTC(),
+	}
+	if err := s.audit.AppendEgress(context.Background(), event.SandboxID, record); err != nil {
+		s.metrics.AuditWriteFailedTotal.Inc()
+		s.logger.Error("write egress audit failed", "sandbox_id", event.SandboxID, "host", event.Host, "allowed", event.Allowed, "error", err)
+		return err
+	}
+	if !event.Allowed {
+		s.logger.Info("egress denied", "sandbox_id", event.SandboxID, "host", event.Host, "reason", event.Reason)
+	}
+	return nil
 }
 
 // SetCgroups provides the cgroup manager, enabling reconciliation of orphaned
@@ -563,6 +593,21 @@ func (s *Server) GetSandboxExecs(ctx context.Context, req *v1.GetSandboxExecsReq
 		return nil, status.Errorf(codes.Internal, "read execs: %v", err)
 	}
 	return &v1.GetSandboxExecsResponse{Execs: execsToProto(execs)}, nil
+}
+
+// GetSandboxEgress returns restricted-network policy decisions for a sandbox.
+func (s *Server) GetSandboxEgress(ctx context.Context, req *v1.GetSandboxEgressRequest) (*v1.GetSandboxEgressResponse, error) {
+	if req.GetSandboxId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "sandbox_id is required")
+	}
+	if _, err := s.store.Load(req.GetSandboxId()); err != nil {
+		return nil, s.loadError(err, req.GetSandboxId())
+	}
+	records, err := s.audit.Egress(ctx, req.GetSandboxId())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "read egress: %v", err)
+	}
+	return &v1.GetSandboxEgressResponse{Records: egressToProto(records)}, nil
 }
 
 // selectBackend resolves the backend for a spec: an explicit spec.Backend wins,

@@ -18,6 +18,7 @@ service RunnerService {
   rpc StatsSandbox(StatsSandboxRequest) returns (Stats);
   rpc GetSandboxEvents(GetSandboxEventsRequest) returns (GetSandboxEventsResponse);
   rpc GetSandboxExecs(GetSandboxExecsRequest) returns (GetSandboxExecsResponse);
+  rpc GetSandboxEgress(GetSandboxEgressRequest) returns (GetSandboxEgressResponse);
   rpc DestroySandbox(DestroySandboxRequest) returns (DestroySandboxResponse);
 }
 
@@ -101,6 +102,24 @@ message SandboxExec {
   ExitReason reason = 8;
   int64 stdout_bytes = 9;
   int64 stderr_bytes = 10;
+}
+
+message GetSandboxEgressRequest {
+  string sandbox_id = 1;
+}
+
+message GetSandboxEgressResponse {
+  repeated SandboxEgress records = 1;
+}
+
+// SandboxEgress is one restricted-network policy decision.
+message SandboxEgress {
+  string sandbox_id = 1;
+  string host = 2;
+  string remote = 3;
+  bool allowed = 4;
+  string reason = 5;
+  int64 timestamp_unix_ms = 6;
 }
 
 message DestroySandboxRequest {

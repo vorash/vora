@@ -19,6 +19,7 @@ type API interface {
 	StatsSandbox(ctx context.Context, id string) (*v1.Stats, error)
 	Events(ctx context.Context, id string) ([]*v1.SandboxEvent, error)
 	Execs(ctx context.Context, id string) ([]*v1.SandboxExec, error)
+	Egress(ctx context.Context, id string) ([]*v1.SandboxEgress, error)
 	Exec(ctx context.Context, req *v1.ExecSandboxRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ExecChunk], error)
 	Close() error
 }

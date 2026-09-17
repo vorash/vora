@@ -48,5 +48,15 @@ func (s *Store) Execs(_ context.Context, sandboxID string) ([]sandbox.ExecRecord
 	return sandbox.ReadExecRecords(s.execDir(sandboxID))
 }
 
+// AppendEgress implements audit.Store.
+func (s *Store) AppendEgress(_ context.Context, sandboxID string, record sandbox.EgressRecord) error {
+	return sandbox.AppendEgress(s.logsDir(sandboxID), record)
+}
+
+// Egress implements audit.Store.
+func (s *Store) Egress(_ context.Context, sandboxID string) ([]sandbox.EgressRecord, error) {
+	return sandbox.ReadEgress(s.logsDir(sandboxID))
+}
+
 // Close implements audit.Store.
 func (s *Store) Close() error { return nil }

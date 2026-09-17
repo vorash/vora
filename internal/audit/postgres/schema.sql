@@ -35,3 +35,16 @@ CREATE TABLE IF NOT EXISTS sandbox_execs (
 
 CREATE INDEX IF NOT EXISTS sandbox_execs_sandbox_id_idx
     ON sandbox_execs (sandbox_id, started_at);
+
+CREATE TABLE IF NOT EXISTS sandbox_egress (
+    id          BIGSERIAL PRIMARY KEY,
+    sandbox_id  TEXT        NOT NULL,
+    host        TEXT,
+    remote      TEXT,
+    allowed     BOOLEAN     NOT NULL,
+    reason      TEXT,
+    occurred_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS sandbox_egress_sandbox_id_idx
+    ON sandbox_egress (sandbox_id, occurred_at, id);

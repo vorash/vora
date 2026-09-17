@@ -108,6 +108,15 @@ func (c *Client) Execs(ctx context.Context, id string) ([]*v1.SandboxExec, error
 	return resp.GetExecs(), nil
 }
 
+// Egress returns restricted-network policy decisions for a sandbox.
+func (c *Client) Egress(ctx context.Context, id string) ([]*v1.SandboxEgress, error) {
+	resp, err := c.stub.GetSandboxEgress(ctx, &v1.GetSandboxEgressRequest{SandboxId: id})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetRecords(), nil
+}
+
 // Exec starts a command and returns the output stream.
 func (c *Client) Exec(ctx context.Context, req *v1.ExecSandboxRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ExecChunk], error) {
 	return c.stub.ExecSandbox(ctx, req, opts...)

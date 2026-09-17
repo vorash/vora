@@ -166,6 +166,15 @@ func (c *HTTPClient) Execs(ctx context.Context, id string) ([]*v1.SandboxExec, e
 	return resp.GetExecs(), nil
 }
 
+// Egress returns restricted-network policy decisions.
+func (c *HTTPClient) Egress(ctx context.Context, id string) ([]*v1.SandboxEgress, error) {
+	resp := &v1.GetSandboxEgressResponse{}
+	if err := c.do(ctx, http.MethodGet, "/v1/sandboxes/"+id+"/egress", nil, resp); err != nil {
+		return nil, err
+	}
+	return resp.GetRecords(), nil
+}
+
 // Exec starts a command and returns an NDJSON-backed stream.
 func (c *HTTPClient) Exec(ctx context.Context, req *v1.ExecSandboxRequest, _ ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ExecChunk], error) {
 	data, err := protojson.Marshal(req.GetExec())

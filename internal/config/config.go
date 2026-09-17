@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -50,6 +51,10 @@ type Config struct {
 	// ImagesMode selects how an image ref resolves to a rootfs:
 	// "auto" (containerd, then the local cache), "containerd" or "cache".
 	ImagesMode string
+	// EgressMaxConnections bounds concurrent proxy connections per sandbox.
+	EgressMaxConnections int
+	// EgressIdleTimeout closes connections with no traffic in either direction.
+	EgressIdleTimeout time.Duration
 }
 
 // Image mode values for Config.ImagesMode.
@@ -80,6 +85,8 @@ func Default() (Config, error) {
 		ContainerdNamespace:   "vora",
 		ContainerdSnapshotter: "native",
 		ImagesMode:            ImagesAuto,
+		EgressMaxConnections:  128,
+		EgressIdleTimeout:     5 * time.Minute,
 	}
 
 	if os.Geteuid() == 0 {
@@ -136,6 +143,20 @@ func Default() (Config, error) {
 			return Config{}, fmt.Errorf("invalid VORA_IMAGES_MODE %q (want %q, %q or %q)",
 				v, ImagesAuto, ImagesContainerd, ImagesCache)
 		}
+	}
+	if v := os.Getenv("VORA_EGRESS_MAX_CONNECTIONS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return Config{}, fmt.Errorf("invalid VORA_EGRESS_MAX_CONNECTIONS %q (want a positive integer)", v)
+		}
+		c.EgressMaxConnections = n
+	}
+	if v := os.Getenv("VORA_EGRESS_IDLE_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return Config{}, fmt.Errorf("invalid VORA_EGRESS_IDLE_TIMEOUT %q (want a positive duration)", v)
+		}
+		c.EgressIdleTimeout = d
 	}
 
 	if c.DefaultTTL <= 0 {

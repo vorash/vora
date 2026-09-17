@@ -19,7 +19,7 @@ import (
 var schemaSQL string
 
 // schemaVersion identifies the embedded schema. Bump when schema.sql changes.
-const schemaVersion = "0001_sandbox_audit"
+const schemaVersion = "0002_egress_audit"
 
 // Store is a PostgreSQL-backed audit store.
 type Store struct {
@@ -137,6 +137,42 @@ func (s *Store) Execs(ctx context.Context, sandboxID string) ([]sandbox.ExecReco
 		execs = append(execs, r)
 	}
 	return execs, rows.Err()
+}
+
+// AppendEgress implements audit.Store.
+func (s *Store) AppendEgress(ctx context.Context, sandboxID string, record sandbox.EgressRecord) error {
+	ts := record.Timestamp
+	if ts.IsZero() {
+		ts = time.Now().UTC()
+	}
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO sandbox_egress (sandbox_id, host, remote, allowed, reason, occurred_at)
+		 VALUES ($1,$2,$3,$4,$5,$6)`,
+		sandboxID, record.Host, record.Remote, record.Allowed, record.Reason, ts)
+	if err != nil {
+		return fmt.Errorf("audit/postgres: append egress: %w", err)
+	}
+	return nil
+}
+
+// Egress implements audit.Store.
+func (s *Store) Egress(ctx context.Context, sandboxID string) ([]sandbox.EgressRecord, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT sandbox_id, host, remote, allowed, reason, occurred_at
+		 FROM sandbox_egress WHERE sandbox_id = $1 ORDER BY occurred_at, id`, sandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("audit/postgres: query egress: %w", err)
+	}
+	defer rows.Close()
+	var records []sandbox.EgressRecord
+	for rows.Next() {
+		var record sandbox.EgressRecord
+		if err := rows.Scan(&record.SandboxID, &record.Host, &record.Remote, &record.Allowed, &record.Reason, &record.Timestamp); err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
 }
 
 // Close implements audit.Store.

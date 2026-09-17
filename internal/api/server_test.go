@@ -82,6 +82,10 @@ func (f *fakeRunner) Execs(_ context.Context, _ string) ([]*v1.SandboxExec, erro
 	return []*v1.SandboxExec{{ExecutionId: "exe_test"}}, nil
 }
 
+func (f *fakeRunner) Egress(_ context.Context, _ string) ([]*v1.SandboxEgress, error) {
+	return []*v1.SandboxEgress{{Host: "example.com", Allowed: true}}, nil
+}
+
 func (f *fakeRunner) Exec(_ context.Context, _ *v1.ExecSandboxRequest, _ ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ExecChunk], error) {
 	return &fakeStream{chunks: f.chunks}, nil
 }
@@ -310,6 +314,7 @@ func TestTenantSandboxIsolation(t *testing.T) {
 		"/v1/sandboxes/sbx_b/stats",
 		"/v1/sandboxes/sbx_b/events",
 		"/v1/sandboxes/sbx_b/execs",
+		"/v1/sandboxes/sbx_b/egress",
 	} {
 		resp := do(t, http.MethodGet, ts.URL+path, tenantA, nil)
 		resp.Body.Close()

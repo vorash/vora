@@ -39,7 +39,7 @@ type Backend struct {
 	// Restricted-network path (NetworkRestricted). Enabled by SetRestricted.
 	subtree    cgroup.Subtree
 	networks   *network.Manager
-	egressSink func(egress.Event)
+	egressSink func(egress.Event) error
 
 	mu      sync.Mutex
 	handles map[string]*handle
@@ -88,7 +88,7 @@ func New(cfg config.Config, cgroups cgroup.Manager, logger *slog.Logger) (*Backe
 // subtree. The sandbox is launched by the runner (not via systemd-run) so it
 // can join the prepared netns. sink receives each egress decision and may be
 // nil.
-func (b *Backend) SetRestricted(subtree cgroup.Subtree, networks *network.Manager, sink func(egress.Event)) {
+func (b *Backend) SetRestricted(subtree cgroup.Subtree, networks *network.Manager, sink func(egress.Event) error) {
 	b.subtree = subtree
 	b.networks = networks
 	b.egressSink = sink
@@ -198,7 +198,10 @@ func (b *Backend) startRestricted(ctx context.Context, hd *handle) error {
 	sandboxCtx, cancel := context.WithCancel(context.Background())
 	hd.cancel = cancel
 
-	proxy := egress.New(hd.id, egress.Policy{AllowedDomains: hd.spec.Network.AllowedDomains}, b.logger, b.egressSink)
+	proxy := egress.New(hd.id, egress.Policy{AllowedDomains: hd.spec.Network.AllowedDomains}, b.logger, b.egressSink, egress.Limits{
+		MaxConnections: b.cfg.EgressMaxConnections,
+		IdleTimeout:    b.cfg.EgressIdleTimeout,
+	})
 	if err := proxy.Listen(sandboxCtx, netns.ProxyAddr()); err != nil {
 		b.cleanupRestricted(ctx, hd)
 		return err

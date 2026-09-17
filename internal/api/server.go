@@ -39,6 +39,7 @@ type RunnerClient interface {
 	StatsSandbox(ctx context.Context, id string) (*v1.Stats, error)
 	Events(ctx context.Context, id string) ([]*v1.SandboxEvent, error)
 	Execs(ctx context.Context, id string) ([]*v1.SandboxExec, error)
+	Egress(ctx context.Context, id string) ([]*v1.SandboxEgress, error)
 	Exec(ctx context.Context, req *v1.ExecSandboxRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ExecChunk], error)
 	Close() error
 }
@@ -184,6 +185,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/sandboxes/{id}/stats", s.auth(ScopeSandbox, s.statsSandbox))
 	mux.HandleFunc("GET /v1/sandboxes/{id}/events", s.auth(ScopeSandbox, s.eventsSandbox))
 	mux.HandleFunc("GET /v1/sandboxes/{id}/execs", s.auth(ScopeSandbox, s.execsSandbox))
+	mux.HandleFunc("GET /v1/sandboxes/{id}/egress", s.auth(ScopeSandbox, s.egressSandbox))
 
 	mux.HandleFunc("GET /v1/runners", s.auth(ScopeAdmin, s.listRunners))
 	mux.HandleFunc("POST /v1/keys", s.auth(ScopeAdmin, s.createKey))
@@ -398,6 +400,21 @@ func (s *Server) execsSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeProto(w, http.StatusOK, &v1.GetSandboxExecsResponse{Execs: execs})
+}
+
+func (s *Server) egressSandbox(w http.ResponseWriter, r *http.Request) {
+	rc, err := s.runnerFor(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	defer rc.Close()
+	records, err := rc.Egress(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeGRPCError(w, err)
+		return
+	}
+	writeProto(w, http.StatusOK, &v1.GetSandboxEgressResponse{Records: records})
 }
 
 // execSandbox streams one execution as NDJSON of v1.ExecChunk.

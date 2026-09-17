@@ -21,17 +21,30 @@ import (
 // DefaultPort is the TLS port the proxy forwards to.
 const DefaultPort = "443"
 
+const (
+	defaultMaxConnections = 128
+	defaultIdleTimeout    = 5 * time.Minute
+)
+
 // Denial reasons recorded on the audit trail.
 const (
-	ReasonNotAllowed = "domain_not_allowed"
-	ReasonNotTLS     = "not_tls"
-	ReasonBlockedIP  = "blocked_address"
-	ReasonDialFailed = "dial_failed"
+	ReasonNotAllowed      = "domain_not_allowed"
+	ReasonNotTLS          = "not_tls"
+	ReasonBlockedIP       = "blocked_address"
+	ReasonDialFailed      = "dial_failed"
+	ReasonConnectionLimit = "connection_limit"
+	ReasonAuditFailed     = "audit_failed"
 )
 
 // Policy is the per-sandbox egress allowlist.
 type Policy struct {
 	AllowedDomains []string
+}
+
+// Limits bounds host resources consumed by one sandbox proxy.
+type Limits struct {
+	MaxConnections int
+	IdleTimeout    time.Duration
 }
 
 // Allows reports whether host matches an allowlisted domain. Matching is
@@ -68,7 +81,7 @@ type Proxy struct {
 	sandboxID string
 	policy    Policy
 	logger    *slog.Logger
-	onEvent   func(Event)
+	onEvent   func(Event) error
 	dialer    *net.Dialer
 
 	// port, dialHost and skipIPCheck are test seams.
@@ -76,22 +89,40 @@ type Proxy struct {
 	dialHost    string
 	skipIPCheck bool
 
+	maxConnections int
+	idleTimeout    time.Duration
+	slots          chan struct{}
+
 	mu       sync.Mutex
 	listener net.Listener
+	active   map[net.Conn]struct{}
 }
 
 // New returns a proxy for a sandbox. onEvent may be nil.
-func New(sandboxID string, policy Policy, logger *slog.Logger, onEvent func(Event)) *Proxy {
+func New(sandboxID string, policy Policy, logger *slog.Logger, onEvent func(Event) error, configured ...Limits) *Proxy {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	limits := Limits{MaxConnections: defaultMaxConnections, IdleTimeout: defaultIdleTimeout}
+	if len(configured) > 0 {
+		if configured[0].MaxConnections > 0 {
+			limits.MaxConnections = configured[0].MaxConnections
+		}
+		if configured[0].IdleTimeout > 0 {
+			limits.IdleTimeout = configured[0].IdleTimeout
+		}
+	}
 	return &Proxy{
-		sandboxID: sandboxID,
-		policy:    policy,
-		logger:    logger,
-		onEvent:   onEvent,
-		dialer:    &net.Dialer{Timeout: 15 * time.Second},
-		port:      DefaultPort,
+		sandboxID:      sandboxID,
+		policy:         policy,
+		logger:         logger,
+		onEvent:        onEvent,
+		dialer:         &net.Dialer{Timeout: 15 * time.Second},
+		port:           DefaultPort,
+		maxConnections: limits.MaxConnections,
+		idleTimeout:    limits.IdleTimeout,
+		slots:          make(chan struct{}, limits.MaxConnections),
+		active:         make(map[net.Conn]struct{}),
 	}
 }
 
@@ -123,6 +154,9 @@ func (p *Proxy) Close() error {
 	}
 	err := p.listener.Close()
 	p.listener = nil
+	for conn := range p.active {
+		_ = conn.Close()
+	}
 	return err
 }
 
@@ -138,7 +172,24 @@ func (p *Proxy) serve(ctx context.Context) {
 		if err != nil {
 			return
 		}
-		go p.handle(ctx, conn)
+		select {
+		case p.slots <- struct{}{}:
+			p.mu.Lock()
+			p.active[conn] = struct{}{}
+			p.mu.Unlock()
+			go func() {
+				defer func() {
+					<-p.slots
+					p.mu.Lock()
+					delete(p.active, conn)
+					p.mu.Unlock()
+				}()
+				p.handle(ctx, conn)
+			}()
+		default:
+			p.deny(ctx, "", conn.RemoteAddr().String(), ReasonConnectionLimit)
+			_ = conn.Close()
+		}
 	}
 }
 
@@ -178,31 +229,67 @@ func (p *Proxy) handle(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	p.allow(host, upstream.RemoteAddr().String())
+	if err := p.allow(host, upstream.RemoteAddr().String()); err != nil {
+		p.logger.Error("persist allowed egress decision failed", "sandbox_id", p.sandboxID, "host", host, "error", err)
+		_ = p.deny(ctx, host, upstream.RemoteAddr().String(), ReasonAuditFailed)
+		return
+	}
 	if _, err := upstream.Write(raw); err != nil {
 		return
 	}
-	pipe(conn, upstream)
+	pipe(withIdleTimeout(conn, p.idleTimeout), withIdleTimeout(upstream, p.idleTimeout))
 }
 
-func (p *Proxy) allow(host, remote string) {
-	p.event(Event{SandboxID: p.sandboxID, Host: host, Remote: remote, Allowed: true, Time: time.Now()})
+func (p *Proxy) allow(host, remote string) error {
+	return p.event(Event{SandboxID: p.sandboxID, Host: host, Remote: remote, Allowed: true, Time: time.Now()})
 }
 
-func (p *Proxy) deny(ctx context.Context, host, remote, reason string) {
-	p.event(Event{SandboxID: p.sandboxID, Host: host, Remote: remote, Allowed: false, Reason: reason, Time: time.Now()})
+func (p *Proxy) deny(_ context.Context, host, remote, reason string) error {
+	err := p.event(Event{SandboxID: p.sandboxID, Host: host, Remote: remote, Allowed: false, Reason: reason, Time: time.Now()})
+	if err != nil {
+		p.logger.Error("persist denied egress decision failed", "sandbox_id", p.sandboxID, "host", host, "reason", reason, "error", err)
+	}
+	return err
 }
 
-func (p *Proxy) event(e Event) {
+func (p *Proxy) event(e Event) error {
+	var err error
 	if p.onEvent != nil {
-		p.onEvent(e)
+		err = p.onEvent(e)
 	}
 	if !e.Allowed {
 		p.logger.Debug("egress denied", "sandbox_id", e.SandboxID, "host", e.Host, "reason", e.Reason)
 	}
+	return err
 }
 
-// pipe copies both directions until either side closes.
+type idleConn struct {
+	net.Conn
+	timeout time.Duration
+}
+
+func withIdleTimeout(conn net.Conn, timeout time.Duration) net.Conn {
+	return &idleConn{Conn: conn, timeout: timeout}
+}
+
+func (c *idleConn) Read(buf []byte) (int, error) {
+	_ = c.Conn.SetReadDeadline(time.Now().Add(c.timeout))
+	return c.Conn.Read(buf)
+}
+
+func (c *idleConn) Write(buf []byte) (int, error) {
+	_ = c.Conn.SetWriteDeadline(time.Now().Add(c.timeout))
+	return c.Conn.Write(buf)
+}
+
+func (c *idleConn) CloseWrite() error {
+	if conn, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return conn.CloseWrite()
+	}
+	return c.Conn.Close()
+}
+
+// pipe copies both directions until either side closes or becomes idle.
 func pipe(a, b net.Conn) {
 	done := make(chan struct{}, 2)
 	cp := func(dst, src net.Conn) {

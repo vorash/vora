@@ -19,6 +19,10 @@ type Store interface {
 	Events(ctx context.Context, sandboxID string) ([]sandbox.Event, error)
 	// Execs returns a sandbox's execution records, oldest first.
 	Execs(ctx context.Context, sandboxID string) ([]sandbox.ExecRecord, error)
+	// AppendEgress records one restricted-network policy decision.
+	AppendEgress(ctx context.Context, sandboxID string, record sandbox.EgressRecord) error
+	// Egress returns policy decisions oldest first.
+	Egress(ctx context.Context, sandboxID string) ([]sandbox.EgressRecord, error)
 	// Close releases resources.
 	Close() error
 }

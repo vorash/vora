@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -126,10 +127,15 @@ func startEcho(t *testing.T) (addr, port string) {
 
 func dialProxy(t *testing.T, p *Proxy) net.Conn {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	if err := p.Listen(ctx, "127.0.0.1:0"); err != nil {
-		t.Fatalf("listen: %v", err)
+	p.mu.Lock()
+	started := p.listener != nil
+	p.mu.Unlock()
+	if !started {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		if err := p.Listen(ctx, "127.0.0.1:0"); err != nil {
+			t.Fatalf("listen: %v", err)
+		}
 	}
 	p.mu.Lock()
 	addr := p.listener.Addr().String()
@@ -144,9 +150,10 @@ func dialProxy(t *testing.T, p *Proxy) net.Conn {
 
 func TestProxyForwardsAllowlistedSNI(t *testing.T) {
 	_, port := startEcho(t)
-	var events []Event
-	p := New("sbx_test", Policy{AllowedDomains: []string{"example.com"}}, nil, func(e Event) {
-		events = append(events, e)
+	events := make(chan Event, 1)
+	p := New("sbx_test", Policy{AllowedDomains: []string{"example.com"}}, nil, func(e Event) error {
+		events <- e
+		return nil
 	})
 	p.port = port
 	p.skipIPCheck = true
@@ -169,16 +176,22 @@ func TestProxyForwardsAllowlistedSNI(t *testing.T) {
 	if !bytes.Equal(buf, want) {
 		t.Fatalf("echo = %q, want %q", buf, want)
 	}
-	if len(events) != 1 || !events[0].Allowed || events[0].Host != "example.com" {
-		t.Fatalf("events = %+v", events)
+	select {
+	case event := <-events:
+		if !event.Allowed || event.Host != "example.com" {
+			t.Fatalf("event = %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing allow event")
 	}
 }
 
 func TestProxyDeniesUnlistedSNI(t *testing.T) {
 	_, port := startEcho(t)
-	var events []Event
-	p := New("sbx_test", Policy{AllowedDomains: []string{"example.com"}}, nil, func(e Event) {
-		events = append(events, e)
+	events := make(chan Event, 1)
+	p := New("sbx_test", Policy{AllowedDomains: []string{"example.com"}}, nil, func(e Event) error {
+		events <- e
+		return nil
 	})
 	p.port = port
 	p.skipIPCheck = true
@@ -193,8 +206,178 @@ func TestProxyDeniesUnlistedSNI(t *testing.T) {
 	if _, err := conn.Read(buf); err == nil {
 		t.Fatal("expected the denied connection to be closed")
 	}
-	if len(events) != 1 || events[0].Allowed || events[0].Reason != ReasonNotAllowed {
-		t.Fatalf("events = %+v", events)
+	select {
+	case event := <-events:
+		if event.Allowed || event.Reason != ReasonNotAllowed {
+			t.Fatalf("event = %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing deny event")
+	}
+}
+
+func TestProxyConnectionLimitAndSlotRelease(t *testing.T) {
+	_, port := startEcho(t)
+	events := make(chan Event, 8)
+	p := New("sbx_test", Policy{AllowedDomains: []string{"example.com"}}, nil, func(e Event) error {
+		events <- e
+		return nil
+	}, Limits{MaxConnections: 1, IdleTimeout: time.Second})
+	p.port = port
+	p.skipIPCheck = true
+	p.dialHost = "127.0.0.1"
+	first := dialProxy(t, p)
+	hello := clientHello("example.com")
+	if _, err := first.Write(hello); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadFull(first, make([]byte, len(hello))); err != nil {
+		t.Fatal(err)
+	}
+
+	p.mu.Lock()
+	addr := p.listener.Addr().String()
+	p.mu.Unlock()
+	second, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = second.Write(hello)
+	_ = second.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := second.Read(make([]byte, 1)); err == nil {
+		t.Fatal("connection above the limit remained open")
+	}
+	_ = second.Close()
+	select {
+	case event := <-events:
+		if event.Allowed {
+			// The first event is the allowed first connection; consume the limit event.
+			event = <-events
+		}
+		if event.Reason != ReasonConnectionLimit {
+			t.Fatalf("limit event = %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing connection-limit event")
+	}
+
+	_ = first.Close()
+	deadline := time.Now().Add(time.Second)
+	for {
+		third, err := net.Dial("tcp", addr)
+		if err == nil {
+			_, _ = third.Write(hello)
+			_ = third.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			buf := make([]byte, len(hello))
+			if _, err = io.ReadFull(third, buf); err == nil {
+				_ = third.Close()
+				break
+			}
+			_ = third.Close()
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("connection slot was not released")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestProxyIdleTimeoutAndActiveTraffic(t *testing.T) {
+	_, port := startEcho(t)
+	p := New("sbx_test", Policy{AllowedDomains: []string{"example.com"}}, nil, nil,
+		Limits{MaxConnections: 2, IdleTimeout: 80 * time.Millisecond})
+	p.port = port
+	p.skipIPCheck = true
+	p.dialHost = "127.0.0.1"
+	hello := clientHello("example.com")
+
+	idle := dialProxy(t, p)
+	_, _ = idle.Write(hello)
+	if _, err := io.ReadFull(idle, make([]byte, len(hello))); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	_ = idle.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if _, err := idle.Read(make([]byte, 1)); err == nil {
+		t.Fatal("idle connection remained open")
+	}
+	_ = idle.Close()
+
+	active := dialProxy(t, p)
+	_, _ = active.Write(hello)
+	if _, err := io.ReadFull(active, make([]byte, len(hello))); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		time.Sleep(30 * time.Millisecond)
+		if _, err := active.Write([]byte{'x'}); err != nil {
+			t.Fatalf("active write %d: %v", i, err)
+		}
+		buf := make([]byte, 1)
+		if _, err := io.ReadFull(active, buf); err != nil || buf[0] != 'x' {
+			t.Fatalf("active read %d: %q, %v", i, buf, err)
+		}
+	}
+}
+
+func TestProxyFailsClosedWhenAllowAuditFails(t *testing.T) {
+	_, port := startEcho(t)
+	events := make(chan Event, 8)
+	p := New("sbx_test", Policy{AllowedDomains: []string{"example.com"}}, nil, func(e Event) error {
+		events <- e
+		if e.Allowed {
+			return errors.New("audit unavailable")
+		}
+		return nil
+	})
+	p.port = port
+	p.skipIPCheck = true
+	p.dialHost = "127.0.0.1"
+	conn := dialProxy(t, p)
+	hello := clientHello("example.com")
+	if _, err := conn.Write(hello); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("allowed connection forwarded after audit failure")
+	}
+	select {
+	case event := <-events:
+		if !event.Allowed {
+			t.Fatalf("first event = %+v, want allowed", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing allow event")
+	}
+	select {
+	case event := <-events:
+		if event.Allowed || event.Reason != ReasonAuditFailed {
+			t.Fatalf("second event = %+v, want audit_failed", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing audit_failed denial")
+	}
+}
+
+func TestProxyCloseTerminatesActiveConnections(t *testing.T) {
+	p := New("sbx_test", Policy{}, nil, nil, Limits{MaxConnections: 1, IdleTimeout: time.Minute})
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := p.Listen(ctx, "127.0.0.1:0"); err != nil {
+		t.Fatal(err)
+	}
+	p.mu.Lock()
+	addr := p.listener.Addr().String()
+	p.mu.Unlock()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	cancel()
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("connection remained open after proxy cancellation")
 	}
 }
 
