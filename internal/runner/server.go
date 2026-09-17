@@ -34,7 +34,7 @@ type Server struct {
 	cfg        config.Config
 	store      *sandbox.Store
 	registry   *runtime.Registry
-	images     *images.Cache
+	images     *images.Resolver
 	workspaces *workspace.Manager
 	audit      audit.Store
 	runnerID   string
@@ -63,7 +63,7 @@ func NewServer(cfg config.Config, store *sandbox.Store, registry *runtime.Regist
 		cfg:        cfg,
 		store:      store,
 		registry:   registry,
-		images:     images.NewCache(cfg.ImagesDir()),
+		images:     images.NewResolver(cfg, logger),
 		workspaces: workspaces,
 		audit:      jsonl.New(workspaces.LogsDir),
 		runnerID:   runnerID,
@@ -208,9 +208,17 @@ func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) 
 	if !backend.Capabilities().SupportsNetwork(rec.Spec.Network.Mode) {
 		return nil, status.Errorf(codes.InvalidArgument, "backend %s does not support network mode %q", backend.Name(), rec.Spec.Network.Mode)
 	}
-	if _, err := s.images.Resolve(rec.Spec.Image); err != nil {
+	rootfs, err := s.images.Resolve(ctx, rec.Spec.Image)
+	if err != nil {
 		s.fail(rec, runtime.ReasonRuntimeFailure)
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	}
+	if rootfs != rec.Spec.Workspace.RootfsDir {
+		rec.Spec.Workspace.RootfsDir = rootfs
+		if err := s.store.Save(rec); err != nil {
+			s.fail(rec, runtime.ReasonRuntimeFailure)
+			return nil, status.Error(codes.Internal, "failed to persist resolved rootfs")
+		}
 	}
 
 	if err := s.transition(rec, sandbox.StateScheduling, ""); err != nil {

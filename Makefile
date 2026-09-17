@@ -81,6 +81,14 @@ bench-report: ## Run benchmarks and write a report to docs/benchmarks/
 images: ## Build sandbox rootfs image cache
 	./scripts/build-images.sh
 
+.PHONY: setup-containerd
+setup-containerd: ## Install/verify the rootless containerd OCI image store (ADR 009)
+	./scripts/setup-containerd.sh
+
+.PHONY: pull-images
+pull-images: ## Import the Docker-built rootfs images into containerd
+	./scripts/pull-images.sh
+
 .PHONY: fmt
 fmt: ## Format Go code
 	$(GO) fmt ./...

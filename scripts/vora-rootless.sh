@@ -39,6 +39,17 @@ if ! mountpoint -q /run/vora 2>/dev/null; then
     mount --bind "$SOCKET_DIR" /run/vora
 fi
 
+# The rootless containerd bind-mounts its data dir to /var/lib/containerd inside
+# its own namespace, so it reports snapshot rootfs paths as
+# /var/lib/containerd/... . Do the same here, otherwise the runner cannot bind
+# those rootfs paths into sandboxes.
+XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+rm -f /var/lib/containerd
+mkdir -p "$XDG_DATA_HOME/containerd" /var/lib/containerd
+if ! mountpoint -q /var/lib/containerd 2>/dev/null; then
+    mount --bind "$XDG_DATA_HOME/containerd" /var/lib/containerd
+fi
+
 export VORA_STATE_DIR="$STATE_DIR"
 export VORA_SYSTEMD_MODE=user
 
