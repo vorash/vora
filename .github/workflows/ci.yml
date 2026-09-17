@@ -60,6 +60,15 @@ jobs:
           echo "XDG_RUNTIME_DIR=/run/user/${uid}" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${uid}/bus" >> "$GITHUB_ENV"
 
+      - name: Allow unprivileged user namespaces (bwrap on Ubuntu 24.04+)
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            echo "apparmor_restrict_unprivileged_userns before: $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --unshare-all --ro-bind / / -- /bin/true
+          echo "bubblewrap ok"
+
       - name: Check systemd --user
         run: |
           systemctl --user show-environment
@@ -78,4 +87,3 @@ jobs:
         env:
           VORA_INIT_BINARY: ${{ github.workspace }}/bin/vora-init
         run: go test -tags=security -count=1 ./tests/security/...
-}
