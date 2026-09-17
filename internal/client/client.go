@@ -53,7 +53,14 @@ func (c *Client) Close() error { return c.conn.Close() }
 
 // CreateSandbox requests a new sandbox.
 func (c *Client) CreateSandbox(ctx context.Context, spec *v1.SandboxSpec) (*v1.Sandbox, error) {
-	resp, err := c.stub.CreateSandbox(ctx, &v1.CreateSandboxRequest{Spec: spec})
+	return c.CreateSandboxWithCredentials(ctx, spec, nil)
+}
+
+// CreateSandboxWithCredentials requests a new sandbox and carries the resolved
+// broker credentials for the aliases its spec grants. The credentials are used
+// only to build the sandbox's broker; they are never persisted.
+func (c *Client) CreateSandboxWithCredentials(ctx context.Context, spec *v1.SandboxSpec, creds []*v1.BrokerCredential) (*v1.Sandbox, error) {
+	resp, err := c.stub.CreateSandbox(ctx, &v1.CreateSandboxRequest{Spec: spec, BrokerSecrets: creds})
 	if err != nil {
 		return nil, err
 	}

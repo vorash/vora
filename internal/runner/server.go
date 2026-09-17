@@ -45,6 +45,13 @@ type Server struct {
 
 	handlesMu sync.Mutex
 	handles   map[string]sandboxHandle
+
+	// brokerMu guards credentials resolved by the control plane for a sandbox
+	// that has been created but not yet started. They are transient by design:
+	// never persisted with the record, never logged, dropped once the sandbox
+	// starts (or is destroyed).
+	brokerMu    sync.Mutex
+	brokerCreds map[string][]egress.Credential
 }
 
 // sandboxHandle binds a sandbox to the backend that manages it, so later RPCs
@@ -61,16 +68,17 @@ func NewServer(cfg config.Config, store *sandbox.Store, registry *runtime.Regist
 	}
 	workspaces := workspace.NewManager(cfg.SandboxesDir())
 	return &Server{
-		cfg:        cfg,
-		store:      store,
-		registry:   registry,
-		images:     images.NewResolver(cfg, logger),
-		workspaces: workspaces,
-		audit:      jsonl.New(workspaces.LogsDir),
-		runnerID:   runnerID,
-		logger:     logger,
-		metrics:    telemetry.New(),
-		handles:    make(map[string]sandboxHandle),
+		cfg:         cfg,
+		store:       store,
+		registry:    registry,
+		images:      images.NewResolver(cfg, logger),
+		workspaces:  workspaces,
+		audit:       jsonl.New(workspaces.LogsDir),
+		runnerID:    runnerID,
+		logger:      logger,
+		metrics:     telemetry.New(),
+		handles:     make(map[string]sandboxHandle),
+		brokerCreds: make(map[string][]egress.Credential),
 	}
 }
 
@@ -102,17 +110,18 @@ func (s *Server) RecordEgress(event egress.Event) error {
 		SandboxID: event.SandboxID,
 		Host:      event.Host,
 		Remote:    event.Remote,
+		Alias:     event.Alias,
 		Allowed:   event.Allowed,
 		Reason:    event.Reason,
 		Timestamp: event.Time.UTC(),
 	}
 	if err := s.audit.AppendEgress(context.Background(), event.SandboxID, record); err != nil {
 		s.metrics.AuditWriteFailedTotal.Inc()
-		s.logger.Error("write egress audit failed", "sandbox_id", event.SandboxID, "host", event.Host, "allowed", event.Allowed, "error", err)
+		s.logger.Error("write egress audit failed", "sandbox_id", event.SandboxID, "host", event.Host, "alias", event.Alias, "allowed", event.Allowed, "error", err)
 		return err
 	}
 	if !event.Allowed {
-		s.logger.Info("egress denied", "sandbox_id", event.SandboxID, "host", event.Host, "reason", event.Reason)
+		s.logger.Info("egress denied", "sandbox_id", event.SandboxID, "host", event.Host, "alias", event.Alias, "reason", event.Reason)
 	}
 	return nil
 }
@@ -145,6 +154,13 @@ func (s *Server) CreateSandbox(ctx context.Context, req *v1.CreateSandboxRequest
 		spec.ID = ulid.NewSandbox()
 	}
 	if err := spec.Validate(); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	creds, err := brokerCredentialsFromProto(req.GetBrokerSecrets())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if err := validateBrokerGrants(spec, creds); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
@@ -181,7 +197,11 @@ func (s *Server) CreateSandbox(ctx context.Context, req *v1.CreateSandboxRequest
 		"cpu_millis", spec.Resources.CPUMillis,
 		"pids", spec.Resources.Pids,
 		"network", string(spec.Network.Mode),
+		"broker_aliases", spec.Network.BrokerAliases,
 	)
+	if len(creds) > 0 {
+		s.stageBrokerCredentials(rec.ID, creds)
+	}
 	return &v1.CreateSandboxResponse{Sandbox: toProtoSandbox(rec)}, nil
 }
 
@@ -238,6 +258,14 @@ func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) 
 	if err != nil {
 		return nil, err
 	}
+	// A sandbox that grants broker aliases must have credentials; losing them
+	// (for example across a runner restart) fails closed rather than starting
+	// a sandbox whose granted aliases cannot work.
+	creds := s.takeBrokerCredentials(rec.ID)
+	defer zeroCredentials(creds)
+	if len(rec.Spec.Network.BrokerAliases) > 0 && len(creds) == 0 {
+		return nil, status.Error(codes.FailedPrecondition, "broker credentials are unavailable; recreate the sandbox")
+	}
 	// Record the chosen backend so future RPCs and `inspect` are explicit.
 	if rec.Spec.Backend == "" {
 		rec.Spec.Backend = backend.Name()
@@ -274,10 +302,22 @@ func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) 
 		_ = backend.Destroy(ctx, h)
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	if err := backend.Start(ctx, h); err != nil {
+	var startErr error
+	if len(creds) > 0 {
+		ba, ok := backend.(runtime.BrokerAware)
+		if !ok {
+			_ = backend.Destroy(ctx, h)
+			s.fail(rec, runtime.ReasonRuntimeFailure)
+			return nil, status.Errorf(codes.InvalidArgument, "backend %s does not support credential brokering", backend.Name())
+		}
+		startErr = ba.StartWithCredentials(ctx, h, creds)
+	} else {
+		startErr = backend.Start(ctx, h)
+	}
+	if startErr != nil {
 		_ = backend.Destroy(ctx, h)
 		s.fail(rec, runtime.ReasonRuntimeFailure)
-		return nil, status.Errorf(codes.Internal, "start sandbox: %v", err)
+		return nil, status.Errorf(codes.Internal, "start sandbox: %v", startErr)
 	}
 	s.putHandle(rec.ID, backend, h)
 	if err := s.transition(rec, sandbox.StateRunning, ""); err != nil {
@@ -417,6 +457,7 @@ func (s *Server) destroy(ctx context.Context, id string) error {
 		}
 	}
 	s.delHandle(rec.ID)
+	s.dropBrokerCredentials(rec.ID)
 	if rec.State == sandbox.StateRunning {
 		s.metrics.SandboxRunning.Dec()
 		s.metrics.RunnerSandboxes.Dec()

@@ -12,11 +12,14 @@ import (
 // EgressFile is the network policy decision log inside a sandbox's log dir.
 const EgressFile = "egress.jsonl"
 
-// EgressRecord is one durable restricted-network policy decision.
+// EgressRecord is one durable restricted-network policy decision. Alias is set
+// when the decision was made by the credential broker and is never a secret
+// value.
 type EgressRecord struct {
 	SandboxID string    `json:"sandbox_id"`
 	Host      string    `json:"host,omitempty"`
 	Remote    string    `json:"remote,omitempty"`
+	Alias     string    `json:"alias,omitempty"`
 	Allowed   bool      `json:"allowed"`
 	Reason    string    `json:"reason,omitempty"`
 	Timestamp time.Time `json:"timestamp"`

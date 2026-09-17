@@ -55,6 +55,8 @@ type Config struct {
 	EgressMaxConnections int
 	// EgressIdleTimeout closes connections with no traffic in either direction.
 	EgressIdleTimeout time.Duration
+	// EgressBrokerPort is the gateway port the credential broker listens on.
+	EgressBrokerPort string
 }
 
 // Image mode values for Config.ImagesMode.
@@ -87,6 +89,7 @@ func Default() (Config, error) {
 		ImagesMode:            ImagesAuto,
 		EgressMaxConnections:  128,
 		EgressIdleTimeout:     5 * time.Minute,
+		EgressBrokerPort:      "8080",
 	}
 
 	if os.Geteuid() == 0 {
@@ -157,6 +160,13 @@ func Default() (Config, error) {
 			return Config{}, fmt.Errorf("invalid VORA_EGRESS_IDLE_TIMEOUT %q (want a positive duration)", v)
 		}
 		c.EgressIdleTimeout = d
+	}
+	if v := os.Getenv("VORA_EGRESS_BROKER_PORT"); v != "" {
+		port, err := strconv.Atoi(v)
+		if err != nil || port < 1 || port > 65535 {
+			return Config{}, fmt.Errorf("invalid VORA_EGRESS_BROKER_PORT %q (want a port number)", v)
+		}
+		c.EgressBrokerPort = v
 	}
 
 	if c.DefaultTTL <= 0 {

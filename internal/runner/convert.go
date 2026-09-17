@@ -6,6 +6,7 @@ import (
 	"time"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
+	"github.com/vorash/vora/internal/egress"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/sandbox"
 )
@@ -24,6 +25,7 @@ func specFromProto(p *v1.SandboxSpec, defaultTTL time.Duration) (runtime.Sandbox
 		Network: runtime.NetworkPolicy{
 			Mode:           networkModeFromProto(p.GetNetwork().GetMode()),
 			AllowedDomains: p.GetNetwork().GetAllowedDomains(),
+			BrokerAliases:  p.GetNetwork().GetBrokerAliases(),
 		},
 	}
 	if r := p.GetResources(); r != nil {
@@ -51,6 +53,27 @@ func specFromProto(p *v1.SandboxSpec, defaultTTL time.Duration) (runtime.Sandbox
 		spec.TTL = defaultTTL
 	}
 	return spec, nil
+}
+
+// brokerCredentialsFromProto converts resolved broker credentials into the
+// transient form handed to a backend. Every credential is validated, so a
+// malformed one fails the create instead of silently starting unbrokered.
+func brokerCredentialsFromProto(in []*v1.BrokerCredential) ([]egress.Credential, error) {
+	out := make([]egress.Credential, 0, len(in))
+	for _, c := range in {
+		cred := egress.Credential{
+			Alias:  c.GetAlias(),
+			Host:   c.GetHost(),
+			Scheme: c.GetScheme(),
+			Header: c.GetHeader(),
+			Value:  c.GetValue(),
+		}
+		if err := egress.ValidateCredential(cred); err != nil {
+			return nil, err
+		}
+		out = append(out, cred)
+	}
+	return out, nil
 }
 
 func networkModeFromProto(m v1.NetworkMode) runtime.NetworkMode {
@@ -242,6 +265,7 @@ func egressToProto(records []sandbox.EgressRecord) []*v1.SandboxEgress {
 			SandboxId:       r.SandboxID,
 			Host:            r.Host,
 			Remote:          r.Remote,
+			Alias:           r.Alias,
 			Allowed:         r.Allowed,
 			Reason:          r.Reason,
 			TimestampUnixMs: r.Timestamp.UnixMilli(),

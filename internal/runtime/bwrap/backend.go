@@ -55,6 +55,7 @@ type handle struct {
 	// NetworkRestricted path: a runner-launched sandbox in its own netns.
 	group  *cgroup.Group
 	proxy  *egress.Proxy
+	broker *egress.Broker
 	net    *network.Net
 	cmd    *exec.Cmd
 	done   chan error
@@ -166,16 +167,48 @@ func (b *Backend) Start(ctx context.Context, h runtime.Handle) error {
 		return err
 	}
 	if hd.spec.Network.Mode == runtime.NetworkRestricted {
-		return b.startRestricted(ctx, hd)
+		return b.startRestricted(ctx, hd, nil)
 	}
 	return b.startUnit(ctx, hd)
 }
 
+// StartWithCredentials implements runtime.BrokerAware: it starts a
+// NetworkRestricted sandbox whose broker serves the resolved credentials.
+// Credentials are used only to build the broker and are never stored on the
+// handle or the sandbox spec.
+func (b *Backend) StartWithCredentials(ctx context.Context, h runtime.Handle, creds []egress.Credential) error {
+	hd, err := b.handle(h)
+	if err != nil {
+		return err
+	}
+	if len(creds) == 0 {
+		return fmt.Errorf("%w: no broker credentials", runtime.ErrInvalidSpec)
+	}
+	if hd.spec.Network.Mode != runtime.NetworkRestricted {
+		return fmt.Errorf("%w: credential brokering requires network mode %q", runtime.ErrInvalidSpec, runtime.NetworkRestricted)
+	}
+	return b.startRestricted(ctx, hd, creds)
+}
+
+// sandboxEnv is the environment the workload sees: the spec env plus the
+// broker base URL (a non-secret gateway address) when the sandbox is granted
+// broker aliases, so the workload does not have to guess the gateway.
+func sandboxEnv(spec runtime.SandboxSpec, brokerAddr string) map[string]string {
+	env := make(map[string]string, len(spec.Env)+1)
+	for k, v := range spec.Env {
+		env[k] = v
+	}
+	if len(spec.Network.BrokerAliases) > 0 {
+		env["VORA_BROKER_URL"] = "http://" + brokerAddr
+	}
+	return env
+}
+
 // startRestricted launches a NetworkRestricted sandbox from the runner: it
 // joins the prepared netns via nsenter, applies cgroup limits from the
-// delegated subtree, and starts the sandbox's egress proxy before the agent is
-// reachable.
-func (b *Backend) startRestricted(ctx context.Context, hd *handle) error {
+// delegated subtree, and starts the sandbox's egress proxy (and, when
+// credentials are granted, the broker) before the agent is reachable.
+func (b *Backend) startRestricted(ctx context.Context, hd *handle, creds []egress.Credential) error {
 	ws := hd.spec.Workspace
 	if err := os.MkdirAll(ws.IPCDir, 0o755); err != nil {
 		return fmt.Errorf("bwrap: ipc dir: %w", err)
@@ -208,6 +241,21 @@ func (b *Backend) startRestricted(ctx context.Context, hd *handle) error {
 	}
 	hd.proxy = proxy
 
+	// The broker listens on its own gateway port and is reachable only from
+	// the sandbox side of the veth. It is started before the workload so a
+	// granted alias can never resolve to a dead route.
+	if len(creds) > 0 {
+		broker := egress.NewBroker(hd.id, egress.Policy{AllowedDomains: hd.spec.Network.AllowedDomains}, creds, b.logger, b.egressSink, egress.Limits{
+			MaxConnections: b.cfg.EgressMaxConnections,
+			IdleTimeout:    b.cfg.EgressIdleTimeout,
+		})
+		if err := broker.Listen(sandboxCtx, netns.ServiceAddr(b.cfg.EgressBrokerPort)); err != nil {
+			b.cleanupRestricted(ctx, hd)
+			return err
+		}
+		hd.broker = broker
+	}
+
 	group, err := b.subtree.Create(ctx, hd.id, hd.spec.Resources)
 	if err != nil {
 		b.cleanupRestricted(ctx, hd)
@@ -220,7 +268,7 @@ func (b *Backend) startRestricted(ctx context.Context, hd *handle) error {
 		WorkspaceDir: ws.WorkspaceDir,
 		HomeDir:      ws.HomeDir,
 		IPCDir:       ws.IPCDir,
-		Env:          hd.spec.Env,
+		Env:          sandboxEnv(hd.spec, netns.ServiceAddr(b.cfg.EgressBrokerPort)),
 		ShareNet:     true,
 	})
 	if err != nil {
@@ -266,6 +314,10 @@ func (b *Backend) cleanupRestricted(ctx context.Context, hd *handle) {
 	if hd.proxy != nil {
 		_ = hd.proxy.Close()
 		hd.proxy = nil
+	}
+	if hd.broker != nil {
+		_ = hd.broker.Close()
+		hd.broker = nil
 	}
 	if hd.client != nil {
 		_ = hd.client.Close()

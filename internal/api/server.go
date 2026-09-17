@@ -33,7 +33,7 @@ var errTenantAccess = errors.New("api: sandbox not found")
 
 // RunnerClient is the subset of the runner gRPC client the API uses.
 type RunnerClient interface {
-	CreateSandbox(ctx context.Context, spec *v1.SandboxSpec) (*v1.Sandbox, error)
+	CreateSandboxWithCredentials(ctx context.Context, spec *v1.SandboxSpec, creds []*v1.BrokerCredential) (*v1.Sandbox, error)
 	StartSandbox(ctx context.Context, id string) (*v1.Sandbox, error)
 	GetSandbox(ctx context.Context, id string) (*v1.Sandbox, error)
 	ListSandboxes(ctx context.Context, includeDestroyed bool) ([]*v1.Sandbox, error)
@@ -60,6 +60,9 @@ type Options struct {
 	// Secrets holds brokered credentials. When nil, the secret endpoints
 	// report that credential brokering is not configured.
 	Secrets secret.Store
+	// AllowInsecureBroker permits sending resolved credentials to a runner
+	// over a channel without transport encryption. Off by default.
+	AllowInsecureBroker bool
 	// BootstrapKey, when set, is accepted as an admin API key.
 	BootstrapKey string
 	Now          func() time.Time
@@ -278,7 +281,18 @@ func (s *Server) createSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rc.Close()
 
-	created, err := rc.CreateSandbox(r.Context(), spec)
+	creds, err := s.resolveBrokerSecrets(r.Context(), spec)
+	if err != nil {
+		if errors.Is(err, errSecretsNotConfigured) {
+			writeError(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	defer zeroBrokerSecrets(creds)
+
+	created, err := rc.CreateSandboxWithCredentials(r.Context(), spec, creds)
 	if err != nil {
 		writeGRPCError(w, err)
 		return

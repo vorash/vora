@@ -29,7 +29,7 @@ func TestNetworkRestrictedDNAT(t *testing.T) {
 		}
 	}
 
-	m := network.NewManager(t.TempDir(), network.DefaultProxyPort, nil)
+	m := network.NewManager(t.TempDir(), network.ManagerConfig{ProxyPort: network.DefaultProxyPort}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	n, err := m.Create(ctx, "sbx_net_test")

@@ -83,17 +83,25 @@ func run() error {
 		logger.Warn("VORA_MASTER_KEY not set; credential brokering is disabled")
 	}
 
+	runnerTLS := tlsutil.Config{
+		CertFile: os.Getenv("VORA_RUNNER_TLS_CERT"),
+		KeyFile:  os.Getenv("VORA_RUNNER_TLS_KEY"),
+		CAFile:   os.Getenv("VORA_RUNNER_TLS_CA"),
+	}
+	allowInsecureBroker := os.Getenv("VORA_ALLOW_INSECURE_BROKER") == "1"
+	if secrets != nil && !runnerTLS.Enabled() && !allowInsecureBroker {
+		logger.Warn("credential brokering is enabled but the API-to-runner channel has no TLS; brokered creates will be refused",
+			"hint", "set VORA_RUNNER_TLS_{CERT,KEY,CA} or VORA_ALLOW_INSECURE_BROKER=1")
+	}
+
 	server := api.New(api.Options{
-		Store:        store,
-		Logger:       logger,
-		JoinToken:    os.Getenv("VORA_API_JOIN_TOKEN"),
-		BootstrapKey: os.Getenv("VORA_API_BOOTSTRAP_KEY"),
-		Secrets:      secrets,
-		RunnerTLS: tlsutil.Config{
-			CertFile: os.Getenv("VORA_RUNNER_TLS_CERT"),
-			KeyFile:  os.Getenv("VORA_RUNNER_TLS_KEY"),
-			CAFile:   os.Getenv("VORA_RUNNER_TLS_CA"),
-		},
+		Store:               store,
+		Logger:              logger,
+		JoinToken:           os.Getenv("VORA_API_JOIN_TOKEN"),
+		BootstrapKey:        os.Getenv("VORA_API_BOOTSTRAP_KEY"),
+		Secrets:             secrets,
+		AllowInsecureBroker: allowInsecureBroker,
+		RunnerTLS:           runnerTLS,
 	})
 	defer server.Close()
 

@@ -73,11 +73,13 @@ func (p Policy) Allows(host string) bool {
 	return false
 }
 
-// Event is one egress decision, emitted for the audit trail and metrics.
+// Event is one egress decision, emitted for the audit trail and metrics. Alias
+// is set for credential-brokered decisions and is never a secret value.
 type Event struct {
 	SandboxID string
 	Host      string
 	Remote    string
+	Alias     string
 	Allowed   bool
 	Reason    string
 	Time      time.Time
