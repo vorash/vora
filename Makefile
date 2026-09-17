@@ -24,6 +24,21 @@ binaries: ## Build the vora binaries into bin/
 	mkdir -p $(BIN_DIR)
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) build -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/ ./cmd/...
 
+.PHONY: release-artifacts
+release-artifacts: ## Build dist/ artifacts for the current version (binaries, tarball, checksums)
+	./scripts/release.sh --version "$(VERSION)"
+
+.PHONY: push-images
+push-images: ## Build and publish sandbox images (TAG=v0.4.0 [REGISTRY=...] [LOAD=1] [LATEST=1])
+	./scripts/push-images.sh --tag "$(TAG)" \
+		$(if $(REGISTRY),--registry "$(REGISTRY)",) \
+		$(if $(filter 1,$(LOAD)),--load,) \
+		$(if $(filter 1,$(LATEST)),--latest,)
+
+.PHONY: install-system
+install-system: ## Install dist/ binaries and system units on this host (needs root; API=1 for vora-api)
+	./scripts/install-system.sh --from dist $(if $(filter 1,$(API)),--api,)
+
 .PHONY: install-rootless
 install-rootless: binaries ## Install and start the rootlesskit-wrapped vora-runner user service
 	mkdir -p $(HOME)/.local/bin

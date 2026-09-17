@@ -1,0 +1,36 @@
+# Vora control plane (vora-api) as a system service.
+#
+# Installed as /etc/systemd/system/vora-api.service by the vora-ansible
+# `vora_api` role, or by scripts/install-system.sh --api.
+#
+# Unlike the runner, the API needs no namespaces or mounts, so it gets ordinary
+# hardening. It holds the secrets master key and the API DSN: /etc/vora/api.env
+# must be 0600 root:root.
+[Unit]
+Description=Vora control plane (vora-api)
+Documentation=https://github.com/vorash/vora
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/vora/api.env
+ExecStart=/usr/local/bin/vora-api
+Restart=on-failure
+RestartSec=2
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+# The registry gRPC and HTTP listeners are plain TCP; no extra capabilities.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,41 @@
+# Vora runner as a system service.
+#
+# Installed as /etc/systemd/system/vora-runner.service by the vora-ansible
+# `vora_runner` role, or by scripts/install-system.sh on a hand-converged host.
+#
+# Delegate=yes is required: the runner creates a delegated cgroup v2 subtree to
+# enforce sandbox cpu/memory/pids limits (ADR 006, ADR 012).
+#
+# The usual systemd hardening directives (ProtectSystem, PrivateUsers,
+# RestrictNamespaces, NoNewPrivileges, ProtectHome) are deliberately absent:
+# the runner must create namespaces, mount filesystems and write its own cgroup
+# to run a sandbox. Sandbox isolation comes from Vora, not from this unit.
+[Unit]
+Description=Vora runner
+Documentation=https://github.com/vorash/vora
+After=network-online.target containerd.service
+Wants=network-online.target containerd.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/vora/runner.env
+ExecStart=/usr/local/bin/vora-runner
+Restart=on-failure
+RestartSec=2
+TimeoutSec=0
+KillMode=mixed
+Delegate=yes
+
+# Sandboxes carry their own pids/memory limits; the runner is long-lived and
+# manages many of them, so it must not be capped by the unit.
+TasksMax=infinity
+LimitNOFILE=1048576
+
+# The control socket is expected at /var/run/vora/runner.sock.
+RuntimeDirectory=vora
+RuntimeDirectoryMode=0750
+StateDirectory=vora
+StateDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

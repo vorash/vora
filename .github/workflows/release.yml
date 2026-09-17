@@ -1,0 +1,121 @@
+name: Release
+
+# Cuts a release and publishes the artifacts a host needs:
+#   * static linux/amd64 binaries (vora, vora-runner, vora-init, vora-api) plus
+#     SHA256SUMS and a tarball containing the systemd units, attached to the
+#     GitHub release;
+#   * sandbox images pushed to GHCR as ghcr.io/<owner>/vora-<name>:<tag>, which
+#     the runner pulls by reference (ADR 009).
+#
+# Triggered by a version tag, or manually for an existing tag (useful when the
+# tag predates this workflow, e.g. v0.4.0).
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing tag to build and publish (e.g. v0.4.0)
+        required: true
+        type: string
+      skip_images:
+        description: Only publish the binaries (skip the GHCR images job)
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Resolve the version to build
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME}"
+          fi
+          case "$version" in
+            v*) ;;
+            *) echo "error: version '$version' must start with 'v'" >&2; exit 1 ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "building $version"
+
+  binaries:
+    name: binaries + release
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.version }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build release artifacts
+        run: ./scripts/release.sh --version "${{ needs.resolve.outputs.version }}"
+
+      - name: Verify checksums and the reported version
+        run: |
+          cd dist
+          sha256sum --check SHA256SUMS
+          ./vora version
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "release $VERSION exists; uploading assets with --clobber"
+            gh release upload "$VERSION" dist/vora dist/vora-runner dist/vora-init \
+              dist/vora-api dist/SHA256SUMS "dist/vora_${VERSION}_linux_amd64.tar.gz" --clobber
+          else
+            gh release create "$VERSION" \
+              dist/vora dist/vora-runner dist/vora-init dist/vora-api \
+              dist/SHA256SUMS "dist/vora_${VERSION}_linux_amd64.tar.gz" \
+              --title "Vora $VERSION" --generate-notes --verify-tag
+          fi
+
+  images:
+    name: sandbox images
+    needs: resolve
+    if: ${{ github.event_name == 'push' || inputs.skip_images != true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.version }}
+
+      - name: Publish sandbox images to GHCR
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          ./scripts/push-images.sh --tag "$VERSION" --registry "ghcr.io/${{ github.repository_owner }}" --login
+
+      - name: Warn about package visibility
+        run: |
+          echo "Images are pushed as ghcr.io/${{ github.repository_owner }}/vora-{base,python,node}:${{ needs.resolve.outputs.version }}."
+          echo "If they are private, every runner needs registry credentials to pull them;"
+          echo "record the printed digests in vora-ansible's group_vars/all/all.yml."
