@@ -85,7 +85,16 @@ test-broker: ## Run the credential-broker end-to-end test under rootlesskit
 		--state-dir="$${XDG_RUNTIME_DIR}/vora-rootlesskit-broker" \
 		--net=slirp4netns --mtu=65520 --disable-host-loopback \
 		--copy-up=/etc --copy-up=/run --copy-up=/var/lib --propagation=rslave \
-		bash -c 'cd "$(CURDIR)" && $(GO) test -tags=integration -run TestBrokerEndToEnd ./tests/integration/...'
+		bash -c 'cd "$(CURDIR)" && $(GO) test -tags=integration -run TestBroker ./tests/integration/...'
+
+.PHONY: test-dns
+test-dns: ## Run the gateway-resolver test under rootlesskit
+	@command -v rootlesskit >/dev/null 2>&1 || { echo "rootlesskit not installed; skipped"; exit 0; }
+	rootlesskit \
+		--state-dir="$${XDG_RUNTIME_DIR}/vora-rootlesskit-dns" \
+		--net=slirp4netns --mtu=65520 --disable-host-loopback \
+		--copy-up=/etc --copy-up=/run --copy-up=/var/lib --propagation=rslave \
+		bash -c 'cd "$(CURDIR)" && $(GO) test -tags=integration -run TestDNSThroughNetns ./tests/integration/...'
 
 .PHONY: bench
 bench: ## Run the benchmark harness

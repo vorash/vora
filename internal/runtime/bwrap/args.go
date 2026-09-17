@@ -29,6 +29,10 @@ type BuildOptions struct {
 	// The caller must have placed the process in a prepared netns (see the
 	// NetworkRestricted path and docs/adr/012-egress-gateway.md).
 	ShareNet bool
+	// ResolvConf is a host file bound read-only over /etc/resolv.conf so the
+	// sandbox resolves names through the gateway resolver. The image must
+	// provide the mount point.
+	ResolvConf string
 }
 
 // Args builds the bubblewrap argv for a sandbox. It is pure so it can be
@@ -74,6 +78,13 @@ func Args(opts BuildOptions) ([]string, error) {
 	argv = append(argv,
 		// Read-only shared root fs.
 		"--ro-bind", opts.RootfsDir, "/",
+	)
+	if opts.ResolvConf != "" {
+		// Point the sandbox at the gateway resolver (ADR 012). The image must
+		// carry /etc/resolv.conf; the caller checks that before starting.
+		argv = append(argv, "--ro-bind", opts.ResolvConf, "/etc/resolv.conf")
+	}
+	argv = append(argv,
 		// Per-sandbox writable mounts.
 		"--bind", opts.WorkspaceDir, "/workspace",
 		"--bind", opts.HomeDir, "/root",

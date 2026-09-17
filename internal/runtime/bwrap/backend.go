@@ -56,6 +56,7 @@ type handle struct {
 	group  *cgroup.Group
 	proxy  *egress.Proxy
 	broker *egress.Broker
+	dns    *egress.DNS
 	net    *network.Net
 	cmd    *exec.Cmd
 	done   chan error
@@ -204,6 +205,23 @@ func sandboxEnv(spec runtime.SandboxSpec, brokerAddr string) map[string]string {
 	return env
 }
 
+// writeResolvConf points the sandbox at the gateway resolver and returns the
+// host path to bind over /etc/resolv.conf. The image must provide that file as
+// the bind target; a missing one fails the start loudly rather than leaving the
+// sandbox unable to resolve names.
+func writeResolvConf(spec runtime.SandboxSpec, netns *network.Net) (string, error) {
+	imageFile := filepath.Join(spec.Workspace.RootfsDir, "etc", "resolv.conf")
+	if _, err := os.Stat(imageFile); err != nil {
+		return "", fmt.Errorf("bwrap: image %q must provide /etc/resolv.conf for NetworkRestricted: %w", spec.Image, err)
+	}
+	path := filepath.Join(spec.Workspace.RootDir, "resolv.conf")
+	content := fmt.Sprintf("# Managed by Vora: the sandbox gateway is the only resolver (ADR 012).\nnameserver %s\noptions timeout:2 attempts:2\n", netns.GatewayIP)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return "", fmt.Errorf("bwrap: write resolv.conf: %w", err)
+	}
+	return path, nil
+}
+
 // startRestricted launches a NetworkRestricted sandbox from the runner: it
 // joins the prepared netns via nsenter, applies cgroup limits from the
 // delegated subtree, and starts the sandbox's egress proxy (and, when
@@ -256,6 +274,23 @@ func (b *Backend) startRestricted(ctx context.Context, hd *handle, creds []egres
 		hd.broker = broker
 	}
 
+	// The sandbox's only resolver is on the gateway. It is started before the
+	// workload so name resolution cannot hit a dead route, and the sandbox is
+	// pointed at it through a bound resolv.conf.
+	dns := egress.NewDNS(hd.id, egress.Policy{AllowedDomains: hd.spec.Network.AllowedDomains}, b.logger, b.egressSink, egress.Limits{
+		MaxConnections: b.cfg.EgressMaxConnections,
+	})
+	if err := dns.Listen(sandboxCtx, netns.ServiceAddr(network.DefaultDNSPort)); err != nil {
+		b.cleanupRestricted(ctx, hd)
+		return err
+	}
+	hd.dns = dns
+	resolvConf, err := writeResolvConf(hd.spec, netns)
+	if err != nil {
+		b.cleanupRestricted(ctx, hd)
+		return err
+	}
+
 	group, err := b.subtree.Create(ctx, hd.id, hd.spec.Resources)
 	if err != nil {
 		b.cleanupRestricted(ctx, hd)
@@ -270,6 +305,7 @@ func (b *Backend) startRestricted(ctx context.Context, hd *handle, creds []egres
 		IPCDir:       ws.IPCDir,
 		Env:          sandboxEnv(hd.spec, netns.ServiceAddr(b.cfg.EgressBrokerPort)),
 		ShareNet:     true,
+		ResolvConf:   resolvConf,
 	})
 	if err != nil {
 		b.cleanupRestricted(ctx, hd)
@@ -318,6 +354,10 @@ func (b *Backend) cleanupRestricted(ctx context.Context, hd *handle) {
 	if hd.broker != nil {
 		_ = hd.broker.Close()
 		hd.broker = nil
+	}
+	if hd.dns != nil {
+		_ = hd.dns.Close()
+		hd.dns = nil
 	}
 	if hd.client != nil {
 		_ = hd.client.Close()

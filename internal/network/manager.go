@@ -31,10 +31,13 @@ const (
 	DefaultProxyPort = "8443"
 	// DefaultBrokerPort is the port the credential broker listens on (ADR 013).
 	DefaultBrokerPort = "8080"
-	ifacePrefix       = "vora-h"
-	peerPrefix        = "vora-s"
-	holderCmd         = "sleep"
-	holderArg         = "infinity"
+	// DefaultDNSPort is the port the sandbox resolver listens on. resolv.conf
+	// cannot carry a port, so this is fixed.
+	DefaultDNSPort = "53"
+	ifacePrefix    = "vora-h"
+	peerPrefix     = "vora-s"
+	holderCmd      = "sleep"
+	holderArg      = "infinity"
 )
 
 // Net describes one prepared sandbox network.
@@ -67,12 +70,19 @@ type ManagerConfig struct {
 	BrokerPort string
 }
 
+// servicePorts are the gateway endpoints a sandbox netns may reach. Everything
+// else, including non-TCP protocols, is dropped.
+type servicePorts struct {
+	proxy  string
+	broker string
+	dns    string
+}
+
 // Manager owns the per-sandbox networks.
 type Manager struct {
-	logger     *slog.Logger
-	proxyPort  string
-	brokerPort string
-	stateDir   string
+	logger   *slog.Logger
+	ports    servicePorts
+	stateDir string
 
 	mu   sync.Mutex
 	next uint32
@@ -92,11 +102,10 @@ func NewManager(stateDir string, mc ManagerConfig, logger *slog.Logger) *Manager
 		mc.BrokerPort = DefaultBrokerPort
 	}
 	m := &Manager{
-		logger:     logger,
-		proxyPort:  mc.ProxyPort,
-		brokerPort: mc.BrokerPort,
-		stateDir:   filepath.Join(stateDir, "netns"),
-		nets:       map[string]*Net{},
+		logger:   logger,
+		ports:    servicePorts{proxy: mc.ProxyPort, broker: mc.BrokerPort, dns: DefaultDNSPort},
+		stateDir: filepath.Join(stateDir, "netns"),
+		nets:     map[string]*Net{},
 	}
 	_ = os.MkdirAll(m.stateDir, 0o755)
 	m.reapLeftovers()
@@ -122,7 +131,7 @@ func (m *Manager) Create(ctx context.Context, id string) (*Net, error) {
 		ID:        id,
 		GatewayIP: gw,
 		SandboxIP: sb,
-		ProxyPort: m.proxyPort,
+		ProxyPort: m.ports.proxy,
 		iface:     ifacePrefix + strconv.FormatUint(uint64(idx), 10),
 	}
 
@@ -200,7 +209,7 @@ func (m *Manager) setup(ctx context.Context, n *Net) error {
 			return err
 		}
 	}
-	rules := nftRuleset(n.GatewayIP, m.proxyPort, m.brokerPort)
+	rules := nftRuleset(n.GatewayIP, m.ports)
 	cmd := exec.CommandContext(ctx, "nsenter", "-t", pid, "-n", "nft", "-f", "-")
 	cmd.Stdin = strings.NewReader(rules)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -317,24 +326,32 @@ func subnetFor(idx uint32) (gateway, sandbox string) {
 	return gw.String(), sb.String()
 }
 
-// nftRuleset transparently redirects non-loopback TCP to the egress proxy,
-// then drops every packet that is not loopback traffic or addressed to one of
-// the accepted gateway service ports. The filter is the enforcement boundary;
-// DNAT alone is insufficient because direct gateway and non-TCP traffic would
-// bypass it.
-func nftRuleset(gateway, proxyPort string, servicePorts ...string) string {
-	var accept strings.Builder
-	for _, port := range append([]string{proxyPort}, servicePorts...) {
-		if port == "" {
-			continue
-		}
-		fmt.Fprintf(&accept, "\t\tip daddr %s meta l4proto tcp th dport %s accept\n", gateway, port)
+// nftRuleset transparently redirects non-loopback TCP to the egress proxy and
+// non-loopback UDP/53 to the sandbox resolver, then drops every packet that is
+// not loopback traffic or addressed to one of the accepted gateway service
+// ports. The filter is the enforcement boundary; DNAT alone is insufficient
+// because direct gateway and non-TCP traffic would bypass it.
+func nftRuleset(gateway string, ports servicePorts) string {
+	var nat, accept strings.Builder
+	fmt.Fprintf(&nat, "\t\toifname != \"lo\" ip daddr != %s meta l4proto tcp dnat to %s:%s\n", gateway, gateway, ports.proxy)
+	if ports.dns != "" {
+		// Even a workload with a hardcoded resolver gets fail-closed answers
+		// from the gateway instead of a silent drop.
+		fmt.Fprintf(&nat, "\t\toifname != \"lo\" ip daddr != %s meta l4proto udp th dport %s dnat to %s:%s\n",
+			gateway, ports.dns, gateway, ports.dns)
+	}
+	fmt.Fprintf(&accept, "\t\tip daddr %s meta l4proto tcp th dport %s accept\n", gateway, ports.proxy)
+	if ports.broker != "" {
+		fmt.Fprintf(&accept, "\t\tip daddr %s meta l4proto tcp th dport %s accept\n", gateway, ports.broker)
+	}
+	if ports.dns != "" {
+		fmt.Fprintf(&accept, "\t\tip daddr %s meta l4proto udp th dport %s accept\n", gateway, ports.dns)
+		fmt.Fprintf(&accept, "\t\tip daddr %s meta l4proto tcp th dport %s accept\n", gateway, ports.dns)
 	}
 	return fmt.Sprintf(`table ip vora_nat {
 	chain out {
 		type nat hook output priority -100; policy accept;
-		oifname != "lo" ip daddr != %s meta l4proto tcp dnat to %s:%s
-	}
+%s	}
 }
 table inet vora_filter {
 	chain out {
@@ -342,7 +359,7 @@ table inet vora_filter {
 		oifname "lo" accept
 %s	}
 }
-`, gateway, gateway, proxyPort, accept.String())
+`, nat.String(), accept.String())
 }
 
 func run(ctx context.Context, name string, args ...string) error {
