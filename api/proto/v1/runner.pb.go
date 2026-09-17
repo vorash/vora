@@ -22,8 +22,12 @@ const (
 )
 
 type CreateSandboxRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Spec          *SandboxSpec           `protobuf:"bytes,1,opt,name=spec,proto3" json:"spec,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Spec  *SandboxSpec           `protobuf:"bytes,1,opt,name=spec,proto3" json:"spec,omitempty"`
+	// broker_secrets are the resolved credentials for spec.network.broker_aliases.
+	// They are consumed to build the sandbox's broker and are deliberately not
+	// part of SandboxSpec so they can never be persisted or returned.
+	BrokerSecrets []*BrokerCredential `protobuf:"bytes,2,rep,name=broker_secrets,json=brokerSecrets,proto3" json:"broker_secrets,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -61,6 +65,13 @@ func (*CreateSandboxRequest) Descriptor() ([]byte, []int) {
 func (x *CreateSandboxRequest) GetSpec() *SandboxSpec {
 	if x != nil {
 		return x.Spec
+	}
+	return nil
+}
+
+func (x *CreateSandboxRequest) GetBrokerSecrets() []*BrokerCredential {
+	if x != nil {
+		return x.BrokerSecrets
 	}
 	return nil
 }
@@ -944,7 +955,8 @@ func (x *GetSandboxEgressResponse) GetRecords() []*SandboxEgress {
 	return nil
 }
 
-// SandboxEgress is one restricted-network policy decision.
+// SandboxEgress is one restricted-network policy decision. alias is set for
+// credential-broker decisions and is never a secret value.
 type SandboxEgress struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	SandboxId       string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
@@ -953,6 +965,7 @@ type SandboxEgress struct {
 	Allowed         bool                   `protobuf:"varint,4,opt,name=allowed,proto3" json:"allowed,omitempty"`
 	Reason          string                 `protobuf:"bytes,5,opt,name=reason,proto3" json:"reason,omitempty"`
 	TimestampUnixMs int64                  `protobuf:"varint,6,opt,name=timestamp_unix_ms,json=timestampUnixMs,proto3" json:"timestamp_unix_ms,omitempty"`
+	Alias           string                 `protobuf:"bytes,7,opt,name=alias,proto3" json:"alias,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -1027,6 +1040,13 @@ func (x *SandboxEgress) GetTimestampUnixMs() int64 {
 		return x.TimestampUnixMs
 	}
 	return 0
+}
+
+func (x *SandboxEgress) GetAlias() string {
+	if x != nil {
+		return x.Alias
+	}
+	return ""
 }
 
 type DestroySandboxRequest struct {
@@ -1113,9 +1133,10 @@ var File_api_proto_v1_runner_proto protoreflect.FileDescriptor
 
 const file_api_proto_v1_runner_proto_rawDesc = "" +
 	"\n" +
-	"\x19api/proto/v1/runner.proto\x12\avora.v1\x1a\x19api/proto/v1/common.proto\"@\n" +
+	"\x19api/proto/v1/runner.proto\x12\avora.v1\x1a\x19api/proto/v1/common.proto\"\x82\x01\n" +
 	"\x14CreateSandboxRequest\x12(\n" +
-	"\x04spec\x18\x01 \x01(\v2\x14.vora.v1.SandboxSpecR\x04spec\"C\n" +
+	"\x04spec\x18\x01 \x01(\v2\x14.vora.v1.SandboxSpecR\x04spec\x12@\n" +
+	"\x0ebroker_secrets\x18\x02 \x03(\v2\x19.vora.v1.BrokerCredentialR\rbrokerSecrets\"C\n" +
 	"\x15CreateSandboxResponse\x12*\n" +
 	"\asandbox\x18\x01 \x01(\v2\x10.vora.v1.SandboxR\asandbox\"2\n" +
 	"\x11GetSandboxRequest\x12\x1d\n" +
@@ -1175,7 +1196,7 @@ const file_api_proto_v1_runner_proto_rawDesc = "" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\"L\n" +
 	"\x18GetSandboxEgressResponse\x120\n" +
-	"\arecords\x18\x01 \x03(\v2\x16.vora.v1.SandboxEgressR\arecords\"\xb8\x01\n" +
+	"\arecords\x18\x01 \x03(\v2\x16.vora.v1.SandboxEgressR\arecords\"\xce\x01\n" +
 	"\rSandboxEgress\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12\x12\n" +
@@ -1183,7 +1204,8 @@ const file_api_proto_v1_runner_proto_rawDesc = "" +
 	"\x06remote\x18\x03 \x01(\tR\x06remote\x12\x18\n" +
 	"\aallowed\x18\x04 \x01(\bR\aallowed\x12\x16\n" +
 	"\x06reason\x18\x05 \x01(\tR\x06reason\x12*\n" +
-	"\x11timestamp_unix_ms\x18\x06 \x01(\x03R\x0ftimestampUnixMs\"6\n" +
+	"\x11timestamp_unix_ms\x18\x06 \x01(\x03R\x0ftimestampUnixMs\x12\x14\n" +
+	"\x05alias\x18\a \x01(\tR\x05alias\"6\n" +
 	"\x15DestroySandboxRequest\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\"\x18\n" +
@@ -1238,50 +1260,52 @@ var file_api_proto_v1_runner_proto_goTypes = []any{
 	(*DestroySandboxRequest)(nil),    // 19: vora.v1.DestroySandboxRequest
 	(*DestroySandboxResponse)(nil),   // 20: vora.v1.DestroySandboxResponse
 	(*SandboxSpec)(nil),              // 21: vora.v1.SandboxSpec
-	(*Sandbox)(nil),                  // 22: vora.v1.Sandbox
-	(SandboxState)(0),                // 23: vora.v1.SandboxState
-	(*ExecRequest)(nil),              // 24: vora.v1.ExecRequest
-	(ExitReason)(0),                  // 25: vora.v1.ExitReason
-	(*ExecChunk)(nil),                // 26: vora.v1.ExecChunk
-	(*Stats)(nil),                    // 27: vora.v1.Stats
+	(*BrokerCredential)(nil),         // 22: vora.v1.BrokerCredential
+	(*Sandbox)(nil),                  // 23: vora.v1.Sandbox
+	(SandboxState)(0),                // 24: vora.v1.SandboxState
+	(*ExecRequest)(nil),              // 25: vora.v1.ExecRequest
+	(ExitReason)(0),                  // 26: vora.v1.ExitReason
+	(*ExecChunk)(nil),                // 27: vora.v1.ExecChunk
+	(*Stats)(nil),                    // 28: vora.v1.Stats
 }
 var file_api_proto_v1_runner_proto_depIdxs = []int32{
 	21, // 0: vora.v1.CreateSandboxRequest.spec:type_name -> vora.v1.SandboxSpec
-	22, // 1: vora.v1.CreateSandboxResponse.sandbox:type_name -> vora.v1.Sandbox
-	23, // 2: vora.v1.ListSandboxesRequest.state:type_name -> vora.v1.SandboxState
-	22, // 3: vora.v1.ListSandboxesResponse.sandboxes:type_name -> vora.v1.Sandbox
-	24, // 4: vora.v1.ExecSandboxRequest.exec:type_name -> vora.v1.ExecRequest
-	12, // 5: vora.v1.GetSandboxEventsResponse.events:type_name -> vora.v1.SandboxEvent
-	15, // 6: vora.v1.GetSandboxExecsResponse.execs:type_name -> vora.v1.SandboxExec
-	25, // 7: vora.v1.SandboxExec.reason:type_name -> vora.v1.ExitReason
-	18, // 8: vora.v1.GetSandboxEgressResponse.records:type_name -> vora.v1.SandboxEgress
-	0,  // 9: vora.v1.RunnerService.CreateSandbox:input_type -> vora.v1.CreateSandboxRequest
-	2,  // 10: vora.v1.RunnerService.GetSandbox:input_type -> vora.v1.GetSandboxRequest
-	3,  // 11: vora.v1.RunnerService.ListSandboxes:input_type -> vora.v1.ListSandboxesRequest
-	5,  // 12: vora.v1.RunnerService.StartSandbox:input_type -> vora.v1.StartSandboxRequest
-	6,  // 13: vora.v1.RunnerService.ExecSandbox:input_type -> vora.v1.ExecSandboxRequest
-	7,  // 14: vora.v1.RunnerService.SignalSandbox:input_type -> vora.v1.SignalSandboxRequest
-	9,  // 15: vora.v1.RunnerService.StatsSandbox:input_type -> vora.v1.StatsSandboxRequest
-	10, // 16: vora.v1.RunnerService.GetSandboxEvents:input_type -> vora.v1.GetSandboxEventsRequest
-	13, // 17: vora.v1.RunnerService.GetSandboxExecs:input_type -> vora.v1.GetSandboxExecsRequest
-	16, // 18: vora.v1.RunnerService.GetSandboxEgress:input_type -> vora.v1.GetSandboxEgressRequest
-	19, // 19: vora.v1.RunnerService.DestroySandbox:input_type -> vora.v1.DestroySandboxRequest
-	1,  // 20: vora.v1.RunnerService.CreateSandbox:output_type -> vora.v1.CreateSandboxResponse
-	22, // 21: vora.v1.RunnerService.GetSandbox:output_type -> vora.v1.Sandbox
-	4,  // 22: vora.v1.RunnerService.ListSandboxes:output_type -> vora.v1.ListSandboxesResponse
-	22, // 23: vora.v1.RunnerService.StartSandbox:output_type -> vora.v1.Sandbox
-	26, // 24: vora.v1.RunnerService.ExecSandbox:output_type -> vora.v1.ExecChunk
-	8,  // 25: vora.v1.RunnerService.SignalSandbox:output_type -> vora.v1.SignalSandboxResponse
-	27, // 26: vora.v1.RunnerService.StatsSandbox:output_type -> vora.v1.Stats
-	11, // 27: vora.v1.RunnerService.GetSandboxEvents:output_type -> vora.v1.GetSandboxEventsResponse
-	14, // 28: vora.v1.RunnerService.GetSandboxExecs:output_type -> vora.v1.GetSandboxExecsResponse
-	17, // 29: vora.v1.RunnerService.GetSandboxEgress:output_type -> vora.v1.GetSandboxEgressResponse
-	20, // 30: vora.v1.RunnerService.DestroySandbox:output_type -> vora.v1.DestroySandboxResponse
-	20, // [20:31] is the sub-list for method output_type
-	9,  // [9:20] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	22, // 1: vora.v1.CreateSandboxRequest.broker_secrets:type_name -> vora.v1.BrokerCredential
+	23, // 2: vora.v1.CreateSandboxResponse.sandbox:type_name -> vora.v1.Sandbox
+	24, // 3: vora.v1.ListSandboxesRequest.state:type_name -> vora.v1.SandboxState
+	23, // 4: vora.v1.ListSandboxesResponse.sandboxes:type_name -> vora.v1.Sandbox
+	25, // 5: vora.v1.ExecSandboxRequest.exec:type_name -> vora.v1.ExecRequest
+	12, // 6: vora.v1.GetSandboxEventsResponse.events:type_name -> vora.v1.SandboxEvent
+	15, // 7: vora.v1.GetSandboxExecsResponse.execs:type_name -> vora.v1.SandboxExec
+	26, // 8: vora.v1.SandboxExec.reason:type_name -> vora.v1.ExitReason
+	18, // 9: vora.v1.GetSandboxEgressResponse.records:type_name -> vora.v1.SandboxEgress
+	0,  // 10: vora.v1.RunnerService.CreateSandbox:input_type -> vora.v1.CreateSandboxRequest
+	2,  // 11: vora.v1.RunnerService.GetSandbox:input_type -> vora.v1.GetSandboxRequest
+	3,  // 12: vora.v1.RunnerService.ListSandboxes:input_type -> vora.v1.ListSandboxesRequest
+	5,  // 13: vora.v1.RunnerService.StartSandbox:input_type -> vora.v1.StartSandboxRequest
+	6,  // 14: vora.v1.RunnerService.ExecSandbox:input_type -> vora.v1.ExecSandboxRequest
+	7,  // 15: vora.v1.RunnerService.SignalSandbox:input_type -> vora.v1.SignalSandboxRequest
+	9,  // 16: vora.v1.RunnerService.StatsSandbox:input_type -> vora.v1.StatsSandboxRequest
+	10, // 17: vora.v1.RunnerService.GetSandboxEvents:input_type -> vora.v1.GetSandboxEventsRequest
+	13, // 18: vora.v1.RunnerService.GetSandboxExecs:input_type -> vora.v1.GetSandboxExecsRequest
+	16, // 19: vora.v1.RunnerService.GetSandboxEgress:input_type -> vora.v1.GetSandboxEgressRequest
+	19, // 20: vora.v1.RunnerService.DestroySandbox:input_type -> vora.v1.DestroySandboxRequest
+	1,  // 21: vora.v1.RunnerService.CreateSandbox:output_type -> vora.v1.CreateSandboxResponse
+	23, // 22: vora.v1.RunnerService.GetSandbox:output_type -> vora.v1.Sandbox
+	4,  // 23: vora.v1.RunnerService.ListSandboxes:output_type -> vora.v1.ListSandboxesResponse
+	23, // 24: vora.v1.RunnerService.StartSandbox:output_type -> vora.v1.Sandbox
+	27, // 25: vora.v1.RunnerService.ExecSandbox:output_type -> vora.v1.ExecChunk
+	8,  // 26: vora.v1.RunnerService.SignalSandbox:output_type -> vora.v1.SignalSandboxResponse
+	28, // 27: vora.v1.RunnerService.StatsSandbox:output_type -> vora.v1.Stats
+	11, // 28: vora.v1.RunnerService.GetSandboxEvents:output_type -> vora.v1.GetSandboxEventsResponse
+	14, // 29: vora.v1.RunnerService.GetSandboxExecs:output_type -> vora.v1.GetSandboxExecsResponse
+	17, // 30: vora.v1.RunnerService.GetSandboxEgress:output_type -> vora.v1.GetSandboxEgressResponse
+	20, // 31: vora.v1.RunnerService.DestroySandbox:output_type -> vora.v1.DestroySandboxResponse
+	21, // [21:32] is the sub-list for method output_type
+	10, // [10:21] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_api_proto_v1_runner_proto_init() }

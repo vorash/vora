@@ -29,6 +29,7 @@ func (a *app) sandboxCreateCmd() *cobra.Command {
 		env                              []string
 		tenant, agent                    string
 		allowedDomains                   []string
+		brokers                          []string
 	)
 	cmd := &cobra.Command{
 		Use:   "create",
@@ -45,6 +46,14 @@ func (a *app) sandboxCreateCmd() *cobra.Command {
 			mode, err := parseNetwork(network)
 			if err != nil {
 				return err
+			}
+			if len(brokers) > 0 {
+				if a.api == "" {
+					return fmt.Errorf("--broker requires --api: brokered credentials live in the control plane")
+				}
+				if mode != v1.NetworkMode_NETWORK_RESTRICTED {
+					return fmt.Errorf("--broker requires --network restricted")
+				}
 			}
 			ttlDur, err := parseDuration(ttl)
 			if err != nil {
@@ -64,7 +73,7 @@ func (a *app) sandboxCreateCmd() *cobra.Command {
 				TenantId:   tenant,
 				AgentId:    agent,
 				Resources:  &v1.ResourceLimits{CpuMillis: cpuMillis, MemoryBytes: memBytes, Pids: pids},
-				Network:    &v1.NetworkPolicy{Mode: mode, AllowedDomains: allowedDomains},
+				Network:    &v1.NetworkPolicy{Mode: mode, AllowedDomains: allowedDomains, BrokerAliases: brokers},
 				Env:        env,
 				TtlSeconds: int64(ttlDur / time.Second),
 			}
@@ -90,6 +99,7 @@ func (a *app) sandboxCreateCmd() *cobra.Command {
 	cmd.Flags().Int64Var(&pids, "pids", 128, "process limit")
 	cmd.Flags().StringVar(&network, "network", "none", "network mode: none or restricted")
 	cmd.Flags().StringArrayVar(&allowedDomains, "allow-domain", nil, "egress allowlist domain for --network restricted (repeatable, e.g. example.com)")
+	cmd.Flags().StringArrayVar(&brokers, "broker", nil, "credential alias to allow through the broker (repeatable; requires --api and --network restricted)")
 	cmd.Flags().StringVar(&ttl, "ttl", "30m", "sandbox time to live")
 	cmd.Flags().StringArrayVar(&env, "env", nil, "environment variable KEY=VALUE (repeatable)")
 	cmd.Flags().StringVar(&tenant, "tenant", "", "tenant id")
@@ -362,6 +372,10 @@ func (a *app) logsCmd() *cobra.Command {
 					reason := e.GetReason()
 					if reason != "" {
 						reason = " (" + reason + ")"
+					}
+					if alias := e.GetAlias(); alias != "" {
+						fmt.Printf("%s  %s alias=%s %s %s%s\n", ts, decision, alias, e.GetHost(), e.GetRemote(), reason)
+						continue
 					}
 					fmt.Printf("%s  %s %s %s%s\n", ts, decision, e.GetHost(), e.GetRemote(), reason)
 				}

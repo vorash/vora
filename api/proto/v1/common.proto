@@ -52,6 +52,21 @@ message ResourceLimits {
 message NetworkPolicy {
   NetworkMode mode = 1;
   repeated string allowed_domains = 2;
+  // broker_aliases are credential aliases the sandbox may use through the
+  // broker route. Only valid with NETWORK_RESTRICTED. Aliases are not secrets
+  // and are persisted with the spec.
+  repeated string broker_aliases = 3;
+}
+
+// BrokerCredential is a resolved brokered credential. It travels only in the
+// create request, is never persisted with the spec or the sandbox record, and
+// is never returned by any RPC. value is the only field that is secret.
+message BrokerCredential {
+  string alias = 1;
+  string host = 2;
+  string scheme = 3;
+  string header = 4;
+  string value = 5;
 }
 
 // SandboxSpec is the desired state for a sandbox.

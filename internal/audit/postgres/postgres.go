@@ -146,9 +146,9 @@ func (s *Store) AppendEgress(ctx context.Context, sandboxID string, record sandb
 		ts = time.Now().UTC()
 	}
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO sandbox_egress (sandbox_id, host, remote, allowed, reason, occurred_at)
-		 VALUES ($1,$2,$3,$4,$5,$6)`,
-		sandboxID, record.Host, record.Remote, record.Allowed, record.Reason, ts)
+		`INSERT INTO sandbox_egress (sandbox_id, host, remote, alias, allowed, reason, occurred_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		sandboxID, record.Host, record.Remote, record.Alias, record.Allowed, record.Reason, ts)
 	if err != nil {
 		return fmt.Errorf("audit/postgres: append egress: %w", err)
 	}
@@ -158,7 +158,7 @@ func (s *Store) AppendEgress(ctx context.Context, sandboxID string, record sandb
 // Egress implements audit.Store.
 func (s *Store) Egress(ctx context.Context, sandboxID string) ([]sandbox.EgressRecord, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT sandbox_id, host, remote, allowed, reason, occurred_at
+		`SELECT sandbox_id, host, remote, alias, allowed, reason, occurred_at
 		 FROM sandbox_egress WHERE sandbox_id = $1 ORDER BY occurred_at, id`, sandboxID)
 	if err != nil {
 		return nil, fmt.Errorf("audit/postgres: query egress: %w", err)
@@ -167,7 +167,7 @@ func (s *Store) Egress(ctx context.Context, sandboxID string) ([]sandbox.EgressR
 	var records []sandbox.EgressRecord
 	for rows.Next() {
 		var record sandbox.EgressRecord
-		if err := rows.Scan(&record.SandboxID, &record.Host, &record.Remote, &record.Allowed, &record.Reason, &record.Timestamp); err != nil {
+		if err := rows.Scan(&record.SandboxID, &record.Host, &record.Remote, &record.Alias, &record.Allowed, &record.Reason, &record.Timestamp); err != nil {
 			return nil, err
 		}
 		records = append(records, record)

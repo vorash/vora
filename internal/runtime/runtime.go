@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/vorash/vora/internal/egress"
 )
 
 // Sentinel errors returned by backends.
@@ -55,6 +57,10 @@ type ResourceLimits struct {
 type NetworkPolicy struct {
 	Mode           NetworkMode `json:"mode"`
 	AllowedDomains []string    `json:"allowed_domains,omitempty"`
+	// BrokerAliases are credential aliases the sandbox may use through the
+	// broker route (ADR 013). Aliases are not secrets, so they are persisted
+	// with the spec; the credentials behind them never are.
+	BrokerAliases []string `json:"broker_aliases,omitempty"`
 }
 
 // WorkspaceSpec describes the per-sandbox paths prepared by the runner. The
@@ -114,6 +120,9 @@ func (s SandboxSpec) Validate() error {
 		return fmt.Errorf("%w: network mode is required", ErrInvalidSpec)
 	default:
 		// Non-none modes are validated per backend; the spec itself is valid.
+	}
+	if len(s.Network.BrokerAliases) > 0 && s.Network.Mode != NetworkRestricted {
+		return fmt.Errorf("%w: broker aliases require network mode %q", ErrInvalidSpec, NetworkRestricted)
 	}
 	return nil
 }
@@ -217,6 +226,15 @@ type Backend interface {
 	Stop(ctx context.Context, h Handle) error
 	// Destroy releases all resources for the sandbox.
 	Destroy(ctx context.Context, h Handle) error
+}
+
+// BrokerAware is implemented by backends that can attach brokered credentials.
+// The credentials are passed per start call and must never be persisted: they
+// exist only long enough to build the sandbox's broker.
+type BrokerAware interface {
+	// StartWithCredentials starts a sandbox with the resolved credentials for
+	// the aliases its spec grants.
+	StartWithCredentials(ctx context.Context, h Handle, creds []egress.Credential) error
 }
 
 // Sweeper is implemented by backends that keep runtime state outside the

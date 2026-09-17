@@ -134,6 +134,11 @@ func run() error {
 				return fmt.Errorf("runner tls: %w", err)
 			}
 			tcpOpts = append(tcpOpts, grpc.Creds(credentials.NewTLS(cfg)))
+		} else if os.Getenv("VORA_ALLOW_INSECURE_BROKER") != "1" {
+			// A plaintext remote endpoint must not carry brokered credentials.
+			tcpOpts = append(tcpOpts, grpc.UnaryInterceptor(runner.RejectBrokerSecrets))
+			logger.Warn("runner gRPC endpoint is plaintext; brokered create requests will be refused",
+				"hint", "set VORA_RUNNER_TLS_{CERT,KEY,CA}")
 		}
 		tcpServer = grpc.NewServer(tcpOpts...)
 		v1.RegisterRunnerServiceServer(tcpServer, server)
@@ -268,7 +273,10 @@ func registerBackends(cfg config.Config, registry *runtime.Registry, logger *slo
 		subtree = nil
 	}
 
-	networks := network.NewManager(cfg.StateDir, network.DefaultProxyPort, logger)
+	networks := network.NewManager(cfg.StateDir, network.ManagerConfig{
+		ProxyPort:  network.DefaultProxyPort,
+		BrokerPort: cfg.EgressBrokerPort,
+	}, logger)
 
 	if manager != nil {
 		if backend, err := bwrap.New(cfg, manager, logger); err != nil {

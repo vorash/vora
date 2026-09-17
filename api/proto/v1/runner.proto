@@ -24,6 +24,10 @@ service RunnerService {
 
 message CreateSandboxRequest {
   SandboxSpec spec = 1;
+  // broker_secrets are the resolved credentials for spec.network.broker_aliases.
+  // They are consumed to build the sandbox's broker and are deliberately not
+  // part of SandboxSpec so they can never be persisted or returned.
+  repeated BrokerCredential broker_secrets = 2;
 }
 
 message CreateSandboxResponse {
@@ -112,7 +116,8 @@ message GetSandboxEgressResponse {
   repeated SandboxEgress records = 1;
 }
 
-// SandboxEgress is one restricted-network policy decision.
+// SandboxEgress is one restricted-network policy decision. alias is set for
+// credential-broker decisions and is never a secret value.
 message SandboxEgress {
   string sandbox_id = 1;
   string host = 2;
@@ -120,6 +125,7 @@ message SandboxEgress {
   bool allowed = 4;
   string reason = 5;
   int64 timestamp_unix_ms = 6;
+  string alias = 7;
 }
 
 message DestroySandboxRequest {

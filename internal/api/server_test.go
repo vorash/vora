@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/ulid"
@@ -28,6 +29,7 @@ const (
 
 type fakeRunner struct {
 	specs         []*v1.SandboxSpec
+	creds         [][]*v1.BrokerCredential
 	sandboxes     []*v1.Sandbox
 	chunks        []*v1.ExecChunk
 	createErr     error
@@ -38,8 +40,15 @@ type fakeRunner struct {
 	closed        int
 }
 
-func (f *fakeRunner) CreateSandbox(_ context.Context, spec *v1.SandboxSpec) (*v1.Sandbox, error) {
+func (f *fakeRunner) CreateSandboxWithCredentials(_ context.Context, spec *v1.SandboxSpec, creds []*v1.BrokerCredential) (*v1.Sandbox, error) {
 	f.specs = append(f.specs, spec)
+	// Snapshot the credentials: the API zeroes its own copy as soon as the
+	// call returns, and the test needs to see what the runner actually got.
+	snapshot := make([]*v1.BrokerCredential, 0, len(creds))
+	for _, c := range creds {
+		snapshot = append(snapshot, proto.Clone(c).(*v1.BrokerCredential))
+	}
+	f.creds = append(f.creds, snapshot)
 	if f.createErr != nil {
 		return nil, f.createErr
 	}

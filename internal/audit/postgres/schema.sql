@@ -41,10 +41,15 @@ CREATE TABLE IF NOT EXISTS sandbox_egress (
     sandbox_id  TEXT        NOT NULL,
     host        TEXT,
     remote      TEXT,
+    alias       TEXT        NOT NULL DEFAULT '',
     allowed     BOOLEAN     NOT NULL,
     reason      TEXT,
     occurred_at TIMESTAMPTZ NOT NULL
 );
+
+-- Credential-broker decisions carry the alias they were made for (never the
+-- secret value).
+ALTER TABLE sandbox_egress ADD COLUMN IF NOT EXISTS alias TEXT NOT NULL DEFAULT '';
 
 CREATE INDEX IF NOT EXISTS sandbox_egress_sandbox_id_idx
     ON sandbox_egress (sandbox_id, occurred_at, id);
