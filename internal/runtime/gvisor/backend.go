@@ -31,6 +31,7 @@ type Backend struct {
 	runsc    string
 	root     string
 	platform string
+	initPath string
 	subtree  cgroup.Subtree
 
 	mu      sync.Mutex
@@ -56,6 +57,10 @@ func New(cfg config.Config, logger *slog.Logger, subtree cgroup.Subtree) (*Backe
 	if err != nil {
 		return nil, err
 	}
+	initPath, err := runtime.ResolveInitBinary()
+	if err != nil {
+		return nil, fmt.Errorf("gvisor: %w", err)
+	}
 	root := cfg.GvisorRunRoot
 	if root == "" {
 		if rd := os.Getenv("XDG_RUNTIME_DIR"); rd != "" {
@@ -77,6 +82,7 @@ func New(cfg config.Config, logger *slog.Logger, subtree cgroup.Subtree) (*Backe
 		runsc:    runsc,
 		root:     root,
 		platform: platform,
+		initPath: initPath,
 		subtree:  subtree,
 		handles:  make(map[string]*handle),
 	}
@@ -209,6 +215,19 @@ func (b *Backend) Start(ctx context.Context, h runtime.Handle) error {
 		return fmt.Errorf("gvisor: cgroup: %w", err)
 	}
 	hd.group = group
+	// The init is Vora's static binary, copied into the ipc directory (bound at
+	// /vora) so the sandbox never depends on the image having a shell.
+	ws := hd.spec.Workspace
+	if err := os.MkdirAll(ws.IPCDir, 0o755); err != nil {
+		_ = group.Destroy()
+		hd.group = nil
+		return fmt.Errorf("gvisor: ipc dir: %w", err)
+	}
+	if err := runtime.InstallInitBinary(b.initPath, filepath.Join(ws.IPCDir, "vora-init")); err != nil {
+		_ = group.Destroy()
+		hd.group = nil
+		return fmt.Errorf("gvisor: %w", err)
+	}
 	if err := writeBundle(b.runsc, hd.bundleDir, hd.spec); err != nil {
 		_ = group.Destroy()
 		hd.group = nil

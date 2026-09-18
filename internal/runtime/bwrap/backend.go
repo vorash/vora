@@ -70,7 +70,7 @@ func New(cfg config.Config, cgroups cgroup.Manager, logger *slog.Logger) (*Backe
 	if logger == nil {
 		logger = slog.Default()
 	}
-	initPath, err := resolveInit()
+	initPath, err := runtime.ResolveInitBinary()
 	if err != nil {
 		return nil, err
 	}
@@ -94,24 +94,6 @@ func (b *Backend) SetRestricted(subtree cgroup.Subtree, networks *network.Manage
 	b.subtree = subtree
 	b.networks = networks
 	b.egressSink = sink
-}
-
-// resolveInit finds the vora-init binary: VORA_INIT_BINARY, then next to the
-// current executable, then PATH.
-func resolveInit() (string, error) {
-	if p := os.Getenv("VORA_INIT_BINARY"); p != "" {
-		return p, nil
-	}
-	if exe, err := os.Executable(); err == nil {
-		cand := filepath.Join(filepath.Dir(exe), "vora-init")
-		if info, err := os.Stat(cand); err == nil && !info.IsDir() {
-			return cand, nil
-		}
-	}
-	if p, err := exec.LookPath("vora-init"); err == nil {
-		return p, nil
-	}
-	return "", fmt.Errorf("bwrap: vora-init binary not found (set VORA_INIT_BINARY or build ./cmd/vora-init)")
 }
 
 // Name implements runtime.Backend.
@@ -234,8 +216,8 @@ func (b *Backend) startRestricted(ctx context.Context, hd *handle, creds []egres
 	if ws.ControlSocket != "" {
 		_ = os.Remove(ws.ControlSocket)
 	}
-	if err := installInit(hd.initPath, filepath.Join(ws.IPCDir, "vora-init")); err != nil {
-		return err
+	if err := runtime.InstallInitBinary(hd.initPath, filepath.Join(ws.IPCDir, "vora-init")); err != nil {
+		return fmt.Errorf("bwrap: %w", err)
 	}
 
 	netns, err := b.networks.Create(ctx, hd.id)
@@ -422,8 +404,8 @@ func (b *Backend) startUnit(ctx context.Context, hd *handle) error {
 	if err != nil {
 		return err
 	}
-	if err := installInit(hd.initPath, filepath.Join(ws.IPCDir, "vora-init")); err != nil {
-		return err
+	if err := runtime.InstallInitBinary(hd.initPath, filepath.Join(ws.IPCDir, "vora-init")); err != nil {
+		return fmt.Errorf("bwrap: %w", err)
 	}
 
 	unit, err := b.cgroups.Start(ctx, cgroup.StartRequest{
@@ -674,22 +656,4 @@ func envSlice(env map[string]string) []string {
 		out = append(out, k+"="+v)
 	}
 	return out
-}
-
-// installInit copies the agent binary into the sandbox ipc directory, which is
-// bound into the sandbox at /vora. The copy is atomic so a stale binary is
-// never executed.
-func installInit(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return fmt.Errorf("bwrap: read init binary: %w", err)
-	}
-	tmp := dst + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o755); err != nil {
-		return fmt.Errorf("bwrap: install init binary: %w", err)
-	}
-	if err := os.Rename(tmp, dst); err != nil {
-		return fmt.Errorf("bwrap: install init binary: %w", err)
-	}
-	return nil
 }

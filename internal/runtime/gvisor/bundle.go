@@ -13,6 +13,14 @@ import (
 	"github.com/vorash/vora/internal/runtime"
 )
 
+// The sandbox init is Vora's own static binary, exposed by the ipc directory
+// (bound at /vora), never a program from the image: a shell-less (distroless)
+// image has no /bin/sh to keep the sandbox alive. See issue #40.
+const (
+	initInside = "/vora/vora-init"
+	initMode   = "pause"
+)
+
 // writeBundle generates an OCI bundle for a sandbox.
 //
 // The baseline spec comes from `runsc spec` (so it matches the installed
@@ -42,9 +50,9 @@ func writeBundle(runsc, bundleDir string, spec runtime.SandboxSpec) error {
 		s.Process = &specs.Process{}
 	}
 	s.Process.Terminal = false
-	// The init process only keeps the sandbox alive; commands are run with
-	// `runsc exec` (NativeExec).
-	s.Process.Args = []string{"/bin/sh", "-c", "sleep 86400"}
+	// The init only keeps the sandbox alive; commands are run with
+	// `runsc exec` (NativeExec). It comes from Vora, not from the image.
+	s.Process.Args = []string{initInside, initMode}
 	s.Process.Cwd = "/workspace"
 	s.Process.Env = envSlice(spec.Env)
 
@@ -67,7 +75,7 @@ func writeBundle(runsc, bundleDir string, spec runtime.SandboxSpec) error {
 
 // runscSpec writes a baseline OCI spec into dir.
 func runscSpec(runsc, dir string) error {
-	cmd := exec.Command(runsc, "spec", "--", "/bin/sh", "-c", "sleep 86400")
+	cmd := exec.Command(runsc, "spec", "--", initInside, initMode)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("gvisor: runsc spec: %w: %s", err, out)

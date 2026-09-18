@@ -1,9 +1,14 @@
-// Command vora-init is the in-sandbox agent. It runs as PID 1 inside a
-// Bubblewrap sandbox and serves the AgentService over a Unix socket bound in
-// from the runner, providing exec, signal forwarding and shutdown.
+// Command vora-init is the in-sandbox init process.
 //
-// Bubblewrap cannot exec into an existing sandbox, so this agent is what makes
-// a sandbox a long-lived unit with repeatable `Exec` calls.
+// Under Bubblewrap it runs as PID 1 and serves the AgentService over a Unix
+// socket bound in from the runner, providing exec, signal forwarding and
+// shutdown; Bubblewrap cannot exec into a running sandbox, so this agent is
+// what makes a sandbox a long-lived unit with repeatable `Exec` calls. Under
+// gVisor (`vora-init pause`) it only keeps the sandbox alive, because gVisor
+// execs with `runsc exec` and needs no in-sandbox agent.
+//
+// It is a static binary owned by Vora, not by the image, so a shell-less
+// (distroless) image can boot on either backend.
 package main
 
 import (
@@ -32,6 +37,15 @@ import (
 const chunkSize = 32 * 1024
 
 func main() {
+	// `vora-init pause` is the gVisor PID 1. gVisor runs commands with
+	// `runsc exec` (NativeExec), so there is no agent to serve: the process
+	// only has to keep the sandbox alive. Running Vora's own static binary as
+	// init is also what lets a shell-less (distroless) image boot at all.
+	if len(os.Args) > 1 && os.Args[1] == "pause" {
+		pause()
+		return
+	}
+
 	socket := flag.String("socket", "/run/vora/control.sock", "control socket path inside the sandbox")
 	grace := flag.Duration("grace", 20*time.Second, "exit if the runner has not contacted us for this long")
 	flag.Parse()
@@ -81,6 +95,31 @@ func main() {
 		grpcServer.Stop()
 	}
 	os.Exit(0)
+}
+
+// pause is the gVisor init: it blocks until the sandbox is stopped, reaping
+// reparented children so PID 1 never accumulates zombies. gVisor uses
+// `runsc exec` (NativeExec), so there is nothing to serve.
+func pause() {
+	fmt.Fprintln(os.Stderr, "vora-init: pause (pid", os.Getpid(), ")")
+
+	chld := make(chan os.Signal, 1)
+	signal.Notify(chld, syscall.SIGCHLD)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
+
+	go func() {
+		for range chld {
+			for {
+				var ws syscall.WaitStatus
+				if pid, err := syscall.Wait4(-1, &ws, syscall.WNOHANG, nil); pid <= 0 || err != nil {
+					break
+				}
+			}
+		}
+	}()
+
+	<-stop
 }
 
 // agent implements agentproto.Handler.
