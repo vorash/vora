@@ -11,13 +11,18 @@ Description=Vora control plane (vora-api)
 Documentation=https://github.com/vorash/vora
 After=network-online.target
 Wants=network-online.target
+# The store is remote (PostgreSQL/Supabase) and its route may not exist yet: a
+# direct Supabase DSN is IPv6-only, and IPv6 can take a minute to converge after
+# a reboot. Retry instead of giving up, so a slow network means a late API, not
+# a dead one (the default limit is 5 starts in 10s).
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 EnvironmentFile=/etc/vora/api.env
 ExecStart=/usr/local/bin/vora-api
 Restart=on-failure
-RestartSec=2
+RestartSec=5
 
 NoNewPrivileges=yes
 PrivateTmp=yes
