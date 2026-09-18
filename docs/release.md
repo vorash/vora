@@ -129,6 +129,12 @@ Two things to know:
   dead rather than late.
 - Images are `amd64` only. gVisor/KVM today is `amd64` too; multi-arch is future
   work.
+- **gVisor's default platform is `kvm`, which needs `/dev/kvm`.** A host without
+  it — a mini-PC, or a VM without nested virtualisation — runs the `systrap`
+  platform instead: set `VORA_GVISOR_PLATFORM=systrap`. runsc may fall back on its
+  own, but the setting is what makes it deterministic; the rest of the runner is
+  unchanged (`Delegate=yes` on the unit is enough for the cgroup subtree, verified
+  with gVisor as a system service on a KVM-less mini-PC).
 - The workflow never deletes a release or moves a tag. Re-running it uploads
   assets with `--clobber`, which is the intended way to replace a bad build of
   the same version.
