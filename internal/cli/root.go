@@ -4,6 +4,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -23,19 +24,59 @@ type app struct {
 	json   bool
 }
 
-// exitError carries an exit code that Execute should propagate.
-type exitError struct{ code int }
+// exitError carries an exit code that Execute should propagate. When msg is
+// set it is reported to the user before exiting.
+type exitError struct {
+	code int
+	msg  string
+}
 
-func (e exitError) Error() string { return fmt.Sprintf("exit status %d", e.code) }
+func (e exitError) Error() string {
+	if e.msg != "" {
+		return e.msg
+	}
+	return fmt.Sprintf("exit status %d", e.code)
+}
 
 // Execute runs the CLI and returns the process exit code.
 func Execute() int {
+	return run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
+}
+
+// run builds the command tree and executes it. It is separated from Execute so
+// tests can drive the CLI with a controlled argv, stdio and environment.
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	a := &app{}
+	root := newRoot(a)
+	loadPlugins(root)
+	root.SetArgs(args)
+	root.SetIn(stdin)
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+
+	if err := root.Execute(); err != nil {
+		var ee exitError
+		if asExit(err, &ee) {
+			if ee.msg != "" {
+				fmt.Fprintln(stderr, "vora:", ee.msg)
+			}
+			return ee.code
+		}
+		fmt.Fprintln(stderr, "vora:", err)
+		return 1
+	}
+	return 0
+}
+
+func newRoot(a *app) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "vora",
 		Short:         "Secure execution infrastructure for autonomous agents",
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		Args:          cobra.ArbitraryArgs,
+		// An unmatched subcommand lands here; dispatch to a plugin or report it.
+		RunE: unknownCommand,
 	}
 	root.PersistentFlags().StringVar(&a.socket, "socket", defaultSocket(), "runner control socket")
 	root.PersistentFlags().StringVar(&a.api, "api", "", "vora-api base URL (e.g. http://127.0.0.1:9300); uses the remote HTTP API instead of the local socket")
@@ -53,16 +94,7 @@ func Execute() int {
 		a.secretsCmd(),
 		a.versionCmd(),
 	)
-
-	if err := root.Execute(); err != nil {
-		var ee exitError
-		if asExit(err, &ee) {
-			return ee.code
-		}
-		fmt.Fprintln(os.Stderr, "vora:", err)
-		return 1
-	}
-	return 0
+	return root
 }
 
 func asExit(err error, target *exitError) bool {

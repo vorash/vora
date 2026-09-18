@@ -59,6 +59,10 @@ snapshots. Written in Go, with no Kubernetes in the path.
   join token). Tenant keys can only access their own sandboxes and keys; runner
   inventory requires a global administrator. The CLI drives either the local
   socket or, with `--api`, the control plane.
+- **External CLI plugins.** An unknown `vora <name> …` runs `vora-<name>` from
+  `$PATH` (the `git`/`kubectl` pattern), so tools such as `vora-probe` read as
+  part of Vora without Vora depending on them. Built-in commands always win, and
+  `VORA_DISABLE_PLUGINS=1` turns dispatch off.
 
 ## Architecture
 
@@ -186,6 +190,31 @@ tenant (`--tenant t1`) for secrets and for new keys — `vora keys list` prints
 every key's `tenant_id`, which is how a global operator discovers the tenants in
 use. `VORA_MASTER_KEY` is required for `vora secrets`; without it the endpoints
 answer `503` and brokering stays off.
+
+### External plugins
+
+An otherwise-unknown subcommand runs as `vora-<name>` on `$PATH`:
+
+```console
+$ vora probe replay test/fixtures/oom --out .probe   # runs vora-probe
+```
+
+Arguments, stdin/stdout/stderr and the exit code pass through unchanged, and
+`vora probe --help` reaches the plugin so the plugin owns its own help. Built-in
+commands always win over a plugin of the same name, `vora --help` lists
+discovered plugins under **External plugins**, and `VORA_DISABLE_PLUGINS=1`
+disables dispatch entirely.
+
+Dispatch uses `exec.LookPath` on a strictly validated name
+(`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`, at most 64 bytes): no shell, no
+config-supplied command line, and no name that can escape the `vora-` prefix. It
+has the same trust model as `git` and `kubectl` — anything that can plant a
+`vora-<name>` earlier in your `$PATH` could already run code as you, so dispatch
+adds no new path. See [the threat model](docs/architecture/threat-model.md).
+
+Vora's own companion binaries are excluded from dispatch: `vora api`,
+`vora runner` and `vora init` report an unknown command rather than launching
+`vora-api`, `vora-runner` or `vora-init` — run those binaries directly.
 
 ## Testing the sandbox images
 
