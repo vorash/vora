@@ -16,6 +16,15 @@ var errSecretsNotConfigured = errors.New("credential brokering is not configured
 // secrets returns the configured secret store, if any.
 func (s *Server) secrets() secret.Store { return s.opts.Secrets }
 
+// Errors explaining why a secret operation has no tenant to work with. They are
+// returned verbatim to the caller: the current "cannot manage secrets for
+// another tenant" wording sent operators looking for a tenant conflict when the
+// real problem was a global administrator key naming no tenant at all.
+var (
+	errTenantRequired  = errors.New("a global administrator key must name the tenant: pass --tenant <id>, or use a key scoped to that tenant")
+	errTenantForbidden = errors.New("a key scoped to one tenant cannot manage another tenant's secrets")
+)
+
 // secretTenant resolves the tenant a secret operation applies to. A global
 // administrator must name the tenant; a tenant-scoped administrator is pinned
 // to its own tenant and cannot name another.
@@ -23,15 +32,15 @@ func secretTenant(caller APIKey, requested string) (string, error) {
 	requested = strings.TrimSpace(requested)
 	if isGlobalAdmin(caller) {
 		if requested == "" {
-			return "", errors.New("a global administrator must set tenant_id")
+			return "", errTenantRequired
 		}
 		return requested, nil
 	}
 	if caller.TenantID == "" {
-		return "", errTenantAccess
+		return "", errTenantForbidden
 	}
 	if requested != "" && requested != caller.TenantID {
-		return "", errTenantAccess
+		return "", errTenantForbidden
 	}
 	return caller.TenantID, nil
 }
@@ -58,7 +67,7 @@ func (s *Server) createSecret(w http.ResponseWriter, r *http.Request) {
 	}
 	tenant, err := secretTenant(principalFrom(r.Context()).key, body.TenantID)
 	if err != nil {
-		writeError(w, http.StatusForbidden, "cannot manage secrets for another tenant")
+		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
 	rec := secret.Record{
@@ -97,7 +106,7 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
 	}
 	tenant, err := secretTenant(principalFrom(r.Context()).key, r.URL.Query().Get("tenant_id"))
 	if err != nil {
-		writeError(w, http.StatusForbidden, "cannot list secrets for another tenant")
+		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
 	records, err := store.List(r.Context(), tenant)
@@ -120,7 +129,7 @@ func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request) {
 	}
 	tenant, err := secretTenant(principalFrom(r.Context()).key, r.URL.Query().Get("tenant_id"))
 	if err != nil {
-		writeError(w, http.StatusForbidden, "cannot manage secrets for another tenant")
+		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
 	alias := r.PathValue("alias")

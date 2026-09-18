@@ -199,6 +199,37 @@ func TestSecretsValidation(t *testing.T) {
 	}
 }
 
+// TestSecretsGlobalAdminMustNameTenant asserts the error tells the operator what
+// to do. The previous wording ("cannot manage secrets for another tenant") sent
+// people looking for a tenant conflict that did not exist, when the real problem
+// was a global administrator key naming no tenant at all.
+func TestSecretsGlobalAdminMustNameTenant(t *testing.T) {
+	ts, _ := secretsServer(t)
+
+	resp := do(t, http.MethodPost, ts.URL+"/v1/secrets", bootstrap, map[string]any{
+		"alias": "github", "host": "api.github.com", "scheme": "bearer", "value": "x",
+	})
+	body := string(readBody(t, resp))
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, "--tenant") {
+		t.Fatalf("error does not say how to proceed: %s", body)
+	}
+	if strings.Contains(body, "another tenant") {
+		t.Fatalf("error blames another tenant instead of the missing tenant: %s", body)
+	}
+
+	// Naming the tenant is all it takes.
+	resp = do(t, http.MethodPost, ts.URL+"/v1/secrets", bootstrap, map[string]any{
+		"alias": "github", "host": "api.github.com", "scheme": "bearer", "value": "x", "tenant_id": "t1",
+	})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("global admin with tenant_id = %d, want 201", resp.StatusCode)
+	}
+}
+
 func mustJSON(t *testing.T, v any) string {
 	t.Helper()
 	data, err := json.Marshal(v)
