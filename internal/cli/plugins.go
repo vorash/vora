@@ -36,6 +36,16 @@ const (
 // `vora-` prefix or be interpreted by a shell.
 var pluginNamePattern = regexp.MustCompile(`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`)
 
+// companionCommands names Vora's own binaries that sit next to `vora` on $PATH.
+// They are excluded from dispatch: `vora api`/`vora runner` would launch a
+// daemon and `vora init` reaches the in-sandbox agent, which is surprising for
+// names that read like CLI nouns. Run the binaries directly instead.
+var companionCommands = map[string]bool{
+	"api":    true, // vora-api
+	"runner": true, // vora-runner
+	"init":   true, // vora-init
+}
+
 type plugin struct {
 	name string
 	path string
@@ -71,7 +81,7 @@ func discoverPlugins(builtins map[string]bool) []plugin {
 		}
 		for _, e := range entries {
 			name, ok := strings.CutPrefix(e.Name(), pluginPrefix)
-			if !ok || builtins[name] || !validPluginName(name) {
+			if !ok || builtins[name] || companionCommands[name] || !validPluginName(name) {
 				continue
 			}
 			candidates[name] = true
@@ -182,6 +192,11 @@ func unknownCommand(cmd *cobra.Command, args []string) error {
 	}
 	name := args[0]
 	if !validPluginName(name) {
+		return fmt.Errorf("unknown command %q for %q", name, cmd.CommandPath())
+	}
+	// Vora's own companion binaries are reserved: report a normal unknown-command
+	// error rather than claiming no `vora-<name>` exists.
+	if companionCommands[name] {
 		return fmt.Errorf("unknown command %q for %q", name, cmd.CommandPath())
 	}
 	// A literal `--` stops cobra's lookup, so the plugin never became the

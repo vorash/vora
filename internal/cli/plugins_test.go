@@ -56,6 +56,32 @@ func silenceStdout(t *testing.T) {
 	})
 }
 
+// pluginSection returns the body of the "External plugins" help section.
+func pluginSection(help string) (string, bool) {
+	_, after, ok := strings.Cut(help, "External plugins:")
+	if !ok {
+		return "", false
+	}
+	section, _, _ := strings.Cut(after, "\nFlags:")
+	return section, true
+}
+
+// listedPlugins returns the command names shown in the "External plugins"
+// section, or nil when the section is absent.
+func listedPlugins(help string) map[string]bool {
+	section, ok := pluginSection(help)
+	if !ok {
+		return nil
+	}
+	names := map[string]bool{}
+	for _, line := range strings.Split(section, "\n") {
+		if fields := strings.Fields(line); len(fields) > 0 {
+			names[fields[0]] = true
+		}
+	}
+	return names
+}
+
 func TestValidPluginName(t *testing.T) {
 	valid := []string{"probe", "probe-worker", "foo-bar", "a", "a1-b2-c3", strings.Repeat("a", 64)}
 	for _, name := range valid {
@@ -202,6 +228,99 @@ func TestPluginAfterDoubleDash(t *testing.T) {
 	}
 	if strings.TrimSpace(out) != "x y" {
 		t.Errorf("plugin received %q, want %q", strings.TrimSpace(out), "x y")
+	}
+}
+
+func TestCompanionCommandsAreNotPlugins(t *testing.T) {
+	skipNonUnix(t)
+	marker := filepath.Join(t.TempDir(), "executed")
+	stub := "#!/bin/sh\ntouch \"$MARKER\"\n"
+	t.Setenv("PATH", fakePath(t, map[string]string{
+		"vora-api":    stub,
+		"vora-runner": stub,
+		"vora-init":   stub,
+		"vora-probe":  "#!/bin/sh\ntrue\n",
+	}))
+	t.Setenv("MARKER", marker)
+
+	for _, name := range []string{"api", "runner", "init"} {
+		_, errOut, code := runCLI(t, []string{name}, "")
+		if code == 0 {
+			t.Errorf("%q: exit = 0, want non-zero", name)
+		}
+		if !strings.Contains(errOut, "unknown command") {
+			t.Errorf("%q: stderr = %q, want the normal unknown-command error", name, errOut)
+		}
+		if strings.Contains(errOut, "was found on PATH") {
+			t.Errorf("%q: stderr = %q, must not claim the binary is missing", name, errOut)
+		}
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("a companion binary was executed")
+	}
+
+	help, _, code := runCLI(t, []string{"--help"}, "")
+	if code != 0 {
+		t.Fatalf("help exit = %d", code)
+	}
+	listed := listedPlugins(help)
+	for _, name := range []string{"api", "runner", "init"} {
+		if listed[name] {
+			t.Errorf("help advertises reserved companion %q:\n%s", name, help)
+		}
+	}
+	if !listed["probe"] {
+		t.Errorf("help should still list the real plugin:\n%s", help)
+	}
+}
+
+// A reserved name stays reserved when no vora-<name> exists: it must still
+// report an unknown command, never the plugin-not-found message.
+func TestReservedNameWithoutBinary(t *testing.T) {
+	skipNonUnix(t)
+	t.Setenv("PATH", t.TempDir())
+	for _, name := range []string{"api", "runner", "init"} {
+		_, errOut, code := runCLI(t, []string{name}, "")
+		if code == 0 {
+			t.Errorf("%q: exit = 0, want non-zero", name)
+		}
+		if !strings.Contains(errOut, "unknown command") {
+			t.Errorf("%q: stderr = %q, want the normal unknown-command error", name, errOut)
+		}
+		if strings.Contains(errOut, "was found on PATH") {
+			t.Errorf("%q: stderr = %q, must not claim the binary is missing", name, errOut)
+		}
+	}
+}
+
+func TestHelpListsPluginsSorted(t *testing.T) {
+	skipNonUnix(t)
+	t.Setenv("PATH", fakePath(t, map[string]string{
+		"vora-zzz":   "#!/bin/sh\ntrue\n",
+		"vora-aaa":   "#!/bin/sh\ntrue\n",
+		"vora-probe": "#!/bin/sh\ntrue\n",
+	}))
+	help, _, code := runCLI(t, []string{"--help"}, "")
+	if code != 0 {
+		t.Fatalf("help exit = %d", code)
+	}
+	section, ok := pluginSection(help)
+	if !ok {
+		t.Fatalf("no plugin section:\n%s", help)
+	}
+	prev := ""
+	for _, line := range strings.Split(section, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if prev != "" && fields[0] < prev {
+			t.Errorf("plugin section not sorted: %q after %q\n%s", fields[0], prev, section)
+		}
+		prev = fields[0]
+	}
+	if prev == "" {
+		t.Fatalf("plugin section is empty:\n%s", help)
 	}
 }
 

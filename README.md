@@ -212,9 +212,9 @@ has the same trust model as `git` and `kubectl` — anything that can plant a
 `vora-<name>` earlier in your `$PATH` could already run code as you, so dispatch
 adds no new path. See [the threat model](docs/architecture/threat-model.md).
 
-Because the mechanism is generic, it also reaches Vora's own companion binaries
-when they are on `$PATH`: `vora api`, `vora runner` and `vora init` exec
-`vora-api`, `vora-runner` and `vora-init`.
+Vora's own companion binaries are excluded from dispatch: `vora api`,
+`vora runner` and `vora init` report an unknown command rather than launching
+`vora-api`, `vora-runner` or `vora-init` — run those binaries directly.
 
 ## Testing the sandbox images
 
