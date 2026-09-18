@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,47 @@ func imageRootfs(t *testing.T, name string) string {
 }
 
 func TestBwrapSandboxLifecycle(t *testing.T) {
+	backend, h := newBwrapSandbox(t)
+	ctx := context.Background()
+
+	// First exec writes a file.
+	run(t, backend, h, "/bin/sh", []string{"-c", "echo data > /workspace/marker.txt"})
+
+	// Second exec sees the same filesystem state (sandbox is long-lived).
+	out := run(t, backend, h, "/bin/sh", []string{"-c", "cat /workspace/marker.txt"})
+	if strings.TrimSpace(out) != "data" {
+		t.Fatalf("marker content = %q, want data", out)
+	}
+
+	// Python works inside the sandbox.
+	out = run(t, backend, h, "/usr/bin/python3", []string{"-c", "print(1 + 1)"})
+	if strings.TrimSpace(out) != "2" {
+		t.Fatalf("python output = %q, want 2", out)
+	}
+
+	// Stats reflect the running sandbox.
+	st, err := backend.Stats(ctx, h)
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if st.MemoryBytes <= 0 {
+		t.Fatalf("expected positive memory usage, got %+v", st)
+	}
+
+	// Destroy removes the cgroup and process tree.
+	if err := backend.Destroy(ctx, h); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	if _, err := backend.Stats(ctx, h); err == nil {
+		t.Fatal("Stats after Destroy should fail")
+	}
+}
+
+// newBwrapSandbox starts a bwrap sandbox on the cached base image and returns
+// the backend and its handle, tearing the sandbox down at the end of the test.
+func newBwrapSandbox(t *testing.T) (*bwrap.Backend, runtime.Handle) {
+	t.Helper()
+
 	initBin := buildBinary(t, "vora-init")
 	t.Setenv("VORA_INIT_BINARY", initBin)
 
@@ -81,38 +123,69 @@ func TestBwrapSandboxLifecycle(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = backend.Destroy(ctx, h) })
+	return backend, h
+}
 
-	// First exec writes a file.
-	run(t, backend, h, "/bin/sh", []string{"-c", "echo data > /workspace/marker.txt"})
+// Exec output must survive a command that writes and exits immediately. The
+// in-sandbox agent drains stdout/stderr in goroutines, and it used to call
+// cmd.Wait() before waiting for them: Go's Wait closes the read ends of the
+// pipes StdoutPipe/StderrPipe handed out, so anything still unread — the tail of
+// a burst, or all of a fast echo — was discarded while the exit chunk still
+// arrived reporting success.
+func TestBwrapExecDoesNotLoseOutput(t *testing.T) {
+	backend, h := newBwrapSandbox(t)
 
-	// Second exec sees the same filesystem state (sandbox is long-lived).
-	out := run(t, backend, h, "/bin/sh", []string{"-c", "cat /workspace/marker.txt"})
-	if strings.TrimSpace(out) != "data" {
-		t.Fatalf("marker content = %q, want data", out)
+	// Still draining when the writer exits: the pipe holds more than the reader
+	// has taken, which is exactly what Wait-on-top-of-it throws away. Repeated,
+	// because the window is narrow — a single burst only trips it about a third
+	// of the time — so the run as a whole is what has to be reliable.
+	const want = 1 << 20
+	for i := range 8 {
+		out := execStdout(t, backend, h, "/bin/sh", []string{"-c", "yes vora | head -c " + strconv.Itoa(want)})
+		if len(out) != want {
+			t.Fatalf("burst %d: stdout = %d bytes, want %d: output was truncated by the exit path", i, len(out), want)
+		}
+		if !strings.HasPrefix(out, "vora\nvora\n") {
+			t.Fatalf("burst %d: stdout starts with %q, want the repeated 'vora' pattern", i, out[:min(32, len(out))])
+		}
 	}
 
-	// Python works inside the sandbox.
-	out = run(t, backend, h, "/usr/bin/python3", []string{"-c", "print(1 + 1)"})
-	if strings.TrimSpace(out) != "2" {
-		t.Fatalf("python output = %q, want 2", out)
+	// The shape seen in the wild: a tiny command that exits at once.
+	for i := range 25 {
+		if got := execStdout(t, backend, h, "/bin/sh", []string{"-c", "echo api-e2e"}); got != "api-e2e\n" {
+			t.Fatalf("iteration %d: stdout = %q, want %q", i, got, "api-e2e\n")
+		}
 	}
+}
 
-	// Stats reflect the running sandbox.
-	st, err := backend.Stats(ctx, h)
+// execStdout runs a command and returns its stdout only.
+func execStdout(t *testing.T, backend *bwrap.Backend, h runtime.Handle, command string, args []string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	stream, err := backend.Exec(ctx, h, runtime.ExecRequest{
+		ExecutionID: "exe_output",
+		Command:     command,
+		Args:        args,
+		Cwd:         "/workspace",
+	})
 	if err != nil {
-		t.Fatalf("Stats: %v", err)
+		t.Fatalf("Exec %s: %v", command, err)
 	}
-	if st.MemoryBytes <= 0 {
-		t.Fatalf("expected positive memory usage, got %+v", st)
-	}
+	defer stream.Close()
 
-	// Destroy removes the cgroup and process tree.
-	if err := backend.Destroy(ctx, h); err != nil {
-		t.Fatalf("Destroy: %v", err)
+	var out strings.Builder
+	for {
+		chunk, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Recv %s: %v", command, err)
+		}
+		out.Write(chunk.Stdout)
 	}
-	if _, err := backend.Stats(ctx, h); err == nil {
-		t.Fatal("Stats after Destroy should fail")
-	}
+	return out.String()
 }
 
 // run executes a command and returns its combined stdout.
