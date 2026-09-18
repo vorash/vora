@@ -246,8 +246,14 @@ func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.Exe
 		}
 	}()
 
-	waitErr := cmd.Wait()
+	// Drain stdout and stderr before reaping: cmd.Wait closes the read ends of
+	// the pipes StdoutPipe/StderrPipe handed out, so whatever the readers have
+	// not taken yet — the tail of a burst, or all of a fast command's output —
+	// would be discarded while the exit chunk still reported success. Reading to
+	// EOF cannot outlive the command: the child's end closes when it exits, and
+	// the kill above closes it when the caller goes away.
 	wg.Wait()
+	waitErr := cmd.Wait()
 
 	exitCode := 0
 	if waitErr != nil {
