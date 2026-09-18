@@ -126,7 +126,7 @@ func (a *app) secretsSetCmd() *cobra.Command {
 	cmd.Flags().StringVar(&header, "header", "", "header name for --scheme header")
 	cmd.Flags().StringVar(&value, "value", "", "credential value (visible in shell history; prefer --value-stdin)")
 	cmd.Flags().BoolVar(&stdin, "value-stdin", false, "read the credential value from stdin")
-	cmd.Flags().StringVar(&tenant, "tenant", "", "tenant id (global administrators only)")
+	cmd.Flags().StringVar(&tenant, "tenant", "", "tenant id (required when using a global administrator key)")
 	_ = cmd.MarkFlagRequired("alias")
 	_ = cmd.MarkFlagRequired("host")
 	return cmd
@@ -164,7 +164,7 @@ func (a *app) secretsListCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&tenant, "tenant", "", "tenant id (global administrators only)")
+	cmd.Flags().StringVar(&tenant, "tenant", "", "tenant id (required when using a global administrator key)")
 	return cmd
 }
 
@@ -189,7 +189,7 @@ func (a *app) secretsRmCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&tenant, "tenant", "", "tenant id (global administrators only)")
+	cmd.Flags().StringVar(&tenant, "tenant", "", "tenant id (required when using a global administrator key)")
 	return cmd
 }
 
@@ -227,7 +227,7 @@ func (a *app) keysCreateCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&name, "name", "", "human-readable key name")
 	cmd.Flags().StringVar(&tenant, "tenant", "", "tenant id (defaults to the caller's)")
-	cmd.Flags().StringArrayVar(&scopes, "scope", nil, "scope: admin or sandbox (repeatable; default sandbox)")
+	cmd.Flags().StringArrayVar(&scopes, "scope", nil, "scope: admin or sandbox (repeatable; default sandbox; admin also permits sandbox routes)")
 	return cmd
 }
 

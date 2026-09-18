@@ -218,7 +218,7 @@ func (s *Server) auth(scope string, next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "invalid or missing API key")
 			return
 		}
-		if scope != "" && !key.HasScope(scope) {
+		if scope != "" && !authorizes(key, scope) {
 			writeError(w, http.StatusForbidden, "API key lacks scope "+scope)
 			return
 		}
@@ -648,6 +648,17 @@ func (s *Server) pickRunner(ctx context.Context) (Runner, RunnerClient, error) {
 
 func isGlobalAdmin(key APIKey) bool {
 	return key.TenantID == "" && key.HasScope(ScopeAdmin)
+}
+
+// authorizes reports whether a key may use a route that requires scope. Admin
+// implies sandbox: the operator key that manages keys, secrets and runner
+// inventory is also expected to run sandboxes, and admin is strictly the more
+// privileged scope, so the implication grants nothing a sandbox key lacked.
+func authorizes(key APIKey, scope string) bool {
+	if key.HasScope(scope) {
+		return true
+	}
+	return scope == ScopeSandbox && key.HasScope(ScopeAdmin)
 }
 
 func canAccessTenant(key APIKey, tenantID string) bool {

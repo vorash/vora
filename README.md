@@ -151,26 +151,41 @@ $ export VORA_MASTER_KEY="$(openssl rand -base64 48)"   # vora-api only
 $ vora-api & vora-runner &
 
 $ vora keys create --name operator --scope admin          # prints the key once
-$ export VORA_API_KEY="vora_..."
+$ export VORA_ADMIN_KEY="vora_..."
 
-$ vora --api http://127.0.0.1:9300 --api-key "$VORA_API_KEY" \
-      secrets set --alias github --host api.github.com --value-stdin <<<"$GITHUB_TOKEN"
+# A global-admin key names the tenant it acts on; a tenant-scoped key does not.
+$ vora --api http://127.0.0.1:9300 --api-key "$VORA_ADMIN_KEY" \
+      keys create --name tenant-a --tenant t1            # sandbox scope by default
+key:    vora_...
+$ export VORA_TENANT_KEY="vora_..."
+
+$ vora --api http://127.0.0.1:9300 --api-key "$VORA_ADMIN_KEY" \
+      secrets set --tenant t1 --alias github --host api.github.com --value-stdin <<<"$GITHUB_TOKEN"
 secret github bound to api.github.com (bearer)
 
-$ vora --api http://127.0.0.1:9300 --api-key "$VORA_API_KEY" sandbox create \
+$ vora --api http://127.0.0.1:9300 --api-key "$VORA_TENANT_KEY" sandbox create \
       --image python --network restricted --allow-domain api.github.com --broker github
 Sandbox created: sbx_01M2NVHE1KRD8JT3D6QG6R0EW3
 
-$ vora --api http://127.0.0.1:9300 --api-key "$VORA_API_KEY" exec sbx_... -- \
+$ vora --api http://127.0.0.1:9300 --api-key "$VORA_TENANT_KEY" exec sbx_... -- \
       python3 -c 'import os,urllib.request; print(urllib.request.urlopen(os.environ["VORA_BROKER_URL"]+"/creds/github/user").status)'
 200
 
-$ vora --api http://127.0.0.1:9300 --api-key "$VORA_API_KEY" logs sbx_... --egress
+$ vora --api http://127.0.0.1:9300 --api-key "$VORA_TENANT_KEY" logs sbx_... --egress
 2026-09-17T21:00:00Z  allowed alias=github api.github.com
 ```
 
-Inside that sandbox, `env`, `/proc/self/environ`, and the filesystem contain no
-token and no alias secret — only the non-secret `VORA_BROKER_URL`.
+Inside that sandbox, `env`, `/proc/self/environ`, and the filesystem contain no token
+and no alias secret — only the non-secret `VORA_BROKER_URL`.
+
+**Keys and scopes.** `admin` covers keys, secrets and runner inventory, and also
+permits sandbox routes; `sandbox` covers sandboxes, their logs and their stats
+only. Create the operator key with `--scope admin` and it can do both. A key is
+pinned to the tenant it was created for, and a global-admin key must name that
+tenant (`--tenant t1`) for secrets and for new keys — `vora keys list` prints
+every key's `tenant_id`, which is how a global operator discovers the tenants in
+use. `VORA_MASTER_KEY` is required for `vora secrets`; without it the endpoints
+answer `503` and brokering stays off.
 
 ## Repository layout
 
