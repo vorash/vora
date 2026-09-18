@@ -10,6 +10,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/vorash/vora/internal/version"
 )
 
 // Metrics holds the runner's Prometheus collectors. A nil *Metrics is valid
@@ -17,6 +19,7 @@ import (
 type Metrics struct {
 	registry *prometheus.Registry
 
+	BuildInfo             prometheus.Gauge
 	SandboxCreateTotal    *prometheus.CounterVec
 	SandboxCreateDuration prometheus.Histogram
 	SandboxRunning        prometheus.Gauge
@@ -37,6 +40,12 @@ func New() *Metrics {
 	reg := prometheus.NewRegistry()
 	m := &Metrics{registry: reg}
 
+	m.BuildInfo = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name:        "vora_build_info",
+		Help:        "Build information for the running Vora runner.",
+		ConstLabels: prometheus.Labels{"version": version.String()},
+	})
+	m.BuildInfo.Set(1)
 	m.SandboxCreateTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vora_sandbox_create_total",
 		Help: "Total sandbox create requests by status.",
@@ -93,7 +102,7 @@ func New() *Metrics {
 	})
 
 	reg.MustRegister(
-		m.SandboxCreateTotal, m.SandboxCreateDuration, m.SandboxRunning,
+		m.BuildInfo, m.SandboxCreateTotal, m.SandboxCreateDuration, m.SandboxRunning,
 		m.SandboxFailedTotal, m.ExecTotal, m.ExecDuration, m.ExecFailedTotal,
 		m.PolicyDeniedTotal, m.NetworkDeniedTotal, m.NetworkDecisionsTotal,
 		m.AuditWriteFailedTotal, m.RunnerCapacity, m.RunnerSandboxes,
