@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -117,5 +118,38 @@ func TestVoraInitExecutesCommands(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("vora-init did not exit after Shutdown")
+	}
+}
+
+// TestVoraInitPauseMode covers the gVisor init: `vora-init pause` must stay
+// alive as PID 1 and exit cleanly on SIGTERM. It is what lets a shell-less
+// image boot under gVisor (issue #40).
+func TestVoraInitPauseMode(t *testing.T) {
+	bin := buildBinary(t, "vora-init")
+	cmd := exec.Command(bin, "pause")
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start vora-init pause: %v", err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+
+	select {
+	case err := <-exited:
+		t.Fatalf("pause exited early: %v", err)
+	case <-time.After(700 * time.Millisecond):
+	}
+
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("signal: %v", err)
+	}
+	select {
+	case err := <-exited:
+		if err != nil {
+			t.Fatalf("pause exited on SIGTERM with %v, want success", err)
+		}
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("pause did not exit after SIGTERM")
 	}
 }

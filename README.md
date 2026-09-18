@@ -25,8 +25,10 @@ snapshots. Written in Go, with no Kubernetes in the path.
     via systemd, read-only shared rootfs. Unprivileged, default local backend.
   - **gVisor (`runsc`)** — a user-space kernel (KVM platform), driven directly
     via gVisor **Method 2** inside a persistent `rootlesskit` user namespace.
-- A long-lived **in-sandbox agent** (`vora-init`, PID 1) for the bwrap backend;
-  gVisor uses native `runsc exec`.
+- A long-lived **in-sandbox init** (`vora-init`, PID 1) on both backends: the
+  exec agent for bwrap, a keep-alive process for gVisor (which execs natively).
+  It is Vora's own static binary, not the image's, so **shell-less (distroless)
+  images** boot on either backend.
 - **Default-deny networking**. `NetworkNone` (default) gives a sandbox no
   interfaces or routes. **`NetworkRestricted`** (bwrap) DNATs non-loopback TCP
   through an SNI-inspecting passthrough proxy and **drops every other packet**
@@ -348,6 +350,7 @@ make test              # unit tests
 make test-integration  # runner + sandbox lifecycle over a real socket (incl. Postgres via testcontainers)
 make test-security     # isolation suite (bwrap; gVisor subtests skipped unprivileged)
 make test-security-all # isolation matrix against bwrap AND gVisor
+make test-gvisor       # gVisor integration suite incl. a shell-less image (rootlesskit)
 make test-network      # NetworkRestricted netns/DNAT test (rootlesskit)
 make test-broker       # credential-broker boundary + end-to-end test (rootlesskit)
 make test-dns          # gateway resolver test (rootlesskit)

@@ -75,7 +75,8 @@ type WorkspaceSpec struct {
 	WorkspaceDir string `json:"workspace_dir"`
 	// HomeDir is bound read-write at /root.
 	HomeDir string `json:"home_dir"`
-	// IPCDir is bound at /run/vora and carries the agent control socket.
+	// IPCDir is bound at /vora and carries the agent control socket and the
+	// vora-init binary.
 	IPCDir string `json:"ipc_dir"`
 	// ControlSocket is the agent socket path on the host
 	// (inside IPCDir).
