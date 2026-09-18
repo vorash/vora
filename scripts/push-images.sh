@@ -156,4 +156,15 @@ else
   for d in "${digests[@]}"; do
     echo "  $d"
   done
+  # Surface the digests where they are easy to copy: this is what vora-ansible
+  # pins, and a job log is an awkward place to find them.
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    {
+      echo "## Sandbox images \`$TAG\`"
+      echo
+      for d in "${digests[@]}"; do
+        echo "- \`$d\`"
+      done
+    } >>"$GITHUB_STEP_SUMMARY"
+  fi
 fi

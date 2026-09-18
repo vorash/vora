@@ -90,24 +90,62 @@ jobs:
             "dist/vora_${VERSION}_linux_amd64.tar.gz"
           )
 
-          # The release stays a draft until every asset is up, so a consumer
-          # never sees a half-populated release, and a failed upload leaves the
+          # The release stays a draft until every asset is uploaded, so a consumer
+          # never sees a half-populated release and a failed upload leaves the
           # draft for inspection instead of publishing something broken.
+          #
+          # Created through the API rather than `gh release create --draft`: the
+          # latter first creates a release under an auto-generated `untagged-…`
+          # name and renames it, which leaves asset uploads racing a tag the
+          # release does not have yet.
           if gh release view "$VERSION" >/dev/null 2>&1; then
-            echo "release $VERSION already exists; adding assets"
+            echo "release $VERSION already exists; adding missing assets"
           else
-            gh release create "$VERSION" --title "Vora $VERSION" --generate-notes --verify-tag --draft
+            notes="$(gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+              -f tag_name="$VERSION" --jq .body)"
+            gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="$VERSION" \
+              -f name="Vora $VERSION" \
+              -f body="$notes" \
+              -F draft=true \
+              -F prerelease=false \
+              --jq '"created draft release \(.id) for tag \(.tag_name)"'
           fi
 
-          # One asset at a time: a single `gh release create` with several large
-          # assets was observed to stall mid-upload on a hosted runner.
+          # Upload one asset at a time and retry: uploads.github.com answers 500
+          # ("Error creating asset temp dir") intermittently, which is what
+          # stalled the first v0.4.1 run. The failure is transient, so back off
+          # and try again rather than failing the release.
+          upload() {
+            local file="$1" attempt
+            for attempt in 1 2 3 4 5; do
+              if gh release upload "$VERSION" "$file" --clobber; then
+                echo "uploaded $(basename "$file")"
+                return 0
+              fi
+              local wait=$((attempt * 15))
+              echo "attempt $attempt failed for $(basename "$file"); retrying in ${wait}s" >&2
+              sleep "$wait"
+            done
+            echo "error: could not upload $(basename "$file") after 5 attempts" >&2
+            return 1
+          }
+
           for asset in "${assets[@]}"; do
-            echo "uploading $asset"
-            gh release upload "$VERSION" "$asset" --clobber
+            upload "$asset" || exit 1
           done
 
+          # Fail loudly if the release is not actually complete before it goes
+          # public.
+          count="$(gh release view "$VERSION" --json assets --jq '.assets | length')"
+          if [[ "$count" -ne "${#assets[@]}" ]]; then
+            echo "error: $VERSION has $count assets, want ${#assets[@]}; leaving it as a draft" >&2
+            exit 1
+          fi
+
           gh release edit "$VERSION" --draft=false
-          gh release view "$VERSION" --json tagName,isDraft,assets --jq '"\(.tagName) draft=\(.isDraft) assets=\(.assets | length)"'
+          gh release view "$VERSION" --json tagName,isDraft,assets \
+            --jq '"\(.tagName) draft=\(.isDraft) assets=\(.assets | length)"'
 
   images:
     name: sandbox images
