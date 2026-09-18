@@ -73,6 +73,7 @@ infallible; the design minimises the trusted surface.
 | Credential exposure on the control-plane channel | a brokered create is refused when the API-to-runner channel has no transport encryption, unless `VORA_ALLOW_INSECURE_BROKER=1`; the runner refuses the same request over a plaintext endpoint | credentials |
 | Sandbox survives runner death | in-sandbox agent exits when the runner disappears; reconciler reaps orphans | lifecycle |
 | Malicious image | image rootfs is data only, read-only, no execution at build time | supply chain |
+| Malicious CLI plugin on `$PATH` | `vora <name>` dispatches only to a strictly named `vora-<name>` resolved with `exec.LookPath`: no shell, no config-supplied command line, built-ins always win, and `VORA_DISABLE_PLUGINS=1` opts out. Same trust model as `git`/`kubectl` — a writable early `$PATH` already implies code execution. | CLI |
 
 Credential brokering is delivered for bwrap (ADR 013) and its decisions appear in
 the same audit trail. Restricted egress and the gateway resolver are delivered
@@ -83,6 +84,8 @@ for bwrap only (ADR 012); gVisor remains `NetworkNone` by decision.
 - User namespaces are enabled on the host (`kernel.unprivileged_userns_clone=1`
   for the local backend).
 - The kernel, Bubblewrap, and containerd/gVisor are kept patched.
+- The operator's `$PATH` is under their control; a writable entry ahead of the
+  real tools already implies code execution as that operator.
 - The runner process and its socket are protected by filesystem permissions.
 - Images come from trusted references; content is not independently verified.
 
