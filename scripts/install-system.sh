@@ -54,6 +54,16 @@ install -d -m 0750 "$ETC"
 install -d -m 0750 "$STATE"
 install -d -m 0750 "$ETC/tls"
 
+# StateDirectory=vora only accepts a root-owned directory: anything else makes
+# systemd fail the unit with 238/STATE_DIRECTORY and it crash-loops. install -d
+# leaves an existing directory's ownership alone, so say so instead of letting it
+# surface as a restart loop.
+if [[ "$(stat -c %U:%G "$STATE")" != "root:root" ]]; then
+  echo "warning: $STATE is $(stat -c %U:%G "$STATE"), but StateDirectory=vora requires root:root." >&2
+  echo "warning: the units will fail with status 238/STATE_DIRECTORY; fix with:" >&2
+  echo "warning:   chown root:root $STATE" >&2
+fi
+
 # Environment files: created once, never overwritten. The units require them,
 # so an unconfigured host fails to start instead of running with defaults.
 if [[ ! -f "$ETC/runner.env" ]]; then

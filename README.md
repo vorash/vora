@@ -1,20 +1,20 @@
 # Vora
 
-**Secure execution infrastructure for autonomous agents.**
+Vora runs untrusted code — AI agents, generated scripts, code you would not run
+on your own machine — in isolated Linux sandboxes, and keeps a record of what it
+did.
 
-Vora runs untrusted AI agents and generated code inside isolated Linux
-environments with resource controls, default-deny networking, and a complete
-execution audit trail.
+Start a sandbox from an OCI image, `exec` into it, cap its memory/CPU/PIDs, cut
+its network off by default, and read back every lifecycle event, execution and
+network decision. Isolation is Bubblewrap (namespaces plus cgroup v2 through
+systemd) or gVisor (`runsc`), chosen per sandbox; the rootfs comes from containerd
+snapshots. Written in Go, with no Kubernetes in the path.
 
-Built with Go, Bubblewrap, Linux namespaces, cgroups v2 (via systemd), gRPC,
-and Prometheus.
-
-> **Status: v0.4 proof of concept.** Two isolation backends (Bubblewrap and
-> gVisor), restricted bwrap egress with an allowlist-only resolver and
-> credential brokering, and a `vora-api` control plane are functional and
-> covered by tests. It is **not** production-ready and has not been
-> independently audited. See [Roadmap](#roadmap) and
-> [Limitations](#limitations-honest).
+> **Status: v0.4, a proof of concept.** What is described here is implemented and
+> covered by tests, but it has not been independently audited and is not ready to
+> be trusted with anything that matters. [Limitations](#limitations-honest) lists
+> what is missing on purpose and what is a hard v0.x boundary;
+> [Roadmap](#roadmap) is what comes next.
 
 ## What works today
 
@@ -123,7 +123,7 @@ and gVisor (the gVisor leg inside a `rootlesskit` user namespace).
 ## Demo
 
 ```console
-$ vora sandbox create --image python --memory 512m --cpu 1 --pids 128 --network none
+$ vora sandbox create --image vora/python --memory 512m --cpu 1 --pids 128 --network none
 Sandbox created: sbx_01M2NVHE1KRD8JT3D6QG6R0EW3
 
 $ vora exec sbx_01M2NVHE1KRD8JT3D6QG6R0EW3 -- python3 -c 'print("hello from vora")'
@@ -164,7 +164,7 @@ $ vora --api http://127.0.0.1:9300 --api-key "$VORA_ADMIN_KEY" \
 secret github bound to api.github.com (bearer)
 
 $ vora --api http://127.0.0.1:9300 --api-key "$VORA_TENANT_KEY" sandbox create \
-      --image python --network restricted --allow-domain api.github.com --broker github
+      --image vora/python --network restricted --allow-domain api.github.com --broker github
 Sandbox created: sbx_01M2NVHE1KRD8JT3D6QG6R0EW3
 
 $ vora --api http://127.0.0.1:9300 --api-key "$VORA_TENANT_KEY" exec sbx_... -- \
@@ -187,6 +187,111 @@ every key's `tenant_id`, which is how a global operator discovers the tenants in
 use. `VORA_MASTER_KEY` is required for `vora secrets`; without it the endpoints
 answer `503` and brokering stays off.
 
+## Testing the sandbox images
+
+`vora-base`, `vora-python` and `vora-node` are ordinary OCI images. What makes
+them *vora* images is `/workspace` and `/vora` (the runner needs both) and a
+`/etc/resolv.conf` in the layers — the restricted path binds a resolver config
+over that path, and refuses to start an image that has none. Debian 13, Python
+3.13 and Node 22 at the time of writing.
+
+The steps below go from an empty containerd to a sandbox you have checked
+yourself. They use `vora/python`; `vora/base` and `vora/node` work the same way,
+and they assume a runner is up (`make install-rootless` for the dev service, see
+[Development](#development)).
+
+**1. Put the image where the runner looks.** From a checkout:
+
+```bash
+make images         # docker build of images/{base,python,node}
+make pull-images    # import them into containerd, namespace vora
+```
+
+On a host with the released binaries, pull the published image instead, pinned by
+digest — `:v0.4.2` can be moved, a digest cannot:
+
+```bash
+sudo ctr --namespace vora images pull \
+  --user <github-user>:<PAT with read:packages> \
+  ghcr.io/vorash/vora-python@sha256:56c7b3e0f252a34b6f977f94fd03ce8eefffa6af8a2f355f489ecd25d2538c94
+```
+
+Do not add `--snapshotter`: on ctr 2.x it fails with `unable to initialize
+unpacker: no unpack platforms defined`, and it is not needed — the runner unpacks
+into its own snapshotter from the local content store. Private packages and what a
+failed pull looks like are in [docs/release.md](docs/release.md).
+
+**2. Create a sandbox and look inside.**
+
+```console
+$ vora sandbox create --image vora/python --memory 256m --cpu 1 --pids 128 --network none
+Sandbox created: sbx_01M2T40M8YQQDNNP4M17AFCPHX
+
+$ vora exec sbx_... -- python3 -c 'import sys, platform; print("python", sys.version.split()[0], "on", platform.platform())'
+python 3.13.15 on Linux-4.19.0-gvisor-x86_64-with-glibc2.41
+
+$ vora exec sbx_... -- sh -c 'id; grep VERSION_ID /etc/os-release; ls /vora /workspace'
+uid=0(root) gid=0(root) groups=0(root)
+VERSION_ID="13"
+/vora:
+
+/workspace:
+```
+
+That `uid=0` is root inside the sandbox's user namespace, not on the host, and
+`4.19.0-gvisor` is gVisor's synthetic kernel — this sandbox took the gVisor
+backend (`--backend bwrap` forces Bubblewrap, `--backend auto` is the default).
+Pass `vora/python`, not `python`: a bare name resolves to Docker Hub's own image.
+
+**3. Check that the box actually holds.**
+
+```console
+$ vora exec sbx_... -- python3 -c 'import socket; s=socket.socket(); s.settimeout(2); print("metadata:", "REACHABLE" if s.connect_ex(("169.254.169.254", 80)) == 0 else "BLOCKED")'
+metadata: BLOCKED
+
+$ vora exec sbx_... -- sh -c 'ip -o addr show | wc -l'
+0
+
+$ vora exec sbx_... -- touch /etc/foo
+touch: cannot touch '/etc/foo': Read-only file system
+```
+
+`--network none` leaves the sandbox with no interfaces at all, and the rootfs is
+read-only everywhere except `/workspace`, `/root` and `/tmp`.
+
+**4. Watch it, then clean up.**
+
+```console
+$ vora stats sbx_...
+memory:    51187712 bytes
+peak:      62246912 bytes
+cpu:       152 millis
+pids:      30
+
+$ vora logs sbx_...
+2026-09-18T13:20:02+02:00  REQUESTED -> SCHEDULING
+2026-09-18T13:20:02+02:00  SCHEDULING -> CREATING
+2026-09-18T13:20:02+02:00  CREATING -> STARTING
+2026-09-18T13:20:03+02:00  STARTING -> RUNNING
+
+$ vora sandbox destroy sbx_...
+Destroyed sbx_01M2T40M8YQQDNNP4M17AFCPHX
+```
+
+**When it does not work.** The first failure is usually this one:
+
+```text
+vora: sandbox sbx_... created but failed to start: rpc error: code = FailedPrecondition
+desc = images: image not found in cache: ghcr.io/vorash/vora-python:v0.4.2 (run 'make images')
+```
+
+It is misleading. For a registry ref it means the *pull* failed — private
+package, missing or wrong credentials, wrong digest — not that a local image is
+missing; [docs/release.md](docs/release.md) has the credential setup. Restricted
+networking, the broker and the gateway resolver need root or a delegated cgroup
+subtree, so a rootless dev runner refuses them by design. Everything above works
+without that.
+
 ## Repository layout
 
 ```text
@@ -197,7 +302,7 @@ docs/           architecture docs, ADRs and benchmark reports
 tests/          integration, security and benchmark suites
 images/         rootfs image definitions (base, python, node)
 scripts/        image build and benchmark helpers
-deploy/         systemd units and Ansible roles (v0.2)
+deploy/         systemd units for the system install (vora-ansible is its own repo)
 ```
 
 ## Development
@@ -207,7 +312,8 @@ Docker (to build images), Bubblewrap, `runsc` (gVisor), `rootlesskit`,
 `slirp4netns`, `fuse-overlayfs`, and a systemd user session.
 
 ```bash
-make images            # build the read-only rootfs cache as <name>/latest (Docker export; containerd-backed WIP)
+make images            # build the read-only rootfs images with Docker
+make pull-images       # import those images into containerd (namespace vora)
 make binaries          # build bin/{vora,vora-runner,vora-init} (static)
 make test              # unit tests
 make test-integration  # runner + sandbox lifecycle over a real socket (incl. Postgres via testcontainers)
@@ -259,7 +365,7 @@ export VORA_MASTER_KEY="$(openssl rand -base64 48)"   # vora-api only
 vora --api https://api.example:9300 --api-key "$VORA_API_KEY" \
   secrets set --alias github --host api.github.com --value-stdin < token.txt
 vora --api https://api.example:9300 --api-key "$VORA_API_KEY" sandbox create \
-  --image python --network restricted --allow-domain api.github.com --broker github
+  --image vora/python --network restricted --allow-domain api.github.com --broker github
 ```
 
 Control plane (remote HTTP API):
@@ -291,7 +397,9 @@ A `v*` tag produces a GitHub release with static `linux/amd64` binaries
 (`vora`, `vora-runner`, `vora-init`, `vora-api`), `SHA256SUMS`, and a tarball
 that also contains `LICENSE` and the systemd units. The same workflow publishes
 the sandbox rootfs images to GHCR as `ghcr.io/vorash/vora-{base,python,node}`,
-which the runner pulls by reference. Re-run it for an existing tag with
+which the runner pulls by reference. Those packages are private by default, so a
+host pre-pulls them with a PAT — see [docs/release.md](docs/release.md) and
+[Testing the sandbox images](#testing-the-sandbox-images). Re-run it for an existing tag with
 `gh workflow run release.yml -f version=v0.4.0`.
 
 ```console
