@@ -19,6 +19,8 @@ service RunnerService {
   rpc GetSandboxEvents(GetSandboxEventsRequest) returns (GetSandboxEventsResponse);
   rpc GetSandboxExecs(GetSandboxExecsRequest) returns (GetSandboxExecsResponse);
   rpc GetSandboxEgress(GetSandboxEgressRequest) returns (GetSandboxEgressResponse);
+  rpc GetSandboxFile(GetSandboxFileRequest) returns (GetSandboxFileResponse);
+  rpc PutSandboxFile(PutSandboxFileRequest) returns (PutSandboxFileResponse);
   rpc DestroySandbox(DestroySandboxRequest) returns (DestroySandboxResponse);
 }
 
@@ -126,6 +128,29 @@ message SandboxEgress {
   string reason = 5;
   int64 timestamp_unix_ms = 6;
   string alias = 7;
+}
+
+message GetSandboxFileRequest {
+  string sandbox_id = 1;
+  string path = 2;
+}
+
+message GetSandboxFileResponse {
+  string path = 1;
+  bytes content = 2;
+}
+
+message PutSandboxFileRequest {
+  string sandbox_id = 1;
+  string path = 2;
+  bytes content = 3;
+  // create_parents makes missing parent directories under the sandbox path.
+  bool create_parents = 4;
+}
+
+message PutSandboxFileResponse {
+  string path = 1;
+  int64 bytes_written = 2;
 }
 
 message DestroySandboxRequest {

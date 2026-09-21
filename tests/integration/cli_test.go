@@ -92,17 +92,24 @@ func TestCLIWorkflow(t *testing.T) {
 		t.Fatalf("exit propagation = %d, want 7", code)
 	}
 
-	// cp round-trips a file.
+	// cp round-trips a file, including parents created by cp.
 	local := filepath.Join(t.TempDir(), "local.txt")
 	if err := os.WriteFile(local, []byte("round trip\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if out, code = vora("cp", local, id+":/workspace/local.txt"); code != 0 {
+	if out, code = vora("cp", local, id+":/workspace/nested/local.txt"); code != 0 {
 		t.Fatalf("cp in failed (%d): %s", code, out)
 	}
-	out, code = vora("exec", id, "--", "cat", "/workspace/local.txt")
+	out, code = vora("exec", id, "--", "cat", "/workspace/nested/local.txt")
 	if code != 0 || strings.TrimSpace(out) != "round trip" {
 		t.Fatalf("cp readback = %q (code %d)", out, code)
+	}
+	outPath := filepath.Join(t.TempDir(), "out.txt")
+	if out, code = vora("cp", id+":/workspace/nested/local.txt", outPath); code != 0 {
+		t.Fatalf("cp out failed (%d): %s", code, out)
+	}
+	if data, err := os.ReadFile(outPath); err != nil || string(data) != "round trip\n" {
+		t.Fatalf("cp out = %q, %v", data, err)
 	}
 
 	out, code = vora("logs", id)

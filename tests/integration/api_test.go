@@ -180,6 +180,15 @@ func TestAPIControlPlane(t *testing.T) {
 	if len(events) == 0 {
 		t.Fatal("expected lifecycle events")
 	}
+
+	// File round-trip through the API.
+	if _, err := httpc.PutFile(ctx, sb.GetId(), "/workspace/api.txt", []byte("api file\n"), true); err != nil {
+		t.Fatalf("PutFile over API: %v", err)
+	}
+	content, err := httpc.GetFile(ctx, sb.GetId(), "/workspace/api.txt")
+	if err != nil || string(content) != "api file\n" {
+		t.Fatalf("GetFile over API = %q, %v", content, err)
+	}
 }
 
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
