@@ -193,7 +193,7 @@ func run() error {
 		if tunnelLn, err := tc.Listen(ctx); err != nil {
 			logger.Warn("tunnel connect failed", "addr", tunnelAddr, "error", err)
 		} else {
-			tunnelServer := grpc.NewServer()
+			tunnelServer := grpc.NewServer(grpc.StatsHandler(otelgrpc.NewServerHandler()))
 			v1.RegisterRunnerServiceServer(tunnelServer, server)
 			go func() {
 				if err := tunnelServer.Serve(tunnelLn); err != nil && !errors.Is(err, grpc.ErrServerStopped) {

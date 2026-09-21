@@ -65,12 +65,11 @@ type TunnelDialer interface {
 // DialTunnel connects to a runner over a reverse tunnel instead of the network,
 // so a runner behind NAT can still be driven by the control plane.
 func DialTunnel(runnerID string, t TunnelDialer) (*Client, error) {
-	conn, err := grpc.NewClient("passthrough:///vora-tunnel",
+	opts := append(dialOptions(insecure.NewCredentials()),
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 			return t.Dial(ctx, runnerID)
-		}),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
+		}))
+	conn, err := grpc.NewClient("passthrough:///vora-tunnel", opts...)
 	if err != nil {
 		return nil, fmt.Errorf("client: dial tunnel %s: %w", runnerID, err)
 	}
