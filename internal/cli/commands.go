@@ -224,6 +224,7 @@ func (a *app) sandboxDestroyCmd() *cobra.Command {
 func (a *app) execCmd() *cobra.Command {
 	var cwd string
 	var env []string
+	var sendStdin bool
 	cmd := &cobra.Command{
 		Use:                   "exec <sandbox-id> -- <command> [args...]",
 		Short:                 "Run a command in a sandbox",
@@ -231,6 +232,11 @@ func (a *app) execCmd() *cobra.Command {
 		DisableFlagsInUseLine: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id, command, rest := args[0], args[1], args[2:]
+
+			stdin, err := readExecStdin(cmd.InOrStdin(), sendStdin)
+			if err != nil {
+				return err
+			}
 
 			c, ctx, cancel, err := a.dial()
 			if err != nil {
@@ -244,6 +250,7 @@ func (a *app) execCmd() *cobra.Command {
 				Args:    rest,
 				Cwd:     cwd,
 				Env:     env,
+				Stdin:   stdin,
 			}, os.Stdout, os.Stderr)
 			if err != nil {
 				return err
@@ -257,7 +264,45 @@ func (a *app) execCmd() *cobra.Command {
 	// The command and its own flags follow `--`; pflag consumes the separator.
 	cmd.Flags().StringVar(&cwd, "workdir", "/workspace", "working directory inside the sandbox")
 	cmd.Flags().StringArrayVar(&env, "env", nil, "environment variable KEY=VALUE (repeatable)")
+	cmd.Flags().BoolVarP(&sendStdin, "stdin", "i", false, "forward stdin when it is a terminal (piped input is always forwarded)")
 	return cmd
+}
+
+// execStdinMax caps how much of stdin is forwarded. ExecRequest.Stdin is a
+// single bytes field, so the whole input rides in one gRPC message; bounding
+// the read turns oversized input into a clear error instead of letting the
+// message-size limit fail obscurely.
+const execStdinMax = 1 << 20 // 1 MiB
+
+// readExecStdin returns the bytes to forward to the sandboxed command. Piped or
+// redirected stdin is forwarded by default; force forwards even when stdin is an
+// interactive terminal. A character device (a TTY, or /dev/null) is otherwise
+// left untouched, so `vora exec ... -- cat` typed at a prompt still waits on the
+// terminal rather than being read by us first.
+func readExecStdin(in io.Reader, force bool) ([]byte, error) {
+	if !force && isCharDevice(in) {
+		return nil, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(in, execStdinMax+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > execStdinMax {
+		return nil, fmt.Errorf("stdin exceeds %d bytes; write larger input into the sandbox with 'vora cp'", execStdinMax)
+	}
+	return data, nil
+}
+
+func isCharDevice(in io.Reader) bool {
+	f, ok := in.(*os.File)
+	if !ok {
+		return false
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 // runExec streams a command's output to stdout/stderr and returns its exit code.
