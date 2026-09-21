@@ -4,6 +4,7 @@ package security
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -17,8 +18,12 @@ import (
 // writable directories past DiskBytes, so the host filesystem is never
 // overrun. When the host cannot enforce project quotas the test is SKIPped
 // with the reason — the soft enforcer is covered by the integration suite.
+//
+// Set VORA_QUOTA_TEST_DIR to the real, prjquota-mounted state directory (e.g.
+// /var/lib/vora/sandboxes) when validating a host; otherwise it runs under the
+// test temp dir, which usually has no project quotas and SKIPs.
 func TestDiskQuotaBoundsHostWrites(t *testing.T) {
-	root := t.TempDir()
+	root := quotaTestRoot(t)
 	m := quota.New(root)
 	if m.Mode() != quota.ModeProject {
 		t.Skipf("host does not enforce project quotas (mode=%s): needs root, chattr/setquota and a prjquota mount", m.Mode())
@@ -61,4 +66,20 @@ func (neverReader) Read(p []byte) (int, error) {
 		p[i] = 0
 	}
 	return len(p), nil
+}
+
+// quotaTestRoot returns the directory the quota test runs against: the real
+// mounted state dir when VORA_QUOTA_TEST_DIR is set, otherwise a temp dir.
+func quotaTestRoot(t *testing.T) string {
+	t.Helper()
+	dir := os.Getenv("VORA_QUOTA_TEST_DIR")
+	if dir == "" {
+		return t.TempDir()
+	}
+	root := filepath.Join(dir, fmt.Sprintf("vora-quota-test-%d", os.Getpid()))
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("create VORA_QUOTA_TEST_DIR %s: %v", root, err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	return root
 }
