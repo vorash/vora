@@ -32,6 +32,7 @@ import (
 
 	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/agentproto"
+	"github.com/vorash/vora/internal/seccomp"
 )
 
 const chunkSize = 32 * 1024
@@ -51,6 +52,14 @@ func main() {
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// Syscall filtering for the Bubblewrap sandbox. It is installed before the
+	// agent serves and before any workload starts, so every process inherits
+	// it. A failure is fatal: a sandbox must not run unfiltered by accident
+	// (issue #23).
+	if err := seccomp.Install(); err != nil {
+		logger.Error("install seccomp filter", "error", err)
+		os.Exit(1)
+	}
 	a := newAgent(*socket, *grace, logger)
 
 	if err := os.MkdirAll(filepath.Dir(*socket), 0o755); err != nil {

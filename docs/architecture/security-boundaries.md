@@ -41,7 +41,7 @@ scan (ADR 015); `TestDiskQuotaBoundsHostWrites` covers the hard path.
 | Host resource | Protection |
 | ------------- | ---------- |
 | Filesystem | rootfs mounted read-only; host paths never bind-mounted; no host `/` exposure |
-| Kernel | bwrap: unprivileged user namespace. gVisor: user-space kernel (KVM). seccomp on bwrap is a follow-up |
+| Kernel | bwrap: unprivileged user namespace + a seccomp deny-list installed by `vora-init` (ADR 018). gVisor: user-space kernel (KVM) |
 | PID 1 / init | sandbox has its own PID namespace |
 | Devices | minimal `/dev` from Bubblewrap / gVisor OCI spec |
 | cgroup hierarchy | bwrap: transient systemd units. gVisor: delegated subtree under `vora-runner.service` (`Delegate=yes`) |
@@ -51,7 +51,9 @@ scan (ADR 015); `TestDiskQuotaBoundsHostWrites` covers the hard path.
 
 - **Shared kernel on bwrap.** Bubblewrap isolates namespaces but shares the
   kernel; a kernel vulnerability could escape. gVisor reduces this surface.
-- **No syscall filtering on bwrap.** seccomp is not yet applied.
+- **bwrap runs under a seccomp deny-list (ADR 018).** It is hardening, not a
+  containment boundary: namespaces and cgroup limits are the isolation, and
+  gVisor's user-space kernel is stronger still where it is available.
 - **Read-only rootfs assumptions.** Some toolchains expect writable paths
   outside `/workspace`; those calls fail closed rather than being permitted.
 - **Disk quota is directory-bounded, not enforced by a filesystem quota**; the
