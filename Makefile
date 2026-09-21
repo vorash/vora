@@ -94,13 +94,13 @@ test-gvisor: binaries ## Run the gVisor integration suite under rootlesskit (Met
 		bash -c 'cd "$(CURDIR)" && VORA_INIT_BINARY="$(CURDIR)/bin/vora-init" $(GO) test -tags=integration -count=1 -run "TestGvisor" ./tests/integration/...'
 
 .PHONY: test-network
-test-network: ## Run the NetworkRestricted netns test under rootlesskit
+test-network: ## Run the per-sandbox netns tests (restricted, full, private) under rootlesskit
 	@command -v rootlesskit >/dev/null 2>&1 || { echo "rootlesskit not installed; skipped"; exit 0; }
 	rootlesskit \
 		--state-dir="$${XDG_RUNTIME_DIR}/vora-rootlesskit-net" \
 		--net=slirp4netns --mtu=65520 --disable-host-loopback \
 		--copy-up=/etc --copy-up=/run --copy-up=/var/lib --propagation=rslave \
-		bash -c 'cd "$(CURDIR)" && $(GO) test -tags=integration -run TestNetworkRestricted ./tests/integration/...'
+		bash -c 'cd "$(CURDIR)" && $(GO) test -tags=integration -run TestNetwork ./tests/integration/...'
 
 .PHONY: test-broker
 test-broker: ## Run the credential-broker end-to-end test under rootlesskit

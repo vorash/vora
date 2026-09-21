@@ -3,6 +3,8 @@ package network
 import (
 	"os"
 	"testing"
+
+	"github.com/vorash/vora/internal/runtime"
 )
 
 func TestSubnetFor(t *testing.T) {
@@ -65,4 +67,103 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+func TestTenantAddresses(t *testing.T) {
+	cases := []struct {
+		tenant, host           uint32
+		gateway, sandbox, cidr string
+	}{
+		{0, 0, "10.9.0.1", "10.9.0.2", "10.9.0.0/24"},
+		{0, 1, "10.9.0.5", "10.9.0.6", "10.9.0.0/24"},
+		{3, 0, "10.9.3.1", "10.9.3.2", "10.9.3.0/24"},
+		{255, 63, "10.9.255.253", "10.9.255.254", "10.9.255.0/24"},
+	}
+	for _, c := range cases {
+		gw, sb, cidr := tenantAddresses(c.tenant, c.host)
+		if gw != c.gateway || sb != c.sandbox || cidr != c.cidr {
+			t.Errorf("tenantAddresses(%d,%d) = %s, %s, %s; want %s, %s, %s",
+				c.tenant, c.host, gw, sb, cidr, c.gateway, c.sandbox, c.cidr)
+		}
+	}
+}
+
+func TestFullSandboxRulesBlockPrivateRanges(t *testing.T) {
+	n := &Net{ID: "sbx_full", Mode: runtime.NetworkFull, GatewayIP: "10.7.0.1", SandboxIP: "10.7.0.2"}
+	rules := sandboxRules(n, servicePorts{})
+	for _, want := range []string{
+		"type filter hook output priority 0; policy accept",
+		"oifname \"lo\" accept",
+		"ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 127.0.0.0/8 } drop",
+	} {
+		if !contains(rules, want) {
+			t.Errorf("full sandbox rules missing %q:\n%s", want, rules)
+		}
+	}
+	// Full mode must not DNAT through the restricted proxy.
+	if contains(rules, "dnat to") {
+		t.Errorf("full sandbox rules must not redirect to the proxy:\n%s", rules)
+	}
+}
+
+func TestPrivateSandboxRulesAllowOnlyTenantSubnet(t *testing.T) {
+	n := &Net{ID: "sbx_priv", Mode: runtime.NetworkPrivate, GatewayIP: "10.9.3.1", SandboxIP: "10.9.3.2", SandboxCIDR: "10.9.3.0/24"}
+	rules := sandboxRules(n, servicePorts{})
+	if !contains(rules, "type filter hook output priority 0; policy drop") {
+		t.Errorf("private sandbox rules must default-deny:\n%s", rules)
+	}
+	if !contains(rules, "ip daddr 10.9.3.0/24 accept") {
+		t.Errorf("private sandbox rules must allow the tenant subnet:\n%s", rules)
+	}
+	// No public egress: every non-tenant destination falls through to drop.
+	if contains(rules, "policy accept") {
+		t.Errorf("private sandbox rules must not have an accept policy:\n%s", rules)
+	}
+}
+
+func TestFullRunnerRulesMasquerade(t *testing.T) {
+	n := &Net{ID: "sbx_full", Mode: runtime.NetworkFull, SandboxIP: "10.7.0.2"}
+	rules := runnerRules(n)
+	for _, want := range []string{
+		"table ip vora_fwd_sbx_full",
+		"ip saddr 10.7.0.2 ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 127.0.0.0/8 } drop",
+		"table ip vora_nat_sbx_full",
+		"type nat hook postrouting priority 100",
+		"ip saddr 10.7.0.2 masquerade",
+	} {
+		if !contains(rules, want) {
+			t.Errorf("full runner rules missing %q:\n%s", want, rules)
+		}
+	}
+}
+
+func TestPrivateRunnerRulesAllowOnlyTenantSubnet(t *testing.T) {
+	n := &Net{ID: "sbx_priv", Mode: runtime.NetworkPrivate, SandboxIP: "10.9.3.2", SandboxCIDR: "10.9.3.0/24"}
+	rules := runnerRules(n)
+	for _, want := range []string{
+		"table ip vora_fwd_sbx_priv",
+		"ip saddr 10.9.3.2 ip daddr 10.9.3.0/24 accept",
+		"ip saddr 10.9.3.2 drop",
+	} {
+		if !contains(rules, want) {
+			t.Errorf("private runner rules missing %q:\n%s", want, rules)
+		}
+	}
+	// No NAT: private traffic stays inside the runner's namespace.
+	if contains(rules, "masquerade") {
+		t.Errorf("private runner rules must not masquerade:\n%s", rules)
+	}
+}
+
+func TestRestrictedRunnerRulesAreEmpty(t *testing.T) {
+	n := &Net{ID: "sbx_r", Mode: runtime.NetworkRestricted, SandboxIP: "10.7.0.2"}
+	if rules := runnerRules(n); rules != "" {
+		t.Fatalf("restricted mode needs no runner-side rules, got:\n%s", rules)
+	}
+}
+
+func TestTableNameIsSanitized(t *testing.T) {
+	if got := tableName("vora_fwd", "sbx-01.H/x"); got != "vora_fwd_sbx_01_H_x" {
+		t.Fatalf("tableName = %q", got)
+	}
 }

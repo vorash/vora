@@ -23,6 +23,8 @@ proves it. If the mechanism is removed, the test must fail.
 | Egress (bwrap, `NetworkRestricted`) | A's only route is the gateway; every TCP connection is DNAT'd to the SNI proxy, which allows listed domains and denies the rest | per-sandbox netns + veth + nft DNAT + SNI proxy (ADR 012) | `TestNetworkRestrictedDNAT` + `egress` unit tests |
 | Name resolution (bwrap) | A can only resolve allowlisted names, through the gateway resolver; private/CGNAT answers and non-address types are refused | allowlist-only resolver on the gateway + nft accept (ADR 012) | `TestDNSThroughNetns` + `egress` DNS unit tests |
 | Brokered credentials (bwrap) | A reaches an allowlisted API through the broker route without ever holding the credential; the broker binds each alias to one host and never follows a redirect | gateway broker + host/allowlist binding (ADR 013) | `TestNoSecretsLeakBroker` + `egress` broker unit tests |
+| Egress (bwrap, `NetworkFull`) | A reaches public hosts through the runner, but private ranges (RFC1918, link-local/metadata, loopback) and every other sandbox stay blocked | per-sandbox netns + veth + nft output drop + runner forward/NAT (ADR 016) | `TestNetworkFullBlocksPrivateRanges` |
+| Peer network (bwrap, `NetworkPrivate`) | A reaches the other sandboxes of its tenant and nothing else; public egress, other tenants and host private ranges are denied | per-sandbox netns + veth + per-tenant routing + nft default-deny (ADR 016) | `TestNetworkPrivateIsolatesTenants` |
 | Memory | A's allocations are capped; exceeding the cap kills A, not B | `memory.max`, `memory.swap.max=0` | `TestMemoryBombKilled` |
 | PIDs | A's fork attempts hit its own `pids.max`; B's process budget is untouched | `pids.max` | `TestForkBombContained` |
 | Control socket | A's control socket lives in its own `ipc/` directory bound only into A | per-sandbox bind mount | `TestControlSocketIsolation` |
@@ -30,8 +32,9 @@ proves it. If the mechanism is removed, the test must fail.
 
 CPU quota is set (`cpu.max` / systemd `CPUQuota`) and asserted by
 `TestSystemdUnitLimitsAndTeardown` / the gVisor subtree writer. There is no
-live-throttle security test (too flaky). Disk is directory-bounded, not
-quota-enforced; there is no disk-quota test until a later milestone.
+live-throttle security test (too flaky). Disk is bounded by `DiskBytes`: a
+filesystem project quota when the host supports it, otherwise a periodic usage
+scan (ADR 015); `TestDiskQuotaBoundsHostWrites` covers the hard path.
 
 ## Host protection
 

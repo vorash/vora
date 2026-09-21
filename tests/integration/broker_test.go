@@ -89,7 +89,7 @@ func TestBrokerEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bwrap backend: %v", err)
 	}
-	backend.SetRestricted(subtree, manager, sink)
+	backend.EnableNetns(subtree, manager, sink)
 
 	id := "sbx_broker_" + strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "")
 	wsManager := workspace.NewManager(cfg.SandboxesDir())
@@ -229,7 +229,7 @@ func TestBrokerThroughNetns(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	n, err := manager.Create(ctx, "sbx_broker_netns")
+	n, err := manager.Create(ctx, "sbx_broker_netns", network.Policy{Mode: runtime.NetworkRestricted})
 	if err != nil {
 		t.Fatalf("network Create: %v", err)
 	}

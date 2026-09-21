@@ -40,6 +40,13 @@ snapshots. Written in Go, with no Kubernetes in the path.
   is consulted), refuses answers that map to loopback/private/metadata
   addresses, refuses non-address query types, and audits every query. A workload
   with a hardcoded resolver is redirected to it rather than silently dropped.
+- **`NetworkFull` and `NetworkPrivate`** (bwrap, [ADR 016](docs/adr/016-network-modes.md)).
+  `NetworkFull` routes public egress through the runner while keeping private
+  ranges (RFC1918, link-local/metadata, loopback) and every other sandbox
+  blocked. `NetworkPrivate` gives a tenant a shared `/24` so its sandboxes reach
+  each other, with public egress and all other private ranges denied. Both keep
+  per-sandbox network namespaces; the two modes are bwrap-only (gVisor remains
+  `NetworkNone`).
 - **Brokered credentials** ([ADR 013](docs/adr/013-credential-brokering.md)).
   `vora secrets set` stores a third-party token encrypted under `VORA_MASTER_KEY`
   in the control plane; a sandbox created with `--broker <alias>` calls

@@ -55,6 +55,9 @@ func (a *app) sandboxCreateCmd() *cobra.Command {
 					return fmt.Errorf("--broker requires --network restricted")
 				}
 			}
+			if mode == v1.NetworkMode_NETWORK_PRIVATE && tenant == "" {
+				return fmt.Errorf("--network private requires --tenant")
+			}
 			var diskBytes int64
 			if disk != "" {
 				diskBytes, err = parseMemory(disk)
@@ -105,7 +108,7 @@ func (a *app) sandboxCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cpu, "cpu", "1", "CPU limit (e.g. 1, 500m)")
 	cmd.Flags().Int64Var(&pids, "pids", 128, "process limit")
 	cmd.Flags().StringVar(&disk, "disk", "", "writable-space limit for /workspace and /root (e.g. 1Gi); empty is unlimited")
-	cmd.Flags().StringVar(&network, "network", "none", "network mode: none or restricted")
+	cmd.Flags().StringVar(&network, "network", "none", "network mode: none, restricted, full or private")
 	cmd.Flags().StringArrayVar(&allowedDomains, "allow-domain", nil, "egress allowlist domain for --network restricted (repeatable, e.g. example.com)")
 	cmd.Flags().StringArrayVar(&brokers, "broker", nil, "credential alias to allow through the broker (repeatable; requires --api and --network restricted)")
 	cmd.Flags().StringVar(&ttl, "ttl", "30m", "sandbox time to live")

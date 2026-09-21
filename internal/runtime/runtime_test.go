@@ -106,3 +106,56 @@ func TestRegistry(t *testing.T) {
 		t.Fatalf("Names() = %v", names)
 	}
 }
+
+func TestValidateNetworkModeCombinations(t *testing.T) {
+	rejects := map[string]func(*SandboxSpec){
+		"allowed domains with full": func(s *SandboxSpec) {
+			s.Network = NetworkPolicy{Mode: NetworkFull, AllowedDomains: []string{"example.com"}}
+		},
+		"allowed domains with private": func(s *SandboxSpec) {
+			s.TenantID = "tenant-a"
+			s.Network = NetworkPolicy{Mode: NetworkPrivate, AllowedDomains: []string{"example.com"}}
+		},
+		"broker aliases with private": func(s *SandboxSpec) {
+			s.TenantID = "tenant-a"
+			s.Network = NetworkPolicy{Mode: NetworkPrivate, BrokerAliases: []string{"github"}}
+		},
+		"private without tenant": func(s *SandboxSpec) {
+			s.Network = NetworkPolicy{Mode: NetworkPrivate}
+		},
+		"negative disk": func(s *SandboxSpec) {
+			s.Resources.DiskBytes = -1
+		},
+	}
+	for name, mutate := range rejects {
+		t.Run("reject/"+name, func(t *testing.T) {
+			s := validSpec()
+			mutate(&s)
+			if err := s.Validate(); !errors.Is(err, ErrInvalidSpec) {
+				t.Fatalf("Validate() = %v, want ErrInvalidSpec", err)
+			}
+		})
+	}
+
+	accepts := map[string]func(*SandboxSpec){
+		"full": func(s *SandboxSpec) {
+			s.Network = NetworkPolicy{Mode: NetworkFull}
+		},
+		"private with tenant": func(s *SandboxSpec) {
+			s.TenantID = "tenant-a"
+			s.Network = NetworkPolicy{Mode: NetworkPrivate}
+		},
+		"restricted with allowlist": func(s *SandboxSpec) {
+			s.Network = NetworkPolicy{Mode: NetworkRestricted, AllowedDomains: []string{"example.com"}}
+		},
+	}
+	for name, mutate := range accepts {
+		t.Run("accept/"+name, func(t *testing.T) {
+			s := validSpec()
+			mutate(&s)
+			if err := s.Validate(); err != nil {
+				t.Fatalf("Validate() = %v, want nil", err)
+			}
+		})
+	}
+}

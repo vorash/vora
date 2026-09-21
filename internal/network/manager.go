@@ -1,10 +1,21 @@
-// Package network prepares the per-sandbox network namespace used by
-// NetworkRestricted sandboxes.
+// Package network prepares the per-sandbox network namespace used by sandboxes
+// that need egress or peer connectivity (everything except NetworkNone).
 //
-// A sandbox gets a network namespace with a point-to-point veth to the runner
-// and an nftables rule that DNATs every outbound TCP connection to the
-// sandbox's egress proxy (see docs/adr/012-egress-gateway.md). The sandbox can
-// only reach the proxy; the proxy decides what is allowed by TLS SNI.
+// Every such sandbox gets a network namespace with a point-to-point veth to the
+// runner. What it can then reach depends on the mode:
+//
+//   - NetworkRestricted: an nftables rule DNATs every outbound TCP connection
+//     to the sandbox's egress proxy, and non-gateway traffic is dropped (see
+//     docs/adr/012-egress-gateway.md).
+//   - NetworkFull: public egress is routed and masqueraded by the runner, while
+//     private ranges (RFC1918, link-local, loopback) stay blocked, so sandboxes
+//     cannot reach each other, the host LAN, or the metadata service.
+//   - NetworkPrivate: no public egress; a sandbox can reach the other sandboxes
+//     of its tenant on a shared per-tenant /24 the runner routes between. Every
+//     other destination, including the host's private ranges, is dropped.
+//
+// The policy mirrors ADR 004: default-deny for private ranges, which only
+// NetworkPrivate relaxes, and only for the caller's tenant.
 //
 // Everything here is rootless: the runner runs as uid 0 inside its rootlesskit
 // user namespace and owns the namespaces it creates.
@@ -23,6 +34,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/vorash/vora/internal/runtime"
 )
 
 const (
@@ -38,15 +51,38 @@ const (
 	peerPrefix     = "vora-s"
 	holderCmd      = "sleep"
 	holderArg      = "infinity"
+
+	// maxPrivateHostsPerTenant bounds the per-tenant /24 space (10.9.0.0/16).
+	maxPrivateTenants = 256
+	// maxPrivateHostsPerTenant bounds the tenants per /24. Each sandbox gets
+	// its own /30 inside the tenant's /24, so the runner owns a unique gateway
+	// address per veth; 64 /30s fit in one /24.
+	maxPrivateHostsPerTenant = 64
 )
+
+// privateDestinations are the ranges a sandbox must never reach unless its mode
+// explicitly permits a peer, per ADR 004.
+const privateDestinations = "{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 127.0.0.0/8 }"
+
+// Policy selects what a sandbox's network may reach.
+type Policy struct {
+	// Mode is NetworkRestricted, NetworkFull or NetworkPrivate.
+	Mode runtime.NetworkMode
+	// TenantID scopes NetworkPrivate peer connectivity. It is required for
+	// NetworkPrivate and ignored otherwise.
+	TenantID string
+}
 
 // Net describes one prepared sandbox network.
 type Net struct {
-	ID        string
-	NetnsPID  int
-	GatewayIP string
-	SandboxIP string
-	ProxyPort string
+	ID          string
+	Mode        runtime.NetworkMode
+	TenantID    string
+	NetnsPID    int
+	GatewayIP   string
+	SandboxIP   string
+	SandboxCIDR string
+	ProxyPort   string
 
 	iface  string
 	holder *exec.Cmd
@@ -84,9 +120,12 @@ type Manager struct {
 	ports    servicePorts
 	stateDir string
 
-	mu   sync.Mutex
-	next uint32
-	nets map[string]*Net
+	mu          sync.Mutex
+	next        uint32
+	nets        map[string]*Net
+	tenantIndex map[string]uint32
+	tenantHosts map[string]uint32
+	nextTenant  uint32
 }
 
 // NewManager returns a manager and reaps any networks left behind by a
@@ -102,10 +141,12 @@ func NewManager(stateDir string, mc ManagerConfig, logger *slog.Logger) *Manager
 		mc.BrokerPort = DefaultBrokerPort
 	}
 	m := &Manager{
-		logger:   logger,
-		ports:    servicePorts{proxy: mc.ProxyPort, broker: mc.BrokerPort, dns: DefaultDNSPort},
-		stateDir: filepath.Join(stateDir, "netns"),
-		nets:     map[string]*Net{},
+		logger:      logger,
+		ports:       servicePorts{proxy: mc.ProxyPort, broker: mc.BrokerPort, dns: DefaultDNSPort},
+		stateDir:    filepath.Join(stateDir, "netns"),
+		nets:        map[string]*Net{},
+		tenantIndex: map[string]uint32{},
+		tenantHosts: map[string]uint32{},
 	}
 	_ = os.MkdirAll(m.stateDir, 0o755)
 	m.reapLeftovers()
@@ -113,10 +154,16 @@ func NewManager(stateDir string, mc ManagerConfig, logger *slog.Logger) *Manager
 }
 
 // Create prepares a network namespace for a sandbox. It is idempotent.
-func (m *Manager) Create(ctx context.Context, id string) (*Net, error) {
+func (m *Manager) Create(ctx context.Context, id string, pol Policy) (*Net, error) {
 	if id == "" {
 		return nil, fmt.Errorf("network: empty sandbox id")
 	}
+	switch pol.Mode {
+	case runtime.NetworkRestricted, runtime.NetworkFull, runtime.NetworkPrivate:
+	default:
+		return nil, fmt.Errorf("network: mode %q does not use a namespace", pol.Mode)
+	}
+
 	m.mu.Lock()
 	if n, ok := m.nets[id]; ok {
 		m.mu.Unlock()
@@ -124,16 +171,35 @@ func (m *Manager) Create(ctx context.Context, id string) (*Net, error) {
 	}
 	idx := m.next
 	m.next++
-	m.mu.Unlock()
-
-	gw, sb := subnetFor(idx)
-	n := &Net{
-		ID:        id,
-		GatewayIP: gw,
-		SandboxIP: sb,
-		ProxyPort: m.ports.proxy,
-		iface:     ifacePrefix + strconv.FormatUint(uint64(idx), 10),
+	n := &Net{ID: id, Mode: pol.Mode, TenantID: pol.TenantID, ProxyPort: m.ports.proxy}
+	if pol.Mode == runtime.NetworkPrivate {
+		if pol.TenantID == "" {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("network: %q requires a tenant", pol.Mode)
+		}
+		tIdx, ok := m.tenantIndex[pol.TenantID]
+		if !ok {
+			if m.nextTenant >= maxPrivateTenants {
+				m.mu.Unlock()
+				return nil, fmt.Errorf("network: tenant space exhausted")
+			}
+			tIdx = m.nextTenant
+			m.nextTenant++
+			m.tenantIndex[pol.TenantID] = tIdx
+		}
+		host := m.tenantHosts[pol.TenantID]
+		if host >= maxPrivateHostsPerTenant {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("network: tenant %s has too many sandboxes", pol.TenantID)
+		}
+		m.tenantHosts[pol.TenantID]++
+		n.GatewayIP, n.SandboxIP, n.SandboxCIDR = tenantAddresses(tIdx, host)
+	} else {
+		gw, sb := subnetFor(idx)
+		n.GatewayIP, n.SandboxIP, n.SandboxCIDR = gw, sb, gw+"/30"
 	}
+	n.iface = ifacePrefix + strconv.FormatUint(uint64(idx), 10)
+	m.mu.Unlock()
 
 	holder := exec.Command("unshare", "--net", holderCmd, holderArg)
 	if err := holder.Start(); err != nil {
@@ -150,7 +216,7 @@ func (m *Manager) Create(ctx context.Context, id string) (*Net, error) {
 	m.mu.Lock()
 	m.nets[id] = n
 	m.mu.Unlock()
-	m.logger.Info("network ready", "sandbox_id", id, "gateway", n.GatewayIP, "sandbox_ip", n.SandboxIP)
+	m.logger.Info("network ready", "sandbox_id", id, "mode", string(n.Mode), "gateway", n.GatewayIP, "sandbox_ip", n.SandboxIP)
 	return n, nil
 }
 
@@ -198,9 +264,12 @@ func (m *Manager) setup(ctx context.Context, n *Net) error {
 	if err := run(ctx, "ip", "link", "set", n.iface, "up"); err != nil {
 		return err
 	}
+	// For a shared per-tenant /24 the sandbox still uses a /30 veth to its own
+	// gateway; peers are reached through the gateway route.
+	sbPrefix := "/30"
 	steps := [][]string{
 		{"ip", "link", "set", "lo", "up"},
-		{"ip", "addr", "add", n.SandboxIP + "/30", "dev", n.peerIface()},
+		{"ip", "addr", "add", n.SandboxIP + sbPrefix, "dev", n.peerIface()},
 		{"ip", "link", "set", n.peerIface(), "up"},
 		{"ip", "route", "add", "default", "via", n.GatewayIP},
 	}
@@ -209,11 +278,50 @@ func (m *Manager) setup(ctx context.Context, n *Net) error {
 			return err
 		}
 	}
-	rules := nftRuleset(n.GatewayIP, m.ports)
-	cmd := exec.CommandContext(ctx, "nsenter", "-t", pid, "-n", "nft", "-f", "-")
+	if err := m.applyInNetns(ctx, n.NetnsPID, sandboxRules(n, m.ports)); err != nil {
+		return err
+	}
+	if rules := runnerRules(n); rules != "" {
+		if err := applyRules(ctx, rules); err != nil {
+			return err
+		}
+		if err := enableForwarding(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// applyInNetns loads an nftables ruleset inside the sandbox network namespace.
+func (m *Manager) applyInNetns(ctx context.Context, pid int, rules string) error {
+	cmd := exec.CommandContext(ctx, "nsenter", "-t", strconv.Itoa(pid), "-n", "nft", "-f", "-")
 	cmd.Stdin = strings.NewReader(rules)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("network: nft: %w: %s", err, out)
+	}
+	return nil
+}
+
+// applyRules loads an nftables ruleset in the runner's own network namespace.
+func applyRules(ctx context.Context, rules string) error {
+	cmd := exec.CommandContext(ctx, "nft", "-f", "-")
+	cmd.Stdin = strings.NewReader(rules)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("network: nft: %w: %s", err, out)
+	}
+	return nil
+}
+
+// enableForwarding turns on IPv4 forwarding in the runner's network namespace.
+// It is required for NetworkFull (NAT to the uplink) and NetworkPrivate
+// (routing between a tenant's sandboxes).
+func enableForwarding() error {
+	const path = "/proc/sys/net/ipv4/ip_forward"
+	if data, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(data)) == "1" {
+		return nil
+	}
+	if err := os.WriteFile(path, []byte("1\n"), 0o644); err != nil {
+		return fmt.Errorf("network: enable ip_forward: %w", err)
 	}
 	return nil
 }
@@ -226,6 +334,10 @@ func (m *Manager) teardown(n *Net) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = run(ctx, "ip", "link", "del", n.iface)
+	// Runner-side tables are named per sandbox so removing one cannot disturb
+	// another sandbox's forwarding or NAT.
+	_ = run(ctx, "nft", "delete", "table", "ip", fwdTable(n.ID))
+	_ = run(ctx, "nft", "delete", "table", "ip", natTable(n.ID))
 }
 
 func (n *Net) peerIface() string {
@@ -234,7 +346,11 @@ func (n *Net) peerIface() string {
 
 // writeState records a live network so a later process can reap it.
 func (m *Manager) writeState(n *Net) {
-	st := netState{ID: n.ID, NetnsPID: n.NetnsPID, GatewayIP: n.GatewayIP, SandboxIP: n.SandboxIP, ProxyPort: n.ProxyPort, Iface: n.iface}
+	st := netState{
+		ID: n.ID, Mode: string(n.Mode), TenantID: n.TenantID,
+		NetnsPID: n.NetnsPID, GatewayIP: n.GatewayIP, SandboxIP: n.SandboxIP,
+		SandboxCIDR: n.SandboxCIDR, ProxyPort: n.ProxyPort, Iface: n.iface,
+	}
 	data, err := json.Marshal(st)
 	if err != nil {
 		return
@@ -280,11 +396,19 @@ func (m *Manager) reapLeftovers() {
 			}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = run(ctx, "ip", "link", "del", n.iface)
+		m.teardownContext(ctx, n)
 		cancel()
 		m.removeState(id)
 		m.logger.Warn("reaped leftover sandbox network", "sandbox_id", id)
 	}
+}
+
+// teardownContext is teardown with a caller-supplied context, used by the
+// startup reaper. The holder is already killed by the caller.
+func (m *Manager) teardownContext(ctx context.Context, n *Net) {
+	_ = run(ctx, "ip", "link", "del", n.iface)
+	_ = run(ctx, "nft", "delete", "table", "ip", fwdTable(n.ID))
+	_ = run(ctx, "nft", "delete", "table", "ip", natTable(n.ID))
 }
 
 // holderAlive reports whether pid is still the netns holder we started, not a
@@ -303,27 +427,109 @@ func holderAlive(pid int) bool {
 }
 
 type netState struct {
-	ID        string `json:"id"`
-	NetnsPID  int    `json:"netns_pid"`
-	GatewayIP string `json:"gateway_ip"`
-	SandboxIP string `json:"sandbox_ip"`
-	ProxyPort string `json:"proxy_port"`
-	Iface     string `json:"iface"`
+	ID          string `json:"id"`
+	Mode        string `json:"mode,omitempty"`
+	TenantID    string `json:"tenant_id,omitempty"`
+	NetnsPID    int    `json:"netns_pid"`
+	GatewayIP   string `json:"gateway_ip"`
+	SandboxIP   string `json:"sandbox_ip"`
+	SandboxCIDR string `json:"sandbox_cidr,omitempty"`
+	ProxyPort   string `json:"proxy_port"`
+	Iface       string `json:"iface"`
 }
 
 func (s netState) net() *Net {
-	return &Net{ID: s.ID, NetnsPID: s.NetnsPID, GatewayIP: s.GatewayIP, SandboxIP: s.SandboxIP, ProxyPort: s.ProxyPort, iface: s.Iface}
+	return &Net{
+		ID: s.ID, Mode: runtime.NetworkMode(s.Mode), TenantID: s.TenantID,
+		NetnsPID: s.NetnsPID, GatewayIP: s.GatewayIP, SandboxIP: s.SandboxIP,
+		SandboxCIDR: s.SandboxCIDR, ProxyPort: s.ProxyPort, iface: s.Iface,
+	}
 }
 
-// subnetFor returns the gateway and sandbox addresses for the idx-th /30 in
-// 10.7.0.0/16.
-func subnetFor(idx uint32) (gateway, sandbox string) {
-	third := (idx / 64) % 256
-	fourth := (idx % 64) * 4
-	base := net.IPv4(10, 7, byte(third), byte(fourth)).To4()
-	gw := net.IPv4(base[0], base[1], base[2], base[3]+1)
-	sb := net.IPv4(base[0], base[1], base[2], base[3]+2)
-	return gw.String(), sb.String()
+// sandboxRules is the nftables ruleset loaded inside the sandbox namespace.
+func sandboxRules(n *Net, ports servicePorts) string {
+	switch n.Mode {
+	case runtime.NetworkFull:
+		// Egress is routed, but private ranges stay blocked so the sandbox
+		// cannot reach peers, the host LAN, or the metadata service.
+		return fmt.Sprintf(`table inet vora_filter {
+	chain out {
+		type filter hook output priority 0; policy accept;
+		oifname "lo" accept
+		ip daddr %s drop
+	}
+}
+`, privateDestinations)
+	case runtime.NetworkPrivate:
+		// Only the tenant's own /24 is reachable; public egress and every other
+		// private range are dropped.
+		return fmt.Sprintf(`table inet vora_filter {
+	chain out {
+		type filter hook output priority 0; policy drop;
+		oifname "lo" accept
+		ip daddr %s accept
+	}
+}
+`, n.SandboxCIDR)
+	default:
+		return nftRuleset(n.GatewayIP, ports)
+	}
+}
+
+// runnerRules is the nftables ruleset loaded in the runner's namespace. It is
+// empty for modes that need no runner-side forwarding.
+func runnerRules(n *Net) string {
+	switch n.Mode {
+	case runtime.NetworkFull:
+		return fmt.Sprintf(`table ip %s {
+	chain forward {
+		type filter hook forward priority 0; policy accept;
+		ct state established,related accept
+		ip saddr %s ip daddr %s drop
+	}
+}
+table ip %s {
+	chain postrouting {
+		type nat hook postrouting priority 100;
+		ip saddr %s masquerade
+	}
+}
+`, fwdTable(n.ID), n.SandboxIP, privateDestinations, natTable(n.ID), n.SandboxIP)
+	case runtime.NetworkPrivate:
+		return fmt.Sprintf(`table ip %s {
+	chain forward {
+		type filter hook forward priority 0; policy accept;
+		ct state established,related accept
+		ip saddr %s ip daddr %s accept
+		ip saddr %s drop
+	}
+}
+`, fwdTable(n.ID), n.SandboxIP, n.SandboxCIDR, n.SandboxIP)
+	default:
+		return ""
+	}
+}
+
+// fwdTable and natTable are per-sandbox table names. A shared table with a drop
+// policy would drop every other sandbox's forwarded traffic when evaluated, so
+// each sandbox gets its own policy-accept table that only drops its own
+// traffic.
+func fwdTable(id string) string { return tableName("vora_fwd", id) }
+func natTable(id string) string { return tableName("vora_nat", id) }
+
+func tableName(prefix, id string) string {
+	var b strings.Builder
+	b.WriteString(prefix)
+	b.WriteByte('_')
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
 
 // nftRuleset transparently redirects non-loopback TCP to the egress proxy and
@@ -360,6 +566,29 @@ table inet vora_filter {
 %s	}
 }
 `, nat.String(), accept.String())
+}
+
+// subnetFor returns the gateway and sandbox addresses for the idx-th /30 in
+// 10.7.0.0/16.
+func subnetFor(idx uint32) (gateway, sandbox string) {
+	third := (idx / 64) % 256
+	fourth := (idx % 64) * 4
+	base := net.IPv4(10, 7, byte(third), byte(fourth)).To4()
+	gw := net.IPv4(base[0], base[1], base[2], base[3]+1)
+	sb := net.IPv4(base[0], base[1], base[2], base[3]+2)
+	return gw.String(), sb.String()
+}
+
+// tenantAddresses returns the gateway, sandbox and /24 for the host-th sandbox
+// of the tenantIndex-th tenant (10.9.<tenantIndex>.0/24). Each sandbox gets its
+// own /30 inside the tenant /24 so the runner has a unique gateway address per
+// veth.
+func tenantAddresses(tenantIndex, host uint32) (gateway, sandbox, cidr string) {
+	t := byte(tenantIndex & 0xff)
+	base := byte(host*4 + 1)
+	gw := net.IPv4(10, 9, t, base)
+	sb := net.IPv4(10, 9, t, base+1)
+	return gw.String(), sb.String(), fmt.Sprintf("10.9.%d.0/24", t)
 }
 
 func run(ctx context.Context, name string, args ...string) error {

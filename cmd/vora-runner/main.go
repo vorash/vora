@@ -286,7 +286,7 @@ func registerBackends(cfg config.Config, registry *runtime.Registry, logger *slo
 			logger.Warn("bubblewrap backend unavailable", "error", err)
 		} else {
 			if subtree != nil {
-				backend.SetRestricted(subtree, networks, egressSink)
+				backend.EnableNetns(subtree, networks, egressSink)
 			}
 			if err := registry.Register(backend); err != nil {
 				logger.Warn("register backend failed", "backend", backend.Name(), "error", err)
