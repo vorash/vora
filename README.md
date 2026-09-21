@@ -58,8 +58,9 @@ snapshots. Written in Go, with no Kubernetes in the path.
 - **Disk quota** (`DiskBytes`). A sandbox's writable directories are limited by
   a filesystem **project quota** when the host supports one; writes past the
   limit fail at the kernel boundary and the sandbox is stopped with a
-  `DiskQuotaExceeded` reason. Without project-quota support the runner falls
-  back to a periodic usage scan — see [Limitations](#limitations-honest).
+  `DiskQuotaExceeded` reason. The runner probes enforcement at startup (XFS is
+  the verified filesystem) and otherwise falls back to a periodic usage scan —
+  see [Limitations](#limitations-honest).
 - State persistence, a **TTL reaper**, and startup **reconciliation** (incl.
   reaping orphaned `runsc` containers and systemd units).
 - **Audit trail** behind a `Store` interface: local JSONL, or **PostgreSQL /
@@ -495,12 +496,14 @@ requirement (`/etc/resolv.conf` must exist in the image layers for
 - **No syscall filtering for bwrap.** seccomp is not applied; Bubblewrap
   `--seccomp` is a planned hardening step. gVisor provides its own syscall
   surface.
-- **Disk quota is only hard with project quotas.** `DiskBytes` is enforced by
-  a filesystem project quota when the sandboxes directory is mounted with
-  `prjquota` and the runner can run `chattr`/`setquota` (root). Otherwise the
-  runner falls back to a periodic usage scan that stops an over-quota sandbox,
-  which bounds the *sandbox* but not a burst that lands between scans. The
-  "host unaffected" guarantee holds only in project-quota mode.
+- **Disk quota is only hard with an enforcing project quota.** `DiskBytes` is
+  enforced by a filesystem project quota when the sandboxes directory is
+  mounted with `prjquota`, the runner can run `chattr`/`setquota` (root), and a
+  startup probe confirms the kernel actually refuses writes past the limit.
+  XFS is the verified filesystem; ext4 on some kernels accounts the quota
+  without enforcing it, and the runner then falls back to the periodic usage
+  scan, which bounds the *sandbox* but not a burst that lands between scans.
+  The "host unaffected" guarantee holds only when the probe passes.
 - **Images are trusted.** No signature verification yet.
 - **The image must provide mount points.** Rootfs images include `/workspace`
   and `/vora`; custom images must create them.
