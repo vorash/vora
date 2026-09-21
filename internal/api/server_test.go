@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -667,5 +668,29 @@ func TestFileRouteMissingSandbox(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestTraceHeaderEchoesTraceID(t *testing.T) {
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x0a},
+		SpanID:     trace.SpanID{0x0b},
+		TraceFlags: trace.FlagsSampled,
+	})
+	req := httptest.NewRequest(http.MethodGet, "/v1/runners", nil)
+	req = req.WithContext(trace.ContextWithSpanContext(req.Context(), sc))
+	rec := httptest.NewRecorder()
+	traceHeader(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(rec, req)
+	if got := rec.Header().Get("X-Trace-Id"); got != sc.TraceID().String() {
+		t.Fatalf("X-Trace-Id = %q, want %q", got, sc.TraceID().String())
+	}
+}
+
+func TestTraceHeaderAbsentWithoutSpan(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/v1/runners", nil)
+	rec := httptest.NewRecorder()
+	traceHeader(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(rec, req)
+	if got := rec.Header().Get("X-Trace-Id"); got != "" {
+		t.Fatalf("X-Trace-Id = %q, want empty", got)
 	}
 }

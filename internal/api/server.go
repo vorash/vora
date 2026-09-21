@@ -19,10 +19,13 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
 	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/client"
 	"github.com/vorash/vora/internal/sandbox"
 	"github.com/vorash/vora/internal/secret"
+	"github.com/vorash/vora/internal/telemetry"
 	"github.com/vorash/vora/internal/tlsutil"
 	"github.com/vorash/vora/internal/ulid"
 )
@@ -207,7 +210,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/secrets", s.auth(ScopeAdmin, s.createSecret))
 	mux.HandleFunc("GET /v1/secrets", s.auth(ScopeAdmin, s.listSecrets))
 	mux.HandleFunc("DELETE /v1/secrets/{alias}", s.auth(ScopeAdmin, s.deleteSecret))
-	return mux
+	// One server span per request; the inner handler echoes the trace id on
+	// every response (including errors) so a caller can correlate a failure.
+	return otelhttp.NewHandler(traceHeader(mux), "vora-api")
+}
+
+// traceHeader sets X-Trace-Id from the request's span, when tracing is on.
+func traceHeader(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if id := telemetry.TraceID(r.Context()); id != "" {
+			w.Header().Set("X-Trace-Id", id)
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 type principal struct {

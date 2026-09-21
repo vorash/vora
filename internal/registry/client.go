@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -27,7 +28,10 @@ type Client struct {
 // without any, the connection is plaintext.
 func Dial(addr, joinToken string, opts ...grpc.DialOption) (*Client, error) {
 	if len(opts) == 0 {
-		opts = []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+		opts = []grpc.DialOption{
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
+		}
 	}
 	conn, err := grpc.NewClient(addr, opts...)
 	if err != nil {

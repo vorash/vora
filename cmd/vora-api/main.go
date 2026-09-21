@@ -16,12 +16,14 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/api"
 	"github.com/vorash/vora/internal/secret"
+	"github.com/vorash/vora/internal/telemetry"
 	"github.com/vorash/vora/internal/tlsutil"
 	"github.com/vorash/vora/internal/version"
 )
@@ -38,11 +40,21 @@ func run() error {
 	grpcFlag := flag.String("grpc", env("VORA_API_GRPC_ADDR", "127.0.0.1:9301"), "gRPC runner registry listen address")
 	flag.Parse()
 
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := slog.New(telemetry.ContextHandler{Handler: slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})})
 	slog.SetDefault(logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	shutdownTracing, err := telemetry.SetupTracing(ctx, telemetry.TracingConfig{
+		Endpoint:    os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		ServiceName: "vora-api",
+		Insecure:    true,
+	})
+	if err != nil {
+		return fmt.Errorf("tracing: %w", err)
+	}
+	defer func() { _ = shutdownTracing(context.Background()) }()
 
 	var store api.Store = api.NewMemStore()
 	dsn := os.Getenv("VORA_API_DSN")
@@ -145,6 +157,7 @@ func run() error {
 		}
 		grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(cfg)))
 	}
+	grpcOpts = append(grpcOpts, grpc.StatsHandler(otelgrpc.NewServerHandler()))
 	grpcSrv := grpc.NewServer(grpcOpts...)
 	v1.RegisterRunnerRegistryServer(grpcSrv, server)
 
