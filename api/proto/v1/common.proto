@@ -38,6 +38,7 @@ enum ExitReason {
   TIMEOUT_EXCEEDED = 4;
   POLICY_VIOLATION = 5;
   RUNTIME_FAILURE = 6;
+  DISK_QUOTA_EXCEEDED = 7;
 }
 
 // ResourceLimits are the enforcement limits for a sandbox cgroup.

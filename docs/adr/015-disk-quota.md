@@ -1,0 +1,60 @@
+# ADR 015 — Disk quota
+
+- Status: accepted (v0.5)
+- Date: 2026-09-21
+
+## Context
+
+`ResourceLimits.DiskBytes` existed since v0.1 but nothing enforced it: the README
+stated plainly that a sandbox could fill its workspace up to host free space.
+cgroup v2 has no byte-quota controller, so the enforcement has to come from the
+filesystem or from the runner itself.
+
+A sandbox's mutable state is two host directories bound into the sandbox:
+`WorkspaceDir` at `/workspace` and `HomeDir` at `/root`. Every backend (bwrap,
+gVisor) binds the same pair, so a host-side limit covers both.
+
+## Decision
+
+**1. Prefer an ext4/xfs project quota (hard limit).**
+When the sandboxes filesystem is mounted with `prjquota` and the runner is root
+with `chattr` and `setquota` available, each sandbox's writable directories are
+assigned a project ID with a byte limit. Writes past the limit fail with
+`EDQUOT` at the kernel boundary, so a sandbox that ignores the error still cannot
+overrun the host. The project ID is derived deterministically from the sandbox
+id (`fnv32a`, 31 bits), so a runner restart reapplies the same limit without
+persisting any mapping.
+
+**2. Fall back to a periodic usage scan (best-effort).**
+When project quotas are unavailable — an unprivileged runner, a filesystem
+without `prjquota`, or a missing tool — the runner's `EnforceDiskQuota` loop
+sums the writable bytes and stops a sandbox over its limit. This path runs on
+every host and also supplies the semantic reason when hard quotas are active.
+
+**3. Terminate with a semantic reason.**
+An over-quota sandbox is moved to `FAILED`/`DESTROYED` with
+`ExitReason.DiskQuotaExceeded` (proto `DISK_QUOTA_EXCEEDED`), exposed on the
+sandbox record and `vora logs`, so callers never have to interpret a raw
+`EDQUOT` or a generic exit code.
+
+**4. Fail loud when a limit cannot be enforced.**
+`NewServer` records `vora_disk_quota_enforced` (0/1). A sandbox whose
+`DiskBytes` could not be applied increments `vora_disk_quota_unenforced_total`
+and logs at error level. Enforcement is never silently skipped.
+
+## Consequences
+
+- The "host unaffected" guarantee holds only in project-quota mode. The soft
+  scan bounds the sandbox but not a burst that lands between scans; this is
+  documented as a limitation rather than hidden.
+- Host convergence must mount the sandboxes filesystem with `prjquota` and
+  install `e2fsprogs` for the hard path. That is a deployment change owned by
+  the Ansible repository; the runner degrades safely without it.
+- Project IDs collide with probability ~2⁻³¹ per pair on one filesystem; two
+  colliding sandboxes would share a quota. Acceptable for v0.x and noted in the
+  package.
+
+## Refs
+
+- Issue vorash/vora#21; master plan §21 ("Disk exhaustion").
+- `internal/quota`, `internal/runner` (`applyDiskQuota`, `EnforceDiskQuota`).

@@ -163,6 +163,7 @@ const (
 	ExitReason_TIMEOUT_EXCEEDED        ExitReason = 4
 	ExitReason_POLICY_VIOLATION        ExitReason = 5
 	ExitReason_RUNTIME_FAILURE         ExitReason = 6
+	ExitReason_DISK_QUOTA_EXCEEDED     ExitReason = 7
 )
 
 // Enum value maps for ExitReason.
@@ -175,6 +176,7 @@ var (
 		4: "TIMEOUT_EXCEEDED",
 		5: "POLICY_VIOLATION",
 		6: "RUNTIME_FAILURE",
+		7: "DISK_QUOTA_EXCEEDED",
 	}
 	ExitReason_value = map[string]int32{
 		"EXIT_REASON_UNSPECIFIED": 0,
@@ -184,6 +186,7 @@ var (
 		"TIMEOUT_EXCEEDED":        4,
 		"POLICY_VIOLATION":        5,
 		"RUNTIME_FAILURE":         6,
+		"DISK_QUOTA_EXCEEDED":     7,
 	}
 )
 
@@ -1053,7 +1056,7 @@ const file_api_proto_v1_common_proto_rawDesc = "" +
 	"\fNETWORK_NONE\x10\x01\x12\x16\n" +
 	"\x12NETWORK_RESTRICTED\x10\x02\x12\x10\n" +
 	"\fNETWORK_FULL\x10\x03\x12\x13\n" +
-	"\x0fNETWORK_PRIVATE\x10\x04*\x9f\x01\n" +
+	"\x0fNETWORK_PRIVATE\x10\x04*\xb8\x01\n" +
 	"\n" +
 	"ExitReason\x12\x1b\n" +
 	"\x17EXIT_REASON_UNSPECIFIED\x10\x00\x12\n" +
@@ -1064,7 +1067,8 @@ const file_api_proto_v1_common_proto_rawDesc = "" +
 	"\x13PIDS_LIMIT_EXCEEDED\x10\x03\x12\x14\n" +
 	"\x10TIMEOUT_EXCEEDED\x10\x04\x12\x14\n" +
 	"\x10POLICY_VIOLATION\x10\x05\x12\x13\n" +
-	"\x0fRUNTIME_FAILURE\x10\x06B(Z&github.com/vorash/vora/api/proto/v1;v1b\x06proto3"
+	"\x0fRUNTIME_FAILURE\x10\x06\x12\x17\n" +
+	"\x13DISK_QUOTA_EXCEEDED\x10\aB(Z&github.com/vorash/vora/api/proto/v1;v1b\x06proto3"
 
 var (
 	file_api_proto_v1_common_proto_rawDescOnce sync.Once

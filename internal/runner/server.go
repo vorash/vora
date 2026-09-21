@@ -21,6 +21,7 @@ import (
 	"github.com/vorash/vora/internal/config"
 	"github.com/vorash/vora/internal/egress"
 	"github.com/vorash/vora/internal/images"
+	"github.com/vorash/vora/internal/quota"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/sandbox"
 	"github.com/vorash/vora/internal/telemetry"
@@ -37,6 +38,7 @@ type Server struct {
 	registry   *runtime.Registry
 	images     *images.Resolver
 	workspaces *workspace.Manager
+	quota      *quota.Manager
 	audit      audit.Store
 	runnerID   string
 	logger     *slog.Logger
@@ -67,12 +69,13 @@ func NewServer(cfg config.Config, store *sandbox.Store, registry *runtime.Regist
 		logger = slog.Default()
 	}
 	workspaces := workspace.NewManager(cfg.SandboxesDir())
-	return &Server{
+	s := &Server{
 		cfg:         cfg,
 		store:       store,
 		registry:    registry,
 		images:      images.NewResolver(cfg, logger),
 		workspaces:  workspaces,
+		quota:       quota.New(cfg.SandboxesDir()),
 		audit:       jsonl.New(workspaces.LogsDir),
 		runnerID:    runnerID,
 		logger:      logger,
@@ -80,6 +83,8 @@ func NewServer(cfg config.Config, store *sandbox.Store, registry *runtime.Regist
 		handles:     make(map[string]sandboxHandle),
 		brokerCreds: make(map[string][]egress.Credential),
 	}
+	s.setQuotaModeMetric()
+	return s
 }
 
 // SetAudit replaces the audit store (e.g. with the PostgreSQL/Supabase store).
@@ -93,7 +98,20 @@ func (s *Server) SetAudit(a audit.Store) {
 func (s *Server) SetMetrics(m *telemetry.Metrics) {
 	if m != nil {
 		s.metrics = m
+		s.setQuotaModeMetric()
 	}
+}
+
+// setQuotaModeMetric records whether this host enforces disk limits.
+func (s *Server) setQuotaModeMetric() {
+	if s.metrics == nil || s.quota == nil {
+		return
+	}
+	if s.quota.Mode() == quota.ModeProject {
+		s.metrics.DiskQuotaEnforced.Set(1)
+		return
+	}
+	s.metrics.DiskQuotaEnforced.Set(0)
 }
 
 // RecordEgress persists and meters one restricted-network policy decision.
@@ -188,6 +206,7 @@ func (s *Server) CreateSandbox(ctx context.Context, req *v1.CreateSandboxRequest
 		s.logger.Error("create sandbox failed", "sandbox_id", spec.ID, "error", err)
 		return nil, status.Error(codes.Internal, "failed to persist sandbox")
 	}
+	s.applyDiskQuota(ctx, rec)
 
 	s.logger.Info("sandbox requested",
 		"sandbox_id", rec.ID,
@@ -467,8 +486,72 @@ func (s *Server) destroy(ctx context.Context, id string) error {
 			s.logger.Warn("state transition on destroy failed", "sandbox_id", rec.ID, "state", rec.State, "error", err)
 		}
 	}
+	s.releaseDiskQuota(ctx, rec)
 	if err := s.workspaces.Clean(rec.ID); err != nil {
 		s.logger.Warn("clean workspace failed", "sandbox_id", rec.ID, "error", err)
+	}
+	return nil
+}
+
+// quotaPaths returns the writable directories a disk limit covers.
+func quotaPaths(rec *sandbox.Record) []string {
+	return []string{rec.Spec.Workspace.WorkspaceDir, rec.Spec.Workspace.HomeDir}
+}
+
+// applyDiskQuota assigns the sandbox's hard disk limit when the host supports
+// project quotas. A failure is logged and metered, not fatal: the periodic
+// enforcer still stops an over-quota sandbox, but the host loses the
+// kernel-level guarantee. The caller must hold a persisted record.
+func (s *Server) applyDiskQuota(ctx context.Context, rec *sandbox.Record) {
+	limit := rec.Spec.Resources.DiskBytes
+	if limit <= 0 {
+		return
+	}
+	if err := s.quota.Enforce(ctx, rec.ID, quotaPaths(rec), limit); err != nil {
+		s.metrics.DiskQuotaUnenforced.Inc()
+		s.logger.Error("disk quota not enforced",
+			"sandbox_id", rec.ID, "limit_bytes", limit, "quota_mode", string(s.quota.Mode()), "error", err)
+	}
+}
+
+// releaseDiskQuota clears a sandbox's project quota, if any.
+func (s *Server) releaseDiskQuota(ctx context.Context, rec *sandbox.Record) {
+	if rec.Spec.Resources.DiskBytes <= 0 {
+		return
+	}
+	if err := s.quota.Release(ctx, rec.ID, quotaPaths(rec)); err != nil {
+		s.logger.Warn("release disk quota failed", "sandbox_id", rec.ID, "error", err)
+	}
+}
+
+// EnforceDiskQuota stops running sandboxes whose writable bytes exceed their
+// DiskBytes limit and records a semantic reason. It is the enforcement layer
+// on hosts without project quotas, and the reason attribution on hosts with
+// them (the kernel already refuses the writes there).
+func (s *Server) EnforceDiskQuota(ctx context.Context) error {
+	recs, err := s.store.List()
+	if err != nil {
+		return err
+	}
+	for _, rec := range recs {
+		limit := rec.Spec.Resources.DiskBytes
+		if rec.State != sandbox.StateRunning || limit <= 0 {
+			continue
+		}
+		used, err := s.quota.Usage(quotaPaths(rec))
+		if err != nil {
+			s.logger.Warn("disk usage scan failed", "sandbox_id", rec.ID, "error", err)
+			continue
+		}
+		if used <= limit {
+			continue
+		}
+		s.logger.Warn("sandbox exceeded disk quota",
+			"sandbox_id", rec.ID, "used_bytes", used, "limit_bytes", limit)
+		s.fail(rec, runtime.ReasonDiskQuota)
+		if err := s.destroy(ctx, rec.ID); err != nil {
+			s.logger.Warn("destroy over-quota sandbox failed", "sandbox_id", rec.ID, "error", err)
+		}
 	}
 	return nil
 }
@@ -528,6 +611,7 @@ func (s *Server) Reconcile(ctx context.Context) error {
 		if err := s.transition(rec, sandbox.StateFailed, runtime.ReasonRuntimeFailure); err != nil {
 			s.logger.Warn("reconcile: transition failed", "sandbox_id", rec.ID, "error", err)
 		}
+		s.releaseDiskQuota(ctx, rec)
 		if err := s.workspaces.Clean(rec.ID); err != nil {
 			s.logger.Warn("reconcile: clean failed", "sandbox_id", rec.ID, "error", err)
 		}
