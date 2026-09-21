@@ -135,6 +135,14 @@ func TestEnforceProjectModeIssuesCommands(t *testing.T) {
 	if !hasCall(fr.calls, "chattr", "-R", "-p", proj, ws) {
 		t.Fatalf("missing chattr for workspace: %v", fr.calls)
 	}
+	// The project-hierarchy flag must be SET (+P), not cleared (-P): without it
+	// new files do not inherit the project id and escape the quota (XFS).
+	if !hasCall(fr.calls, "chattr", "+P", "-p", proj, ws) {
+		t.Fatalf("missing project-inheritance flag for workspace: %v", fr.calls)
+	}
+	if hasCall(fr.calls, "chattr", "-P", "-p", proj, ws) {
+		t.Fatalf("project-inheritance flag must not be cleared: %v", fr.calls)
+	}
 	if !hasCall(fr.calls, "chattr", "-R", "-p", proj, home) {
 		t.Fatalf("missing chattr for home: %v", fr.calls)
 	}
@@ -189,5 +197,18 @@ func TestEnforceSurfacesCommandFailure(t *testing.T) {
 func TestDetectRequiresRoot(t *testing.T) {
 	if got := detect(t.TempDir(), &fakeRunner{}, false); got != ModeAccounting {
 		t.Fatalf("detect(non-root) = %q, want accounting", got)
+	}
+}
+
+// TestProbeHardLimitFalseWithoutEnforcement covers the case that bit the ext4
+// host: the tools and mount options are present, but the kernel only accounts
+// the quota. The probe must then report no hard enforcement.
+func TestProbeHardLimitFalseWithoutEnforcement(t *testing.T) {
+	fr := &fakeRunner{}
+	if probeHardLimit(t.TempDir(), fr) {
+		t.Fatal("probe reported enforcement on a filesystem that does not enforce")
+	}
+	if !fr.called("setquota") {
+		t.Fatalf("probe did not attempt to set a quota: %v", fr.calls)
 	}
 }

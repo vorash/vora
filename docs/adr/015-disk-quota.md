@@ -23,7 +23,18 @@ assigned a project ID with a byte limit. Writes past the limit fail with
 `EDQUOT` at the kernel boundary, so a sandbox that ignores the error still cannot
 overrun the host. The project ID is derived deterministically from the sandbox
 id (`fnv32a`, 31 bits), so a runner restart reapplies the same limit without
-persisting any mapping.
+persisting any mapping. Setting the project id alone is not enough: the
+directory must carry the project-hierarchy flag (`chattr +P`) or new files do
+not inherit the id and escape the quota (observed on XFS).
+
+**1a. Verify enforcement, don't trust the mount option.**
+At startup the runner probes the filesystem: it assigns a throwaway project id
+to a temp directory, sets a 1 KiB limit, attempts a 64 KiB write, and requires
+that write to fail. Some kernels mount `prjquota` and account the quota but do
+not enforce it (observed on ext4, kernel 7.0.0); a mount option alone cannot
+tell the two apart. If the probe does not bite, the runner falls back to
+accounting rather than claiming a hard guarantee it does not have. XFS is the
+verified hard-limit filesystem.
 
 **2. Fall back to a periodic usage scan (best-effort).**
 When project quotas are unavailable — an unprivileged runner, a filesystem
@@ -48,8 +59,10 @@ and logs at error level. Enforcement is never silently skipped.
   scan bounds the sandbox but not a burst that lands between scans; this is
   documented as a limitation rather than hidden.
 - Host convergence must mount the sandboxes filesystem with `prjquota` and
-  install `e2fsprogs` for the hard path. That is a deployment change owned by
-  the Ansible repository; the runner degrades safely without it.
+  install `chattr`/`setquota` for the hard path. **XFS** is the verified
+  filesystem; ext4 may account without enforcing (see 1a) and will then be
+  reported as accounting mode. This is a deployment change owned by the Ansible
+  repository; the runner degrades safely without it.
 - Project IDs collide with probability ~2⁻³¹ per pair on one filesystem; two
   colliding sandboxes would share a quota. Acceptable for v0.x and noted in the
   package.
