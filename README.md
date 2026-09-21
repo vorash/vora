@@ -348,6 +348,7 @@ internal/       runtime, cgroup, images, workspace, sandbox, runner, cli, teleme
 docs/           architecture docs, ADRs and benchmark reports
 tests/          integration, security and benchmark suites
 images/         rootfs image definitions (base, python, node)
+sdk/typescript/ TypeScript SDK for the HTTP API
 scripts/        image build and benchmark helpers
 deploy/         systemd units for the system install (vora-ansible is its own repo)
 ```
@@ -371,12 +372,13 @@ make test-network      # NetworkRestricted netns/DNAT test (rootlesskit)
 make test-broker       # credential-broker boundary + end-to-end test (rootlesskit)
 make test-dns          # gateway resolver test (rootlesskit)
 make bench-report      # benchmarks + report in docs/benchmarks/
+make test-sdk          # TypeScript SDK: build, typecheck, vitest
 make help              # all targets
 ```
 
 GitHub Actions (`.github/workflows/ci.yml`) runs unit tests, then bwrap
-integration and security tests on `ubuntu-latest`. gVisor is skipped there
-(no KVM / rootlesskit userns on hosted runners).
+integration and security tests on `ubuntu-latest` (plus the TypeScript SDK
+suite). gVisor is skipped there (no KVM / rootlesskit userns on hosted runners).
 
 Install and start the rootlesskit-wrapped runner (required for gVisor):
 

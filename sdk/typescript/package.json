@@ -1,0 +1,55 @@
+{
+  "name": "@vorash/sdk",
+  "version": "0.6.0",
+  "description": "TypeScript client for the Vora sandbox API",
+  "license": "MIT",
+  "type": "module",
+  "homepage": "https://github.com/vorash/vora/tree/main/sdk/typescript",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vorash/vora.git",
+    "directory": "sdk/typescript"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/cjs/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/esm/index.d.ts",
+        "default": "./dist/esm/index.js"
+      },
+      "require": {
+        "types": "./dist/cjs/index.d.ts",
+        "default": "./dist/cjs/index.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "npm run clean && tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json && node scripts/postbuild.mjs",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "example": "npm run build && node examples/basic.ts"
+  },
+  "keywords": [
+    "vora",
+    "sandbox",
+    "agents",
+    "isolation"
+  ],
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
