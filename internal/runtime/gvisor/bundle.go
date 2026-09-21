@@ -10,6 +10,7 @@ import (
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"github.com/vorash/vora/internal/network"
 	"github.com/vorash/vora/internal/runtime"
 )
 
@@ -26,7 +27,7 @@ const (
 // The baseline spec comes from `runsc spec` (so it matches the installed
 // gVisor), then we point root at the read-only image rootfs and add the Vora
 // workspace mounts. All mutable state lives in the bound workspace paths.
-func writeBundle(runsc, bundleDir string, spec runtime.SandboxSpec) error {
+func writeBundle(runsc, bundleDir string, spec runtime.SandboxSpec, resolvConf string) error {
 	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
 		return fmt.Errorf("gvisor: create bundle dir: %w", err)
 	}
@@ -62,6 +63,11 @@ func writeBundle(runsc, bundleDir string, spec runtime.SandboxSpec) error {
 		bindMount(spec.Workspace.IPCDir, "/vora"),
 		tmpfsMount("/tmp"),
 	)
+	if resolvConf != "" {
+		// Point the sandbox at the gateway resolver (ADR 012). The image must
+		// carry /etc/resolv.conf; the caller checks that before starting.
+		s.Mounts = append(s.Mounts, roBindMount(resolvConf, "/etc/resolv.conf"))
+	}
 
 	out, err := json.MarshalIndent(&s, "", "  ")
 	if err != nil {
@@ -106,6 +112,31 @@ func bindMount(src, dst string) specs.Mount {
 		Source:      src,
 		Options:     []string{"rbind", "rw", "nosuid", "nodev"},
 	}
+}
+
+func roBindMount(src, dst string) specs.Mount {
+	return specs.Mount{
+		Destination: dst,
+		Type:        "bind",
+		Source:      src,
+		Options:     []string{"rbind", "ro", "nosuid", "nodev"},
+	}
+}
+
+// writeResolvConf points the sandbox at the gateway resolver and returns the
+// host path bound over /etc/resolv.conf. A missing image mount point fails the
+// start loudly rather than leaving the sandbox unable to resolve names.
+func writeResolvConf(spec runtime.SandboxSpec, netns *network.Net) (string, error) {
+	imageFile := filepath.Join(spec.Workspace.RootfsDir, "etc", "resolv.conf")
+	if _, err := os.Stat(imageFile); err != nil {
+		return "", fmt.Errorf("gvisor: image %q must provide /etc/resolv.conf for NetworkRestricted: %w", spec.Image, err)
+	}
+	path := filepath.Join(spec.Workspace.RootDir, "resolv.conf")
+	content := fmt.Sprintf("# Managed by Vora: the sandbox gateway is the only resolver (ADR 012).\nnameserver %s\noptions timeout:2 attempts:2\n", netns.GatewayIP)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return "", fmt.Errorf("gvisor: write resolv.conf: %w", err)
+	}
+	return path, nil
 }
 
 func tmpfsMount(dst string) specs.Mount {

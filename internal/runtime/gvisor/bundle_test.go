@@ -45,7 +45,7 @@ func TestWriteBundleUsesVoraInit(t *testing.T) {
 	bundle := filepath.Join(paths.RootDir, "bundle")
 
 	spec := runtime.SandboxSpec{ID: "sbx_test", Workspace: paths, Env: map[string]string{"FOO": "bar"}}
-	if err := writeBundle(runsc, bundle, spec); err != nil {
+	if err := writeBundle(runsc, bundle, spec, ""); err != nil {
 		t.Fatalf("writeBundle: %v", err)
 	}
 

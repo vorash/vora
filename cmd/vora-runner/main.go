@@ -298,10 +298,15 @@ func registerBackends(cfg config.Config, registry *runtime.Registry, logger *slo
 
 	if backend, err := gvisor.New(cfg, logger, subtree); err != nil {
 		logger.Warn("gvisor backend unavailable", "error", err)
-	} else if err := registry.Register(backend); err != nil {
-		logger.Warn("register backend failed", "backend", backend.Name(), "error", err)
 	} else {
-		logger.Info("registered runtime backend", "backend", backend.Name(), "limits", backend.Capabilities().EnforcesResourceLimits)
+		if subtree != nil {
+			backend.EnableNetns(networks, egressSink)
+		}
+		if err := registry.Register(backend); err != nil {
+			logger.Warn("register backend failed", "backend", backend.Name(), "error", err)
+		} else {
+			logger.Info("registered runtime backend", "backend", backend.Name(), "limits", backend.Capabilities().EnforcesResourceLimits)
+		}
 	}
 
 	return manager

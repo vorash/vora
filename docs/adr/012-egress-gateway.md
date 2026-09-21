@@ -65,13 +65,12 @@ delegated `cgroup.Subtree` gVisor already uses. `NetworkNone` keeps the existing
   `vora_policy_denied_total`, `vora_audit_write_failed_total`).
 - The proxy passes TLS through, so no CA distribution or trust-store change is
   required. Non-TLS/other-port traffic is denied by default.
-- **gVisor is not covered, by decision.** `runsc --network=host` resolves to the
-  *runner's* netns (not the prepared one), and joining the netns through the OCI
-  spec's network namespace path makes egress time out because gVisor's netstack
-  bypasses the host-ns DNAT. gVisor therefore advertises `NetworkNone` only;
-  auto-select falls back to bwrap for restricted specs. This is a **permanent
-  limitation of the current design**, not pending work: the userspace-netstack
-  gateway that would close it is out of scope for v0.x.
+- **gVisor was uncovered through v0.4; v0.5 closes it (ADR 017).** `runsc
+  --network=host` resolves to the *runner's* netns and gVisor's userspace
+  netstack bypasses the sandbox-ns output DNAT, which is why the bwrap rule
+  never captured it. v0.5 applies the same policy in the **runner** netns
+  prerouting hook — which netstack frames do traverse — and runs the sandbox in
+  its own netns via `--network host`. See [ADR 017](017-gvisor-restricted-egress.md).
 - **DNS resolves through the gateway (v0.4).** v0.3 DNAT'd only TCP, so a
   restricted workload had to use literal addresses. The **allowlist-only
   resolver on the gateway address** answers only names matching the sandbox's
