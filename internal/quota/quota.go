@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Mode describes how strictly disk limits are enforced on this host.
@@ -75,7 +76,10 @@ func New(root string) *Manager {
 func (m *Manager) Mode() Mode { return m.mode }
 
 // detect returns ModeProject only when the runner is root, both tools exist,
-// and the filesystem holding root is mounted with prjquota.
+// the filesystem holding root is mounted with prjquota, and a probe shows the
+// kernel actually refuses writes past a project-quota limit. The probe matters:
+// some kernels account project quotas without enforcing them (observed on
+// ext4), and a mount option alone cannot tell the two apart.
 func detect(root string, r Runner, rootUser bool) Mode {
 	if !rootUser {
 		return ModeAccounting
@@ -90,7 +94,56 @@ func detect(root string, r Runner, rootUser bool) Mode {
 	if mp == "" || !hasProjectQuota(mp) {
 		return ModeAccounting
 	}
+	if !probeHardLimit(root, r) {
+		return ModeAccounting
+	}
 	return ModeProject
+}
+
+// probeProjectID is a fixed project id used only for the startup enforcement
+// probe, well away from the derived per-sandbox range.
+const probeProjectID = uint32(0x7fffffff)
+
+// probeHardLimit writes past a tiny project quota in a throwaway directory and
+// reports whether the kernel refused it. It cleans up after itself and is
+// safe to run once at startup. Any failure to set up the probe is treated as
+// "not enforced" so the runner falls back to the accounting scan.
+func probeHardLimit(root string, r Runner) bool {
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return false
+	}
+	dir, err := os.MkdirTemp(root, ".vora-quota-probe-")
+	if err != nil {
+		return false
+	}
+	defer os.RemoveAll(dir)
+
+	mp := mountPoint(root)
+	if mp == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	proj := strconv.FormatUint(uint64(probeProjectID), 10)
+	if err := r.Run(ctx, "chattr", "-R", "-p", proj, dir); err != nil {
+		return false
+	}
+	if err := r.Run(ctx, "chattr", "+P", "-p", proj, dir); err != nil {
+		return false
+	}
+	// One 1 KiB block hard limit; a 64 KiB write must fail when enforced.
+	if err := r.Run(ctx, "setquota", "-P", proj, "1", "1", "0", "0", mp); err != nil {
+		return false
+	}
+	defer func() { _ = r.Run(ctx, "setquota", "-P", proj, "0", "0", "0", "0", mp) }()
+
+	f, err := os.Create(filepath.Join(dir, "probe"))
+	if err != nil {
+		return false
+	}
+	_, werr := f.Write(make([]byte, 64<<10))
+	_ = f.Close()
+	return werr != nil
 }
 
 // Enforce applies a hard limit of bytes to paths. In accounting mode it is a
@@ -112,8 +165,10 @@ func (m *Manager) Enforce(ctx context.Context, id string, paths []string, bytes 
 			return fmt.Errorf("quota: assign project %s to %s: %w", proj, p, err)
 		}
 		// Best effort: mark the directory as a project root so entries created
-		// after this point inherit the project id.
-		_ = m.run.Run(ctx, "chattr", "-P", "-p", proj, p)
+		// after this point inherit the project id. `+P` sets the project-hierarchy
+		// flag; `-P` would clear it and let new files escape the quota (as they do
+		// on XFS).
+		_ = m.run.Run(ctx, "chattr", "+P", "-p", proj, p)
 	}
 	blocks := (bytes + 1023) / 1024 // setquota counts 1 KiB blocks
 	limit := strconv.FormatInt(blocks, 10)
