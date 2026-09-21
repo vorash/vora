@@ -372,7 +372,7 @@ func (b *Backend) start(ctx context.Context, hd *handle, opts runOpts, resolvCon
 		hd.group = nil
 		return fmt.Errorf("gvisor: %w", err)
 	}
-	if err := writeBundle(b.runsc, hd.bundleDir, hd.spec, resolvConf); err != nil {
+	if err := writeBundle(b.runsc, hd.bundleDir, hd.spec, resolvConf, hd.spec.Network.Mode == runtime.NetworkRestricted); err != nil {
 		_ = group.Destroy()
 		hd.group = nil
 		return err

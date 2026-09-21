@@ -27,7 +27,7 @@ const (
 // The baseline spec comes from `runsc spec` (so it matches the installed
 // gVisor), then we point root at the read-only image rootfs and add the Vora
 // workspace mounts. All mutable state lives in the bound workspace paths.
-func writeBundle(runsc, bundleDir string, spec runtime.SandboxSpec, resolvConf string) error {
+func writeBundle(runsc, bundleDir string, spec runtime.SandboxSpec, resolvConf string, restricted bool) error {
 	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
 		return fmt.Errorf("gvisor: create bundle dir: %w", err)
 	}
@@ -67,6 +67,24 @@ func writeBundle(runsc, bundleDir string, spec runtime.SandboxSpec, resolvConf s
 		// Point the sandbox at the gateway resolver (ADR 012). The image must
 		// carry /etc/resolv.conf; the caller checks that before starting.
 		s.Mounts = append(s.Mounts, roBindMount(resolvConf, "/etc/resolv.conf"))
+	}
+	if restricted {
+		// gVisor runs with --network host, which uses the network namespace of
+		// the runsc process — the sandbox netns we launched it in. The baseline
+		// OCI spec carries a network namespace entry, which would make gVisor
+		// create a fresh, empty namespace instead: no veth, no route, and the
+		// runner-side policy never sees a packet. Drop it so the sandbox shares
+		// the prepared netns (ADR 017).
+		if s.Linux != nil {
+			kept := s.Linux.Namespaces[:0]
+			for _, ns := range s.Linux.Namespaces {
+				if ns.Type == specs.NetworkNamespace {
+					continue
+				}
+				kept = append(kept, ns)
+			}
+			s.Linux.Namespaces = kept
+		}
 	}
 
 	out, err := json.MarshalIndent(&s, "", "  ")
