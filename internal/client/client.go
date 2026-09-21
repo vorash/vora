@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
@@ -52,6 +53,26 @@ func DialAddressTLS(addr string, cfg *tls.Config) (*Client, error) {
 	conn, err := grpc.NewClient(addr, dialOptions(credentials.NewTLS(cfg))...)
 	if err != nil {
 		return nil, fmt.Errorf("client: dial %s: %w", addr, err)
+	}
+	return &Client{conn: conn, stub: v1.NewRunnerServiceClient(conn)}, nil
+}
+
+// TunnelDialer opens a connection to a runner the API cannot dial directly.
+type TunnelDialer interface {
+	Dial(ctx context.Context, runnerID string) (net.Conn, error)
+}
+
+// DialTunnel connects to a runner over a reverse tunnel instead of the network,
+// so a runner behind NAT can still be driven by the control plane.
+func DialTunnel(runnerID string, t TunnelDialer) (*Client, error) {
+	conn, err := grpc.NewClient("passthrough:///vora-tunnel",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return t.Dial(ctx, runnerID)
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("client: dial tunnel %s: %w", runnerID, err)
 	}
 	return &Client{conn: conn, stub: v1.NewRunnerServiceClient(conn)}, nil
 }

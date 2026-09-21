@@ -35,6 +35,8 @@ create table if not exists runners (
   registered_at  timestamptz not null default now(),
   last_heartbeat timestamptz not null default now()
 );
+alter table runners add column if not exists network_modes text[] not null default '{}';
+alter table runners add column if not exists tunneled boolean not null default false;
 
 create table if not exists sandbox_routes (
   sandbox_id text primary key,
@@ -145,24 +147,26 @@ func (s *PostgresStore) TouchKey(ctx context.Context, id string, at time.Time) e
 
 func (s *PostgresStore) UpsertRunner(ctx context.Context, r Runner) error {
 	_, err := s.pool.Exec(ctx,
-		`insert into runners (id, address, backends, cpu_millis, memory_bytes, max_sandboxes, running, version, registered_at, last_heartbeat)
-		 values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		`insert into runners (id, address, tunneled, backends, network_modes, cpu_millis, memory_bytes, max_sandboxes, running, version, registered_at, last_heartbeat)
+		 values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 		 on conflict (id) do update set
 		   address = excluded.address,
+		   tunneled = excluded.tunneled,
 		   backends = excluded.backends,
+		   network_modes = excluded.network_modes,
 		   cpu_millis = excluded.cpu_millis,
 		   memory_bytes = excluded.memory_bytes,
 		   max_sandboxes = excluded.max_sandboxes,
 		   running = excluded.running,
 		   version = excluded.version,
 		   last_heartbeat = excluded.last_heartbeat`,
-		r.ID, r.Address, r.Backends, r.CPUMillis, r.MemoryBytes, r.MaxSandboxes, r.Running, r.Version, r.RegisteredAt, r.LastHeartbeat)
+		r.ID, r.Address, r.Tunneled, r.Backends, r.NetworkModes, r.CPUMillis, r.MemoryBytes, r.MaxSandboxes, r.Running, r.Version, r.RegisteredAt, r.LastHeartbeat)
 	return err
 }
 
 func (s *PostgresStore) ListRunners(ctx context.Context) ([]Runner, error) {
 	rows, err := s.pool.Query(ctx,
-		`select id, address, backends, cpu_millis, memory_bytes, max_sandboxes, running, version, registered_at, last_heartbeat
+		`select id, address, tunneled, backends, network_modes, cpu_millis, memory_bytes, max_sandboxes, running, version, registered_at, last_heartbeat
 		   from runners order by id`)
 	if err != nil {
 		return nil, err
@@ -171,7 +175,7 @@ func (s *PostgresStore) ListRunners(ctx context.Context) ([]Runner, error) {
 	var out []Runner
 	for rows.Next() {
 		var r Runner
-		if err := rows.Scan(&r.ID, &r.Address, &r.Backends, &r.CPUMillis, &r.MemoryBytes, &r.MaxSandboxes,
+		if err := rows.Scan(&r.ID, &r.Address, &r.Tunneled, &r.Backends, &r.NetworkModes, &r.CPUMillis, &r.MemoryBytes, &r.MaxSandboxes,
 			&r.Running, &r.Version, &r.RegisteredAt, &r.LastHeartbeat); err != nil {
 			return nil, err
 		}
@@ -183,9 +187,9 @@ func (s *PostgresStore) ListRunners(ctx context.Context) ([]Runner, error) {
 func (s *PostgresStore) Runner(ctx context.Context, id string) (Runner, error) {
 	var r Runner
 	err := s.pool.QueryRow(ctx,
-		`select id, address, backends, cpu_millis, memory_bytes, max_sandboxes, running, version, registered_at, last_heartbeat
+		`select id, address, tunneled, backends, network_modes, cpu_millis, memory_bytes, max_sandboxes, running, version, registered_at, last_heartbeat
 		   from runners where id = $1`, id).
-		Scan(&r.ID, &r.Address, &r.Backends, &r.CPUMillis, &r.MemoryBytes, &r.MaxSandboxes,
+		Scan(&r.ID, &r.Address, &r.Tunneled, &r.Backends, &r.NetworkModes, &r.CPUMillis, &r.MemoryBytes, &r.MaxSandboxes,
 			&r.Running, &r.Version, &r.RegisteredAt, &r.LastHeartbeat)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Runner{}, ErrNotFound

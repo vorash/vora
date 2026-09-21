@@ -521,10 +521,12 @@ requirement (`/etc/resolv.conf` must exist in the image layers for
 - **Control-plane channels are plaintext by default.** Registration is gated by
   a join token, and TLS/mTLS is available per channel
   (`VORA_API_HTTP_TLS_*`, `VORA_API_REGISTRY_TLS_*`, `VORA_RUNNER_TLS_*`), but
-  it is off until configured. The API→runner hop needs the runner reachable (no
-  NAT reverse tunnel yet — capacity-aware placement is in
-  [ADR 021](docs/adr/021-capacity-placement.md)), and the default API store is
-  in-memory ([ADR 014](docs/adr/014-control-plane.md)).
+  it is off until configured. A runner behind NAT can still be driven by setting
+  `VORA_API_TUNNEL_ADDR` on both sides, so the runner connects out and the API
+  multiplexes over a reverse tunnel ([ADR 022](docs/adr/022-reverse-tunnel.md));
+  capacity-aware placement is in [ADR 021](docs/adr/021-capacity-placement.md),
+  and the default API store is in-memory
+  ([ADR 014](docs/adr/014-control-plane.md)).
 - **Not production-ready.** No auth on the runner Unix socket, no security
   audit, and no NAT reverse tunnel for runners yet.
 

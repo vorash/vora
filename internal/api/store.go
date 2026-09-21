@@ -37,6 +37,7 @@ func (k APIKey) HasScope(scope string) bool {
 type Runner struct {
 	ID            string    `json:"id"`
 	Address       string    `json:"address"`
+	Tunneled      bool      `json:"tunneled,omitempty"`
 	Backends      []string  `json:"backends"`
 	NetworkModes  []string  `json:"network_modes,omitempty"`
 	CPUMillis     int64     `json:"cpu_millis"`
