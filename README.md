@@ -492,9 +492,12 @@ requirement (`/etc/resolv.conf` must exist in the image layers for
   sets `VORA_ALLOW_INSECURE_BROKER=1`).
 - **Non-TLS egress is denied.** The proxy only understands TLS SNI; plaintext
   HTTP and non-443 ports are blocked by default.
-- **No syscall filtering for bwrap.** seccomp is not applied; Bubblewrap
-  `--seccomp` is a planned hardening step. gVisor provides its own syscall
-  surface.
+- **bwrap syscall filtering is a deny-list.** `vora-init` installs a seccomp
+  filter (`EPERM` for ptrace, the mount API, module/kexec, bpf, keyrings, …)
+  before the sandbox serves, so every workload inherits it. It is hardening, not
+  a containment boundary — namespaces, cgroup limits, and gVisor remain the
+  isolation ([ADR 018](docs/adr/018-bwrap-seccomp.md)). gVisor provides its own
+  syscall surface.
 - **Disk quota is only hard with an enforcing project quota.** `DiskBytes` is
   enforced by a filesystem project quota when the sandboxes directory is
   mounted with `prjquota`, the runner can run `chattr`/`setquota` (root), and a
