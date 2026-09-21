@@ -358,9 +358,10 @@ func (a *app) logsCmd() *cobra.Command {
 				}
 				for _, e := range records {
 					ts := time.UnixMilli(e.GetStartedAtUnixMs()).Format(time.RFC3339)
-					fmt.Printf("%s  %s %s  exit=%d reason=%s stdout=%dB stderr=%dB\n",
+					fmt.Printf("%s  %s %s  exit=%d reason=%s stdout=%dB stderr=%dB cpu=%dms rss=%dB egress=%d/%d\n",
 						ts, e.GetCommand(), strings.Join(e.GetArgs(), " "),
-						e.GetExitCode(), shortReason(e.GetReason()), e.GetStdoutBytes(), e.GetStderrBytes())
+						e.GetExitCode(), shortReason(e.GetReason()), e.GetStdoutBytes(), e.GetStderrBytes(),
+						e.GetCpuMillis(), e.GetMemoryPeakBytes(), e.GetEgressAllowed(), e.GetEgressDenied())
 				}
 				return nil
 			}

@@ -108,6 +108,13 @@ message SandboxExec {
   ExitReason reason = 8;
   int64 stdout_bytes = 9;
   int64 stderr_bytes = 10;
+  // cpu_millis is the CPU consumed during this execution.
+  int64 cpu_millis = 11;
+  // memory_peak_bytes is the cgroup memory.peak at the end of the execution.
+  int64 memory_peak_bytes = 12;
+  // egress_allowed/denied count restricted-network decisions in the window.
+  int64 egress_allowed = 13;
+  int64 egress_denied = 14;
 }
 
 message GetSandboxEgressRequest {
