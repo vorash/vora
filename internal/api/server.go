@@ -21,6 +21,7 @@ import (
 
 	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/client"
+	"github.com/vorash/vora/internal/sandbox"
 	"github.com/vorash/vora/internal/secret"
 	"github.com/vorash/vora/internal/tlsutil"
 	"github.com/vorash/vora/internal/ulid"
@@ -42,6 +43,8 @@ type RunnerClient interface {
 	Events(ctx context.Context, id string) ([]*v1.SandboxEvent, error)
 	Execs(ctx context.Context, id string) ([]*v1.SandboxExec, error)
 	Egress(ctx context.Context, id string) ([]*v1.SandboxEgress, error)
+	GetFile(ctx context.Context, id, path string) ([]byte, error)
+	PutFile(ctx context.Context, id, path string, content []byte, createParents bool) (int64, error)
 	Exec(ctx context.Context, req *v1.ExecSandboxRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ExecChunk], error)
 	Close() error
 }
@@ -194,6 +197,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/sandboxes/{id}/events", s.auth(ScopeSandbox, s.eventsSandbox))
 	mux.HandleFunc("GET /v1/sandboxes/{id}/execs", s.auth(ScopeSandbox, s.execsSandbox))
 	mux.HandleFunc("GET /v1/sandboxes/{id}/egress", s.auth(ScopeSandbox, s.egressSandbox))
+	mux.HandleFunc("GET /v1/sandboxes/{id}/files", s.auth(ScopeSandbox, s.getFile))
+	mux.HandleFunc("PUT /v1/sandboxes/{id}/files", s.auth(ScopeSandbox, s.putFile))
 
 	mux.HandleFunc("GET /v1/runners", s.auth(ScopeAdmin, s.listRunners))
 	mux.HandleFunc("POST /v1/keys", s.auth(ScopeAdmin, s.createKey))
@@ -437,6 +442,67 @@ func (s *Server) egressSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeProto(w, http.StatusOK, &v1.GetSandboxEgressResponse{Records: records})
+}
+
+// getFile streams one file from a sandbox's writable roots. The path travels
+// as a query parameter and is validated by the runner, which owns the mapping
+// from sandbox paths to host directories.
+func (s *Server) getFile(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		writeError(w, http.StatusBadRequest, "path query parameter is required")
+		return
+	}
+	rc, err := s.runnerFor(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	defer rc.Close()
+
+	content, err := rc.GetFile(r.Context(), id, path)
+	if err != nil {
+		writeGRPCError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(content)
+}
+
+// putFile writes one file into a sandbox's writable roots. The body is the raw
+// file content, capped before it is forwarded to the runner.
+func (s *Server) putFile(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		writeError(w, http.StatusBadRequest, "path query parameter is required")
+		return
+	}
+	content, err := io.ReadAll(io.LimitReader(r.Body, sandbox.MaxTransferBytes+1))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+	if len(content) > sandbox.MaxTransferBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("file exceeds %d bytes", sandbox.MaxTransferBytes))
+		return
+	}
+	rc, err := s.runnerFor(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	defer rc.Close()
+
+	createParents := r.URL.Query().Get("create_parents") == "true"
+	n, err := rc.PutFile(r.Context(), id, path, content, createParents)
+	if err != nil {
+		writeGRPCError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"path": path, "bytes_written": n})
 }
 
 // execSandbox streams one execution as NDJSON of v1.ExecChunk.

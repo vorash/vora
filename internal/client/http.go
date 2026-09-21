@@ -176,6 +176,58 @@ func (c *HTTPClient) Egress(ctx context.Context, id string) ([]*v1.SandboxEgress
 	return resp.GetRecords(), nil
 }
 
+// GetFile reads a file from a sandbox's writable roots through the control plane.
+func (c *HTTPClient) GetFile(ctx context.Context, id, path string) ([]byte, error) {
+	u := c.base + "/v1/sandboxes/" + id + "/files?path=" + url.QueryEscape(path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.key != "" {
+		req.Header.Set("Authorization", "Bearer "+c.key)
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, decodeHTTPError(resp)
+	}
+	return io.ReadAll(resp.Body)
+}
+
+// PutFile writes a file into a sandbox's writable roots through the control plane.
+func (c *HTTPClient) PutFile(ctx context.Context, id, path string, content []byte, createParents bool) (int64, error) {
+	u := c.base + "/v1/sandboxes/" + id + "/files?path=" + url.QueryEscape(path)
+	if createParents {
+		u += "&create_parents=true"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, bytes.NewReader(content))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	if c.key != "" {
+		req.Header.Set("Authorization", "Bearer "+c.key)
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return 0, decodeHTTPError(resp)
+	}
+	var body struct {
+		BytesWritten int64 `json:"bytes_written"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return 0, err
+	}
+	return body.BytesWritten, nil
+}
+
 // Exec starts a command and returns an NDJSON-backed stream.
 func (c *HTTPClient) Exec(ctx context.Context, req *v1.ExecSandboxRequest, _ ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ExecChunk], error) {
 	data, err := protojson.Marshal(req.GetExec())

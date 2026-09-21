@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -294,23 +293,18 @@ func (a *app) cpCmd() *cobra.Command {
 
 			if srcIsSandbox {
 				// sandbox -> local
-				var buf bytes.Buffer
-				if _, err := a.runExec(ctx, c, srcID, &v1.ExecRequest{Command: "cat", Args: []string{srcPath}, Cwd: "/"}, &buf, os.Stderr); err != nil {
+				content, err := c.GetFile(ctx, srcID, srcPath)
+				if err != nil {
 					return err
 				}
-				return os.WriteFile(dstPath, buf.Bytes(), 0o644)
+				return os.WriteFile(dstPath, content, 0o644)
 			}
 			// local -> sandbox
 			data, err := os.ReadFile(srcPath)
 			if err != nil {
 				return err
 			}
-			_, err = a.runExec(ctx, c, dstID, &v1.ExecRequest{
-				Command: "sh",
-				Args:    []string{"-c", `cat > "$1"`, "vora", dstPath},
-				Cwd:     "/",
-				Stdin:   data,
-			}, io.Discard, os.Stderr)
+			_, err = c.PutFile(ctx, dstID, dstPath, data, true)
 			return err
 		},
 	}

@@ -124,6 +124,29 @@ func (c *Client) Egress(ctx context.Context, id string) ([]*v1.SandboxEgress, er
 	return resp.GetRecords(), nil
 }
 
+// GetFile reads a file from a sandbox's writable roots.
+func (c *Client) GetFile(ctx context.Context, id, path string) ([]byte, error) {
+	resp, err := c.stub.GetSandboxFile(ctx, &v1.GetSandboxFileRequest{SandboxId: id, Path: path})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetContent(), nil
+}
+
+// PutFile writes a file into a sandbox's writable roots.
+func (c *Client) PutFile(ctx context.Context, id, path string, content []byte, createParents bool) (int64, error) {
+	resp, err := c.stub.PutSandboxFile(ctx, &v1.PutSandboxFileRequest{
+		SandboxId:     id,
+		Path:          path,
+		Content:       content,
+		CreateParents: createParents,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return resp.GetBytesWritten(), nil
+}
+
 // Exec starts a command and returns the output stream.
 func (c *Client) Exec(ctx context.Context, req *v1.ExecSandboxRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ExecChunk], error) {
 	return c.stub.ExecSandbox(ctx, req, opts...)

@@ -19,6 +19,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
+	"github.com/vorash/vora/internal/sandbox"
 	"github.com/vorash/vora/internal/ulid"
 )
 
@@ -37,6 +38,7 @@ type fakeRunner struct {
 	destroyErr    error
 	destroyed     []string
 	destroyCtxErr error
+	files         map[string][]byte
 	closed        int
 }
 
@@ -93,6 +95,22 @@ func (f *fakeRunner) Execs(_ context.Context, _ string) ([]*v1.SandboxExec, erro
 
 func (f *fakeRunner) Egress(_ context.Context, _ string) ([]*v1.SandboxEgress, error) {
 	return []*v1.SandboxEgress{{Host: "example.com", Allowed: true}}, nil
+}
+
+func (f *fakeRunner) GetFile(_ context.Context, _, path string) ([]byte, error) {
+	content, ok := f.files[path]
+	if !ok {
+		return nil, errors.New("file not found")
+	}
+	return content, nil
+}
+
+func (f *fakeRunner) PutFile(_ context.Context, _, path string, content []byte, _ bool) (int64, error) {
+	if f.files == nil {
+		f.files = map[string][]byte{}
+	}
+	f.files[path] = content
+	return int64(len(content)), nil
 }
 
 func (f *fakeRunner) Exec(_ context.Context, _ *v1.ExecSandboxRequest, _ ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ExecChunk], error) {
@@ -550,4 +568,104 @@ func readBody(t *testing.T, resp *http.Response) []byte {
 		t.Fatalf("read body: %v", err)
 	}
 	return data
+}
+
+func TestFileRoutesRoundTrip(t *testing.T) {
+	fr := &fakeRunner{}
+	s, ts := newTestServer(t, fr)
+	if err := s.store.SetRoute(context.Background(), SandboxRoute{SandboxID: "sbx_a", RunnerID: "run_test", TenantID: "tenant-a"}); err != nil {
+		t.Fatal(err)
+	}
+	plaintext, key := newStoredTestKey(t, "tenant-a", ScopeSandbox)
+	if err := s.store.CreateKey(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+
+	put, err := http.NewRequest(http.MethodPut, ts.URL+"/v1/sandboxes/sbx_a/files?path=/workspace/hello.txt", strings.NewReader("hi there"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	put.Header.Set("Authorization", "Bearer "+plaintext)
+	putResp, err := http.DefaultClient.Do(put)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer putResp.Body.Close()
+	if putResp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200", putResp.StatusCode)
+	}
+	var putBody struct {
+		BytesWritten int64 `json:"bytes_written"`
+	}
+	if err := json.Unmarshal(readBody(t, putResp), &putBody); err != nil {
+		t.Fatal(err)
+	}
+	if putBody.BytesWritten != int64(len("hi there")) {
+		t.Fatalf("bytes_written = %d, want %d", putBody.BytesWritten, len("hi there"))
+	}
+	if got := fr.files["/workspace/hello.txt"]; string(got) != "hi there" {
+		t.Fatalf("runner got %q", got)
+	}
+
+	getResp := do(t, http.MethodGet, ts.URL+"/v1/sandboxes/sbx_a/files?path=/workspace/hello.txt", plaintext, nil)
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200", getResp.StatusCode)
+	}
+	if got := string(readBody(t, getResp)); got != "hi there" {
+		t.Fatalf("GET body = %q", got)
+	}
+}
+
+func TestFileRouteRequiresPath(t *testing.T) {
+	_, ts := newTestServer(t, &fakeRunner{})
+	resp := do(t, http.MethodGet, ts.URL+"/v1/sandboxes/sbx_a/files", bootstrap, nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestFileRouteRejectsOversize(t *testing.T) {
+	_, ts := newTestServer(t, &fakeRunner{})
+	body := bytes.NewReader(make([]byte, sandbox.MaxTransferBytes+1))
+	req, err := http.NewRequest(http.MethodPut, ts.URL+"/v1/sandboxes/sbx_a/files?path=/workspace/big", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+bootstrap)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", resp.StatusCode)
+	}
+}
+
+func TestFileRouteTenantIsolation(t *testing.T) {
+	fr := &fakeRunner{files: map[string][]byte{"/workspace/secret": []byte("tenant-a only")}}
+	s, ts := newTestServer(t, fr)
+	if err := s.store.SetRoute(context.Background(), SandboxRoute{SandboxID: "sbx_a", RunnerID: "run_test", TenantID: "tenant-a"}); err != nil {
+		t.Fatal(err)
+	}
+	plaintext, key := newStoredTestKey(t, "tenant-b", ScopeSandbox)
+	if err := s.store.CreateKey(context.Background(), key); err != nil {
+		t.Fatal(err)
+	}
+	resp := do(t, http.MethodGet, ts.URL+"/v1/sandboxes/sbx_a/files?path=/workspace/secret", plaintext, nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestFileRouteMissingSandbox(t *testing.T) {
+	_, ts := newTestServer(t, &fakeRunner{})
+	resp := do(t, http.MethodGet, ts.URL+"/v1/sandboxes/sbx_missing/files?path=/workspace/x", bootstrap, nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
 }

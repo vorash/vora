@@ -20,6 +20,8 @@ type API interface {
 	Events(ctx context.Context, id string) ([]*v1.SandboxEvent, error)
 	Execs(ctx context.Context, id string) ([]*v1.SandboxExec, error)
 	Egress(ctx context.Context, id string) ([]*v1.SandboxEgress, error)
+	GetFile(ctx context.Context, id, path string) ([]byte, error)
+	PutFile(ctx context.Context, id, path string, content []byte, createParents bool) (int64, error)
 	Exec(ctx context.Context, req *v1.ExecSandboxRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ExecChunk], error)
 	Close() error
 }

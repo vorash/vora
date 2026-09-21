@@ -651,6 +651,60 @@ func (s *Server) GetSandboxEgress(ctx context.Context, req *v1.GetSandboxEgressR
 	return &v1.GetSandboxEgressResponse{Records: egressToProto(records)}, nil
 }
 
+// GetSandboxFile reads one file from a running sandbox's writable roots.
+func (s *Server) GetSandboxFile(ctx context.Context, req *v1.GetSandboxFileRequest) (*v1.GetSandboxFileResponse, error) {
+	spec, err := s.runningSpec(req.GetSandboxId())
+	if err != nil {
+		return nil, err
+	}
+	content, err := sandbox.ReadFile(spec, req.GetPath())
+	if err != nil {
+		return nil, fileError(err)
+	}
+	return &v1.GetSandboxFileResponse{Path: req.GetPath(), Content: content}, nil
+}
+
+// PutSandboxFile writes one file into a running sandbox's writable roots.
+func (s *Server) PutSandboxFile(ctx context.Context, req *v1.PutSandboxFileRequest) (*v1.PutSandboxFileResponse, error) {
+	spec, err := s.runningSpec(req.GetSandboxId())
+	if err != nil {
+		return nil, err
+	}
+	n, err := sandbox.WriteFile(spec, req.GetPath(), req.GetContent(), req.GetCreateParents())
+	if err != nil {
+		return nil, fileError(err)
+	}
+	return &v1.PutSandboxFileResponse{Path: req.GetPath(), BytesWritten: n}, nil
+}
+
+// runningSpec loads a sandbox and returns its workspace spec, requiring the
+// RUNNING state so a file transfer never races creation or teardown.
+func (s *Server) runningSpec(id string) (runtime.WorkspaceSpec, error) {
+	if id == "" {
+		return runtime.WorkspaceSpec{}, status.Error(codes.InvalidArgument, "sandbox_id is required")
+	}
+	rec, err := s.store.Load(id)
+	if err != nil {
+		return runtime.WorkspaceSpec{}, s.loadError(err, id)
+	}
+	if rec.State != sandbox.StateRunning {
+		return runtime.WorkspaceSpec{}, status.Errorf(codes.FailedPrecondition, "sandbox %s is in state %s", id, rec.State)
+	}
+	return rec.Spec.Workspace, nil
+}
+
+// fileError maps filesystem failures to gRPC status codes.
+func fileError(err error) error {
+	switch {
+	case errors.Is(err, sandbox.ErrPathOutsideWritableRoots), errors.Is(err, sandbox.ErrFileTooLarge):
+		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, os.ErrNotExist):
+		return status.Error(codes.NotFound, err.Error())
+	default:
+		return status.Errorf(codes.Internal, "file transfer: %v", err)
+	}
+}
+
 // selectBackend resolves the backend for a spec: an explicit spec.Backend wins,
 // otherwise auto-select the strongest usable backend.
 //
