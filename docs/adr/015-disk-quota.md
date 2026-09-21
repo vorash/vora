@@ -28,13 +28,16 @@ directory must carry the project-hierarchy flag (`chattr +P`) or new files do
 not inherit the id and escape the quota (observed on XFS).
 
 **1a. Verify enforcement, don't trust the mount option.**
-At startup the runner probes the filesystem: it assigns a throwaway project id
-to a temp directory, sets a 1 KiB limit, attempts a 64 KiB write, and requires
-that write to fail. Some kernels mount `prjquota` and account the quota but do
-not enforce it (observed on ext4, kernel 7.0.0); a mount option alone cannot
-tell the two apart. If the probe does not bite, the runner falls back to
-accounting rather than claiming a hard guarantee it does not have. XFS is the
-verified hard-limit filesystem.
+At startup the runner probes the filesystem: it creates a probe file, assigns a
+throwaway project id to the directory, sets a 1 KiB limit, and requires a 64 KiB
+write to fail. The file is created **before** the limit is applied, because XFS
+charges the inode and directory entry to the project, so a create under a 1 KiB
+limit fails with `ENOSPC` for the wrong reason and would look like
+non-enforcement. Some kernels mount `prjquota` and account the quota but do not
+enforce it (observed on ext4, kernel 7.0.0); a mount option alone cannot tell
+the two apart. If the probe does not bite, the runner falls back to accounting
+rather than claiming a hard guarantee it does not have. XFS is the verified
+hard-limit filesystem.
 
 **2. Fall back to a periodic usage scan (best-effort).**
 When project quotas are unavailable — an unprivileged runner, a filesystem

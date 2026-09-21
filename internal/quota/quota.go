@@ -122,6 +122,18 @@ func probeHardLimit(root string, r Runner) bool {
 	if mp == "" {
 		return false
 	}
+
+	// Create the probe file BEFORE applying the limit. On XFS the inode and
+	// directory entry are themselves charged to the project, so with a 1 KiB
+	// limit the create fails with ENOSPC/EDQUOT and would be mistaken for
+	// "not enforced". Writing to a pre-created file tests the data path
+	// uniformly across filesystems.
+	f, err := os.Create(filepath.Join(dir, "probe"))
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	proj := strconv.FormatUint(uint64(probeProjectID), 10)
@@ -137,12 +149,7 @@ func probeHardLimit(root string, r Runner) bool {
 	}
 	defer func() { _ = r.Run(ctx, "setquota", "-P", proj, "0", "0", "0", "0", mp) }()
 
-	f, err := os.Create(filepath.Join(dir, "probe"))
-	if err != nil {
-		return false
-	}
 	_, werr := f.Write(make([]byte, 64<<10))
-	_ = f.Close()
 	return werr != nil
 }
 
