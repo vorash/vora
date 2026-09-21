@@ -362,9 +362,10 @@ func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStrea
 	}
 
 	started := time.Now().UTC()
+	baseline := s.usageBaseline(stream.Context(), backend, h)
 	es, err := backend.Exec(stream.Context(), h, execReq)
 	if err != nil {
-		s.recordExec(req.GetSandboxId(), execReq, started, 0, 0, 0, runtime.ReasonRuntimeFailure)
+		s.recordExec(req.GetSandboxId(), execReq, started, 0, 0, 0, runtime.ReasonRuntimeFailure, 0, 0)
 		s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure)).Inc()
 		return status.Errorf(codes.Internal, "exec: %v", err)
 	}
@@ -378,7 +379,8 @@ func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStrea
 			break
 		}
 		if err != nil {
-			s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure)
+			cpu, peak := s.usageDelta(stream.Context(), backend, h, baseline)
+			s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure, cpu, peak)
 			return status.Errorf(codes.Internal, "exec stream: %v", err)
 		}
 		stdoutBytes += int64(len(chunk.Stdout))
@@ -397,30 +399,96 @@ func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStrea
 		code = exit.ExitCode
 		reason = exit.Reason
 	}
-	s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, code, reason)
+	cpu, peak := s.usageDelta(stream.Context(), backend, h, baseline)
+	s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, code, reason, cpu, peak)
 	s.metrics.ExecTotal.WithLabelValues("ok").Inc()
 	return nil
 }
 
 // recordExec persists an execution audit record. Failures are logged, not
 // fatal: losing an audit write must not fail the caller's command.
-func (s *Server) recordExec(sandboxID string, req runtime.ExecRequest, started time.Time, stdoutBytes, stderrBytes int64, code int, reason runtime.ExitReason) {
+func (s *Server) recordExec(sandboxID string, req runtime.ExecRequest, started time.Time, stdoutBytes, stderrBytes int64, code int, reason runtime.ExitReason, cpuMillis, memPeak int64) {
+	finished := time.Now().UTC()
+	allowed, denied := s.egressInWindow(sandboxID, started, finished)
 	rec := sandbox.ExecRecord{
-		ExecutionID: req.ExecutionID,
-		SandboxID:   sandboxID,
-		Command:     req.Command,
-		Args:        req.Args,
-		Cwd:         req.Cwd,
-		StartedAt:   started,
-		FinishedAt:  time.Now().UTC(),
-		ExitCode:    code,
-		Reason:      reason,
-		StdoutBytes: stdoutBytes,
-		StderrBytes: stderrBytes,
+		ExecutionID:     req.ExecutionID,
+		SandboxID:       sandboxID,
+		Command:         req.Command,
+		Args:            req.Args,
+		Cwd:             req.Cwd,
+		StartedAt:       started,
+		FinishedAt:      finished,
+		ExitCode:        code,
+		Reason:          reason,
+		StdoutBytes:     stdoutBytes,
+		StderrBytes:     stderrBytes,
+		CPUMillis:       cpuMillis,
+		MemoryPeakBytes: memPeak,
+		EgressAllowed:   allowed,
+		EgressDenied:    denied,
 	}
 	if err := s.audit.AppendExec(context.Background(), sandboxID, rec); err != nil {
 		s.logger.Warn("write exec record failed", "sandbox_id", sandboxID, "execution_id", req.ExecutionID, "error", err)
 	}
+}
+
+// usageBaseline captures the sandbox cgroup's CPU counter before an execution,
+// so the execution's own consumption can be derived as a delta.
+type usageBaseline struct {
+	cpuMillis int64
+	ok        bool
+}
+
+func (s *Server) usageBaseline(ctx context.Context, backend runtime.Backend, h runtime.Handle) usageBaseline {
+	st, err := backend.Stats(ctx, h)
+	if err != nil || st == nil {
+		return usageBaseline{}
+	}
+	return usageBaseline{cpuMillis: st.CPUMillis, ok: true}
+}
+
+// usageDelta returns the CPU consumed since the baseline and the cgroup's
+// memory.peak at the end of the execution. memory.peak is a high-water mark, so
+// this is the sandbox's peak, not a per-execution sample; current memory is
+// used when the kernel does not expose memory.peak.
+func (s *Server) usageDelta(ctx context.Context, backend runtime.Backend, h runtime.Handle, base usageBaseline) (int64, int64) {
+	if !base.ok {
+		return 0, 0
+	}
+	st, err := backend.Stats(ctx, h)
+	if err != nil || st == nil {
+		return 0, 0
+	}
+	cpu := st.CPUMillis - base.cpuMillis
+	if cpu < 0 {
+		cpu = 0
+	}
+	peak := st.MemoryPeak
+	if peak <= 0 {
+		peak = st.MemoryBytes
+	}
+	return cpu, peak
+}
+
+// egressInWindow counts restricted-network decisions inside [start, end], so an
+// execution's outbound requests and policy violations are recorded with it.
+func (s *Server) egressInWindow(sandboxID string, start, end time.Time) (allowed, denied int64) {
+	records, err := s.audit.Egress(context.Background(), sandboxID)
+	if err != nil {
+		return 0, 0
+	}
+	for _, r := range records {
+		ts := r.Timestamp.UTC()
+		if ts.Before(start) || ts.After(end) {
+			continue
+		}
+		if r.Allowed {
+			allowed++
+		} else {
+			denied++
+		}
+	}
+	return allowed, denied
 }
 
 // SignalSandbox forwards a signal to the sandbox.

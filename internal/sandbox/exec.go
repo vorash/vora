@@ -24,6 +24,16 @@ type ExecRecord struct {
 	Reason      runtime.ExitReason `json:"reason"`
 	StdoutBytes int64              `json:"stdout_bytes"`
 	StderrBytes int64              `json:"stderr_bytes"`
+	// CPUMillis is the CPU consumed during this execution (the cgroup
+	// cpu.stat usage delta across it).
+	CPUMillis int64 `json:"cpu_millis,omitempty"`
+	// MemoryPeakBytes is the sandbox cgroup's memory.peak at the end of the
+	// execution: a high-water mark, not a per-execution sample.
+	MemoryPeakBytes int64 `json:"memory_peak_bytes,omitempty"`
+	// EgressAllowed and EgressDenied count the restricted-network policy
+	// decisions that fell inside this execution's window.
+	EgressAllowed int64 `json:"egress_allowed,omitempty"`
+	EgressDenied  int64 `json:"egress_denied,omitempty"`
 }
 
 // WriteExecRecord writes an execution record to dir/<execution_id>.json

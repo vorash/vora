@@ -255,6 +255,10 @@ func execsToProto(execs []sandbox.ExecRecord) []*v1.SandboxExec {
 			Reason:           reasonToProto(e.Reason),
 			StdoutBytes:      e.StdoutBytes,
 			StderrBytes:      e.StderrBytes,
+			CpuMillis:        e.CPUMillis,
+			MemoryPeakBytes:  e.MemoryPeakBytes,
+			EgressAllowed:    e.EgressAllowed,
+			EgressDenied:     e.EgressDenied,
 		})
 	}
 	return out

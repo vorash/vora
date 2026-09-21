@@ -763,8 +763,15 @@ type SandboxExec struct {
 	Reason           ExitReason             `protobuf:"varint,8,opt,name=reason,proto3,enum=vora.v1.ExitReason" json:"reason,omitempty"`
 	StdoutBytes      int64                  `protobuf:"varint,9,opt,name=stdout_bytes,json=stdoutBytes,proto3" json:"stdout_bytes,omitempty"`
 	StderrBytes      int64                  `protobuf:"varint,10,opt,name=stderr_bytes,json=stderrBytes,proto3" json:"stderr_bytes,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// cpu_millis is the CPU consumed during this execution.
+	CpuMillis int64 `protobuf:"varint,11,opt,name=cpu_millis,json=cpuMillis,proto3" json:"cpu_millis,omitempty"`
+	// memory_peak_bytes is the cgroup memory.peak at the end of the execution.
+	MemoryPeakBytes int64 `protobuf:"varint,12,opt,name=memory_peak_bytes,json=memoryPeakBytes,proto3" json:"memory_peak_bytes,omitempty"`
+	// egress_allowed/denied count restricted-network decisions in the window.
+	EgressAllowed int64 `protobuf:"varint,13,opt,name=egress_allowed,json=egressAllowed,proto3" json:"egress_allowed,omitempty"`
+	EgressDenied  int64 `protobuf:"varint,14,opt,name=egress_denied,json=egressDenied,proto3" json:"egress_denied,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SandboxExec) Reset() {
@@ -863,6 +870,34 @@ func (x *SandboxExec) GetStdoutBytes() int64 {
 func (x *SandboxExec) GetStderrBytes() int64 {
 	if x != nil {
 		return x.StderrBytes
+	}
+	return 0
+}
+
+func (x *SandboxExec) GetCpuMillis() int64 {
+	if x != nil {
+		return x.CpuMillis
+	}
+	return 0
+}
+
+func (x *SandboxExec) GetMemoryPeakBytes() int64 {
+	if x != nil {
+		return x.MemoryPeakBytes
+	}
+	return 0
+}
+
+func (x *SandboxExec) GetEgressAllowed() int64 {
+	if x != nil {
+		return x.EgressAllowed
+	}
+	return 0
+}
+
+func (x *SandboxExec) GetEgressDenied() int64 {
+	if x != nil {
+		return x.EgressDenied
 	}
 	return 0
 }
@@ -1404,7 +1439,7 @@ const file_api_proto_v1_runner_proto_rawDesc = "" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\"E\n" +
 	"\x17GetSandboxExecsResponse\x12*\n" +
-	"\x05execs\x18\x01 \x03(\v2\x14.vora.v1.SandboxExecR\x05execs\"\xdc\x02\n" +
+	"\x05execs\x18\x01 \x03(\v2\x14.vora.v1.SandboxExecR\x05execs\"\xf3\x03\n" +
 	"\vSandboxExec\x12!\n" +
 	"\fexecution_id\x18\x01 \x01(\tR\vexecutionId\x12\x18\n" +
 	"\acommand\x18\x02 \x01(\tR\acommand\x12\x12\n" +
@@ -1416,7 +1451,12 @@ const file_api_proto_v1_runner_proto_rawDesc = "" +
 	"\x06reason\x18\b \x01(\x0e2\x13.vora.v1.ExitReasonR\x06reason\x12!\n" +
 	"\fstdout_bytes\x18\t \x01(\x03R\vstdoutBytes\x12!\n" +
 	"\fstderr_bytes\x18\n" +
-	" \x01(\x03R\vstderrBytes\"8\n" +
+	" \x01(\x03R\vstderrBytes\x12\x1d\n" +
+	"\n" +
+	"cpu_millis\x18\v \x01(\x03R\tcpuMillis\x12*\n" +
+	"\x11memory_peak_bytes\x18\f \x01(\x03R\x0fmemoryPeakBytes\x12%\n" +
+	"\x0eegress_allowed\x18\r \x01(\x03R\regressAllowed\x12#\n" +
+	"\regress_denied\x18\x0e \x01(\x03R\fegressDenied\"8\n" +
 	"\x17GetSandboxEgressRequest\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\"L\n" +
