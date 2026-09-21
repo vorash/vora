@@ -25,6 +25,7 @@ func (a *app) sandboxCreateCmd() *cobra.Command {
 		image, memory, cpu, network, ttl string
 		backend                          string
 		pids                             int64
+		disk                             string
 		env                              []string
 		tenant, agent                    string
 		allowedDomains                   []string
@@ -54,6 +55,13 @@ func (a *app) sandboxCreateCmd() *cobra.Command {
 					return fmt.Errorf("--broker requires --network restricted")
 				}
 			}
+			var diskBytes int64
+			if disk != "" {
+				diskBytes, err = parseMemory(disk)
+				if err != nil {
+					return fmt.Errorf("--disk: %w", err)
+				}
+			}
 			ttlDur, err := parseDuration(ttl)
 			if err != nil {
 				return err
@@ -71,7 +79,7 @@ func (a *app) sandboxCreateCmd() *cobra.Command {
 				Backend:    backend,
 				TenantId:   tenant,
 				AgentId:    agent,
-				Resources:  &v1.ResourceLimits{CpuMillis: cpuMillis, MemoryBytes: memBytes, Pids: pids},
+				Resources:  &v1.ResourceLimits{CpuMillis: cpuMillis, MemoryBytes: memBytes, Pids: pids, DiskBytes: diskBytes},
 				Network:    &v1.NetworkPolicy{Mode: mode, AllowedDomains: allowedDomains, BrokerAliases: brokers},
 				Env:        env,
 				TtlSeconds: int64(ttlDur / time.Second),
@@ -96,6 +104,7 @@ func (a *app) sandboxCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&memory, "memory", "512m", "memory limit (e.g. 512m, 1Gi)")
 	cmd.Flags().StringVar(&cpu, "cpu", "1", "CPU limit (e.g. 1, 500m)")
 	cmd.Flags().Int64Var(&pids, "pids", 128, "process limit")
+	cmd.Flags().StringVar(&disk, "disk", "", "writable-space limit for /workspace and /root (e.g. 1Gi); empty is unlimited")
 	cmd.Flags().StringVar(&network, "network", "none", "network mode: none or restricted")
 	cmd.Flags().StringArrayVar(&allowedDomains, "allow-domain", nil, "egress allowlist domain for --network restricted (repeatable, e.g. example.com)")
 	cmd.Flags().StringArrayVar(&brokers, "broker", nil, "credential alias to allow through the broker (repeatable; requires --api and --network restricted)")
@@ -172,6 +181,9 @@ func (a *app) sandboxInspectCmd() *cobra.Command {
 			fmt.Printf("cpu:        %dm\n", sb.GetSpec().GetResources().GetCpuMillis())
 			fmt.Printf("memory:     %d bytes\n", sb.GetSpec().GetResources().GetMemoryBytes())
 			fmt.Printf("pids:       %d\n", sb.GetSpec().GetResources().GetPids())
+			if d := sb.GetSpec().GetResources().GetDiskBytes(); d > 0 {
+				fmt.Printf("disk:       %d bytes\n", d)
+			}
 			fmt.Printf("network:    %s\n", shortNetwork(sb.GetSpec().GetNetwork().GetMode()))
 			fmt.Printf("runner:     %s\n", sb.GetRunnerId())
 			fmt.Printf("created:    %s\n", time.UnixMilli(sb.GetCreatedAtUnixMs()).Format(time.RFC3339))

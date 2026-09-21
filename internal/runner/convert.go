@@ -157,6 +157,8 @@ func reasonToProto(r runtime.ExitReason) v1.ExitReason {
 		return v1.ExitReason_TIMEOUT_EXCEEDED
 	case runtime.ReasonPolicyViolation:
 		return v1.ExitReason_POLICY_VIOLATION
+	case runtime.ReasonDiskQuota:
+		return v1.ExitReason_DISK_QUOTA_EXCEEDED
 	case runtime.ReasonRuntimeFailure:
 		return v1.ExitReason_RUNTIME_FAILURE
 	default:

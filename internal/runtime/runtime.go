@@ -42,6 +42,7 @@ const (
 	ReasonPidsLimit       ExitReason = "PidsLimitExceeded"
 	ReasonTimeout         ExitReason = "TimeoutExceeded"
 	ReasonPolicyViolation ExitReason = "PolicyViolation"
+	ReasonDiskQuota       ExitReason = "DiskQuotaExceeded"
 	ReasonRuntimeFailure  ExitReason = "RuntimeFailure"
 )
 
@@ -114,6 +115,9 @@ func (s SandboxSpec) Validate() error {
 	}
 	if s.Resources.Pids <= 0 {
 		return fmt.Errorf("%w: pids must be > 0", ErrInvalidSpec)
+	}
+	if s.Resources.DiskBytes < 0 {
+		return fmt.Errorf("%w: disk_bytes must not be negative", ErrInvalidSpec)
 	}
 	switch s.Network.Mode {
 	case NetworkNone:

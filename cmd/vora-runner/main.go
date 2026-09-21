@@ -215,6 +215,9 @@ func run() error {
 				if err := server.ReapExpired(ctx); err != nil {
 					logger.Warn("ttl reaper failed", "error", err)
 				}
+				if err := server.EnforceDiskQuota(ctx); err != nil {
+					logger.Warn("disk quota enforcer failed", "error", err)
+				}
 			}
 		}
 	}()

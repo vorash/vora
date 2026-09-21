@@ -31,6 +31,8 @@ type Metrics struct {
 	NetworkDeniedTotal    prometheus.Counter
 	NetworkDecisionsTotal *prometheus.CounterVec
 	AuditWriteFailedTotal prometheus.Counter
+	DiskQuotaUnenforced   prometheus.Counter
+	DiskQuotaEnforced     prometheus.Gauge
 	RunnerCapacity        prometheus.Gauge
 	RunnerSandboxes       prometheus.Gauge
 }
@@ -92,6 +94,14 @@ func New() *Metrics {
 		Name: "vora_audit_write_failed_total",
 		Help: "Total audit records that could not be persisted.",
 	})
+	m.DiskQuotaUnenforced = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "vora_disk_quota_unenforced_total",
+		Help: "Total sandboxes created with a disk limit the host could not enforce.",
+	})
+	m.DiskQuotaEnforced = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "vora_disk_quota_enforced",
+		Help: "1 when the host enforces disk limits with project quotas, 0 otherwise.",
+	})
 	m.RunnerCapacity = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "vora_runner_capacity",
 		Help: "Runner capacity in CPU millis (0 if unknown).",
@@ -105,7 +115,8 @@ func New() *Metrics {
 		m.BuildInfo, m.SandboxCreateTotal, m.SandboxCreateDuration, m.SandboxRunning,
 		m.SandboxFailedTotal, m.ExecTotal, m.ExecDuration, m.ExecFailedTotal,
 		m.PolicyDeniedTotal, m.NetworkDeniedTotal, m.NetworkDecisionsTotal,
-		m.AuditWriteFailedTotal, m.RunnerCapacity, m.RunnerSandboxes,
+		m.AuditWriteFailedTotal, m.DiskQuotaUnenforced, m.DiskQuotaEnforced,
+		m.RunnerCapacity, m.RunnerSandboxes,
 	)
 	return m
 }
