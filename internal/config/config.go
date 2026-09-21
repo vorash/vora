@@ -51,6 +51,15 @@ type Config struct {
 	// ImagesMode selects how an image ref resolves to a rootfs:
 	// "auto" (containerd, then the local cache), "containerd" or "cache".
 	ImagesMode string
+	// ImagePolicy selects image signature verification: "off" (default;
+	// images are trusted) or "enforce" (unsigned/unverifiable images are
+	// refused). See docs/adr/020-image-signing.md.
+	ImagePolicy string
+	// CosignKey is the path to a cosign public key used for verification when
+	// ImagePolicy is "enforce". Required in enforce mode.
+	CosignKey string
+	// CosignPath overrides the cosign binary location.
+	CosignPath string
 	// EgressMaxConnections bounds concurrent proxy connections per sandbox.
 	EgressMaxConnections int
 	// EgressIdleTimeout closes connections with no traffic in either direction.
@@ -64,6 +73,15 @@ const (
 	ImagesAuto       = "auto"
 	ImagesContainerd = "containerd"
 	ImagesCache      = "cache"
+)
+
+// Image signature policy values for Config.ImagePolicy.
+const (
+	// ImagePolicyOff trusts every image. It is the default and is logged
+	// loudly at startup.
+	ImagePolicyOff = "off"
+	// ImagePolicyEnforce refuses images whose signature cannot be verified.
+	ImagePolicyEnforce = "enforce"
 )
 
 // ImagesDir is the read-only rootfs cache.
@@ -146,6 +164,21 @@ func Default() (Config, error) {
 			return Config{}, fmt.Errorf("invalid VORA_IMAGES_MODE %q (want %q, %q or %q)",
 				v, ImagesAuto, ImagesContainerd, ImagesCache)
 		}
+	}
+	if v := os.Getenv("VORA_IMAGE_POLICY"); v != "" {
+		switch v {
+		case ImagePolicyOff, ImagePolicyEnforce:
+			c.ImagePolicy = v
+		default:
+			return Config{}, fmt.Errorf("invalid VORA_IMAGE_POLICY %q (want %q or %q)",
+				v, ImagePolicyOff, ImagePolicyEnforce)
+		}
+	}
+	if v := os.Getenv("VORA_COSIGN_KEY"); v != "" {
+		c.CosignKey = v
+	}
+	if v := os.Getenv("VORA_COSIGN_PATH"); v != "" {
+		c.CosignPath = v
 	}
 	if v := os.Getenv("VORA_EGRESS_MAX_CONNECTIONS"); v != "" {
 		n, err := strconv.Atoi(v)

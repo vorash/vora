@@ -30,6 +30,8 @@ type Resolver struct {
 	dataRoot    string
 	cli         *ctrclient.Client
 	logger      *slog.Logger
+	policy      *Policy
+	policyErr   error
 
 	mu   sync.Mutex
 	refs map[string]string
@@ -49,6 +51,7 @@ func NewResolver(cfg config.Config, logger *slog.Logger) *Resolver {
 		logger:      logger,
 		refs:        map[string]string{},
 	}
+	r.policy, r.policyErr = NewPolicy(cfg, logger)
 	if r.mode == "" {
 		r.mode = config.ImagesAuto
 	}
@@ -90,6 +93,17 @@ func (r *Resolver) Rootfs(ref string) string { return r.cache.Rootfs(ref) }
 func (r *Resolver) Resolve(ctx context.Context, ref string) (string, error) {
 	if strings.TrimSpace(ref) == "" || Name(ref) == "" {
 		return "", fmt.Errorf("images: empty image reference")
+	}
+	// A misconfigured policy (enforce without a key/cosign) refuses every
+	// image rather than silently trusting them.
+	if r.policyErr != nil {
+		return "", r.policyErr
+	}
+	// Verify before any source is used (containerd pull/unpack or the local
+	// cache), so an unverified image is refused regardless of where it would
+	// have come from.
+	if err := r.policy.Verify(ctx, ref); err != nil {
+		return "", err
 	}
 	r.mu.Lock()
 	cached, ok := r.refs[ref]
