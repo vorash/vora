@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -134,6 +135,7 @@ func (s *Server) Register(ctx context.Context, req *v1.RegisterRunnerRequest) (*
 		ID:            req.GetRunnerId(),
 		Address:       req.GetAddress(),
 		Backends:      req.GetBackends(),
+		NetworkModes:  req.GetNetworkModes(),
 		CPUMillis:     req.GetCapacity().GetCpuMillis(),
 		MemoryBytes:   req.GetCapacity().GetMemoryBytes(),
 		MaxSandboxes:  req.GetCapacity().GetMaxSandboxes(),
@@ -279,13 +281,13 @@ func (s *Server) createSandbox(w http.ResponseWriter, r *http.Request) {
 		}
 		spec.TenantId = key.TenantID
 	}
-	runner, rc, err := s.pickRunner(r.Context())
+	pl, err := s.placeRunner(r.Context(), spec)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
+	runner, rc := pl.runner, pl.client
 	defer rc.Close()
-
 	creds, err := s.resolveBrokerSecrets(r.Context(), spec)
 	if err != nil {
 		if errors.Is(err, errSecretsNotConfigured) {
@@ -308,7 +310,13 @@ func (s *Server) createSandbox(w http.ResponseWriter, r *http.Request) {
 		writeGRPCError(w, err)
 		return
 	}
-	route := SandboxRoute{SandboxID: started.GetId(), RunnerID: runner.ID, TenantID: spec.GetTenantId()}
+	route := SandboxRoute{
+		SandboxID:   started.GetId(),
+		RunnerID:    runner.ID,
+		TenantID:    spec.GetTenantId(),
+		CPUMillis:   spec.GetResources().GetCpuMillis(),
+		MemoryBytes: spec.GetResources().GetMemoryBytes(),
+	}
 	if err := s.store.SetRoute(r.Context(), route); err != nil {
 		s.cleanupRunnerSandbox(rc, started.GetId(), "route persistence failed")
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -319,6 +327,7 @@ func (s *Server) createSandbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to persist sandbox route")
 		return
 	}
+	s.logger.Info("sandbox placed", "sandbox_id", started.GetId(), "runner_id", runner.ID, "reason", pl.reason)
 	writeProto(w, http.StatusCreated, started)
 }
 
@@ -568,13 +577,24 @@ func (s *Server) listRunners(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := s.now()
+	committed := s.committedByRunner(r.Context())
 	type runnerView struct {
 		Runner
-		Healthy bool `json:"healthy"`
+		Healthy              bool  `json:"healthy"`
+		CommittedCPUMillis   int64 `json:"committed_cpu_millis"`
+		CommittedMemoryBytes int64 `json:"committed_memory_bytes"`
+		CommittedSandboxes   int32 `json:"committed_sandboxes"`
 	}
 	out := make([]runnerView, 0, len(runners))
 	for _, rn := range runners {
-		out = append(out, runnerView{Runner: rn, Healthy: rn.Healthy(now, s.opts.RunnerTTL)})
+		c := committed[rn.ID]
+		out = append(out, runnerView{
+			Runner:               rn,
+			Healthy:              rn.Healthy(now, s.opts.RunnerTTL),
+			CommittedCPUMillis:   c.cpu,
+			CommittedMemoryBytes: c.mem,
+			CommittedSandboxes:   c.count,
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"runners": out})
 }
@@ -699,17 +719,133 @@ func (s *Server) runners(ctx context.Context) []Runner {
 	return healthy
 }
 
-// pickRunner returns the first healthy runner (scheduling is deferred).
-func (s *Server) pickRunner(ctx context.Context) (Runner, RunnerClient, error) {
-	for _, r := range s.runners(ctx) {
-		rc, err := s.opts.DialRunner(r.Address)
-		if err != nil {
-			s.logger.Warn("runner unreachable", "runner_id", r.ID, "address", r.Address, "error", err)
+// sandboxResources is a runner's committed load, derived from the routes the
+// API created rather than from runner self-reports.
+type sandboxResources struct {
+	cpu   int64
+	mem   int64
+	count int32
+}
+
+// placement is the chosen runner plus why it was chosen.
+type placement struct {
+	runner Runner
+	client RunnerClient
+	reason string
+}
+
+// placeRunner filters healthy runners by backend/network capability and by
+// committed capacity, then picks the least-loaded candidate. The reason is
+// logged so placement is inspectable.
+func (s *Server) placeRunner(ctx context.Context, spec *v1.SandboxSpec) (*placement, error) {
+	runners := s.runners(ctx)
+	if len(runners) == 0 {
+		return nil, ErrNoRunner
+	}
+	committed := s.committedByRunner(ctx)
+	backend := spec.GetBackend()
+	network := networkModeName(spec.GetNetwork().GetMode())
+	res := spec.GetResources()
+
+	candidates := make([]Runner, 0, len(runners))
+	rejections := make(map[string]string, len(runners))
+	for _, r := range runners {
+		if reason := rejectReason(r, backend, network, res, committed[r.ID]); reason != "" {
+			rejections[r.ID] = reason
 			continue
 		}
-		return r, rc, nil
+		candidates = append(candidates, r)
 	}
-	return Runner{}, nil, ErrNoRunner
+	if len(candidates) == 0 {
+		s.logger.Warn("no runner can take the sandbox", "backend", backend, "network", network, "rejections", rejections)
+		return nil, fmt.Errorf("%w: no runner matches the request (backend %q, network %q)", ErrNoRunner, backend, network)
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		a, b := committed[candidates[i].ID], committed[candidates[j].ID]
+		if a.cpu != b.cpu {
+			return a.cpu < b.cpu
+		}
+		if a.mem != b.mem {
+			return a.mem < b.mem
+		}
+		if a.count != b.count {
+			return a.count < b.count
+		}
+		return candidates[i].ID < candidates[j].ID
+	})
+	chosen := candidates[0]
+	reason := "least-loaded"
+	if len(candidates) == 1 {
+		reason = "only-runner"
+	}
+	rc, err := s.opts.DialRunner(chosen.Address)
+	if err != nil {
+		return nil, fmt.Errorf("api: runner %s unreachable: %w", chosen.ID, err)
+	}
+	return &placement{runner: chosen, client: rc, reason: reason}, nil
+}
+
+// rejectReason returns a non-empty reason when the runner cannot host the
+// request, empty when it can.
+func rejectReason(r Runner, backend, network string, res *v1.ResourceLimits, used sandboxResources) string {
+	if !r.SupportsBackend(backend) {
+		return "backend"
+	}
+	if !r.SupportsNetwork(network) {
+		return "network"
+	}
+	// The API knows the sandboxes it created; take the larger of that and the
+	// runner's own count so a directly-created sandbox still counts.
+	running := used.count
+	if r.Running > running {
+		running = r.Running
+	}
+	if r.MaxSandboxes > 0 && running >= r.MaxSandboxes {
+		return "max_sandboxes"
+	}
+	if r.MemoryBytes > 0 && used.mem+res.GetMemoryBytes() > r.MemoryBytes {
+		return "memory"
+	}
+	if r.CPUMillis > 0 && used.cpu+res.GetCpuMillis() > r.CPUMillis {
+		return "cpu"
+	}
+	return ""
+}
+
+// committedByRunner sums the resources of the routes the API created, per
+// runner.
+func (s *Server) committedByRunner(ctx context.Context) map[string]sandboxResources {
+	routes, err := s.store.ListRoutes(ctx)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]sandboxResources, len(routes))
+	for _, r := range routes {
+		c := out[r.RunnerID]
+		c.cpu += r.CPUMillis
+		c.mem += r.MemoryBytes
+		c.count++
+		out[r.RunnerID] = c
+	}
+	return out
+}
+
+// networkModeName maps the API's network mode to the runtime name the runner
+// advertises in NetworkModes.
+func networkModeName(m v1.NetworkMode) string {
+	switch m {
+	case v1.NetworkMode_NETWORK_NONE:
+		return "none"
+	case v1.NetworkMode_NETWORK_RESTRICTED:
+		return "restricted"
+	case v1.NetworkMode_NETWORK_FULL:
+		return "full"
+	case v1.NetworkMode_NETWORK_PRIVATE:
+		return "private"
+	default:
+		return ""
+	}
 }
 
 func isGlobalAdmin(key APIKey) bool {

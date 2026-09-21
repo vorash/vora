@@ -44,7 +44,10 @@ func brokerServer(t *testing.T, allowInsecure, withSecrets bool) (*fakeRunner, *
 		DialRunner:          func(string) (RunnerClient, error) { return fr, nil },
 	})
 	if _, err := s.Register(context.Background(), &v1.RegisterRunnerRequest{
-		RunnerId: "run_test", Address: "127.0.0.1:9200",
+		RunnerId:     "run_test",
+		Address:      "127.0.0.1:9200",
+		Backends:     []string{"bwrap"},
+		NetworkModes: []string{"none", "restricted", "full", "private"},
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}

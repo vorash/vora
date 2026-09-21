@@ -515,11 +515,11 @@ requirement (`/etc/resolv.conf` must exist in the image layers for
   a join token, and TLS/mTLS is available per channel
   (`VORA_API_HTTP_TLS_*`, `VORA_API_REGISTRY_TLS_*`, `VORA_RUNNER_TLS_*`), but
   it is off until configured. The API→runner hop needs the runner reachable (no
-  NAT reverse tunnel yet), placement is first-healthy (no capacity-aware
-  scheduling), and the default API store is in-memory
-  ([ADR 014](docs/adr/014-control-plane.md)).
-- **Not production-ready.** No auth on the runner Unix socket, first-healthy
-  placement only, no independent security audit.
+  NAT reverse tunnel yet — capacity-aware placement is in
+  [ADR 021](docs/adr/021-capacity-placement.md)), and the default API store is
+  in-memory ([ADR 014](docs/adr/014-control-plane.md)).
+- **Not production-ready.** No auth on the runner Unix socket, no security
+  audit, and no NAT reverse tunnel for runners yet.
 
 ## Roadmap
 
