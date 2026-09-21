@@ -153,6 +153,7 @@ func newTestServerWithStore(t *testing.T, fr *fakeRunner, store Store) (*Server,
 	})
 	if _, err := s.Register(metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+joinToken)), &v1.RegisterRunnerRequest{
 		RunnerId: "run_test", Address: "127.0.0.1:9200", Backends: []string{"bwrap"},
+		NetworkModes: []string{"none", "restricted", "full", "private"},
 	}); err != nil {
 		t.Fatalf("register: %v", err)
 	}

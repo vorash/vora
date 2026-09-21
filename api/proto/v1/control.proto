@@ -26,6 +26,9 @@ message RegisterRunnerRequest {
   repeated string backends = 3;
   RunnerCapacity capacity = 4;
   string version = 5;
+  // network_modes are the NetworkMode names the runner can enforce
+  // (none, restricted, full, private). Used for capability-aware placement.
+  repeated string network_modes = 6;
 }
 
 message RegisterRunnerResponse {

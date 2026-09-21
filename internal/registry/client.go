@@ -67,6 +67,7 @@ type Reporter struct {
 	Address      string
 	Version      string
 	Backends     []string
+	NetworkModes []string
 	CPUMillis    int64
 	MemoryBytes  int64
 	MaxSandboxes int32
@@ -89,10 +90,11 @@ func (r *Reporter) Run(ctx context.Context) {
 
 	for {
 		resp, err := r.Client.Register(ctx, &v1.RegisterRunnerRequest{
-			RunnerId: r.RunnerID,
-			Address:  r.Address,
-			Backends: r.Backends,
-			Version:  r.Version,
+			RunnerId:     r.RunnerID,
+			Address:      r.Address,
+			Backends:     r.Backends,
+			NetworkModes: r.NetworkModes,
+			Version:      r.Version,
 			Capacity: &v1.RunnerCapacity{
 				CpuMillis:    r.CPUMillis,
 				MemoryBytes:  r.MemoryBytes,

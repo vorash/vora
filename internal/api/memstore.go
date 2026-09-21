@@ -153,5 +153,15 @@ func (m *MemStore) DeleteRoute(_ context.Context, sandboxID string) error {
 	return nil
 }
 
+func (m *MemStore) ListRoutes(_ context.Context) ([]SandboxRoute, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]SandboxRoute, 0, len(m.routes))
+	for _, r := range m.routes {
+		out = append(out, r)
+	}
+	return out, nil
+}
+
 // Close implements Store.
 func (m *MemStore) Close() error { return nil }

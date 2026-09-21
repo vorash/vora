@@ -65,8 +65,9 @@ Add a separate **`vora-api`** process (`cmd/vora-api`):
 - **API → runner requires the runner's gRPC address to be reachable.** This is
   NAT-friendly for registration but not for command delivery; a reverse tunnel
   (runner-initiated command stream) is a follow-up for the fully-hosted case.
-- **Scheduling is deferred:** with more than one runner, placement is
-  first-healthy, not capacity-aware.
+- **Scheduling is capacity-aware (ADR 021):** runners are filtered by backend
+  and network capability and by committed capacity, then the least-loaded is
+  chosen. The reverse tunnel for fully-hosted/NAT'd runners remains a follow-up.
 - The in-memory store does not persist keys or runners across restarts; run with
   `VORA_API_DSN` for anything durable.
 - The deploy track (see the v0.3 plan, §14) will codify `vora-api` + `vora-runner`

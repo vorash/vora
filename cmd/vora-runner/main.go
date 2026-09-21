@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"syscall"
 	"time"
 
@@ -199,13 +200,14 @@ func run() error {
 				advertise = os.Getenv("VORA_RUNNER_ADDR")
 			}
 			reporter := &runregistry.Reporter{
-				Client:   rc,
-				RunnerID: runnerID,
-				Address:  advertise,
-				Version:  version.String(),
-				Backends: registry.Names(),
-				Running:  func() int32 { return int32(server.RunningCount()) },
-				Logger:   logger,
+				Client:       rc,
+				RunnerID:     runnerID,
+				Address:      advertise,
+				Version:      version.String(),
+				Backends:     registry.Names(),
+				NetworkModes: advertisedNetworkModes(registry),
+				Running:      func() int32 { return int32(server.RunningCount()) },
+				Logger:       logger,
 			}
 			go reporter.Run(ctx)
 			logger.Info("registering with vora-api", "api", apiAddr, "advertise", advertise)
@@ -340,4 +342,28 @@ func removeStaleSocket(path string) error {
 		return fmt.Errorf("remove stale socket %s: %w", path, err)
 	}
 	return nil
+}
+
+// advertisedNetworkModes is the union of the network modes the registered
+// backends can enforce, for capability-aware placement. It is a per-runner
+// signal: auto-select chooses a backend that supports the requested mode, and
+// the runner validates the pair at start.
+func advertisedNetworkModes(reg *runtime.Registry) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, name := range reg.Names() {
+		b, ok := reg.Get(name)
+		if !ok {
+			continue
+		}
+		for _, m := range b.Capabilities().NetworkModes {
+			s := string(m)
+			if !seen[s] {
+				seen[s] = true
+				out = append(out, s)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
