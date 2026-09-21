@@ -16,11 +16,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/vorash/vora/internal/cgroup"
 	"github.com/vorash/vora/internal/config"
+	"github.com/vorash/vora/internal/egress"
+	"github.com/vorash/vora/internal/network"
 	"github.com/vorash/vora/internal/runtime"
 )
 
@@ -34,6 +37,12 @@ type Backend struct {
 	initPath string
 	subtree  cgroup.Subtree
 
+	// NetworkRestricted path, enabled by EnableNetns: a per-sandbox netns the
+	// sandbox joins via --network host, with the egress proxy/DNS/broker on the
+	// gateway and policy enforced in the runner netns (see #18).
+	networks   *network.Manager
+	egressSink func(egress.Event) error
+
 	mu      sync.Mutex
 	handles map[string]*handle
 }
@@ -43,6 +52,12 @@ type handle struct {
 	spec      runtime.SandboxSpec
 	bundleDir string
 	group     *cgroup.Group
+
+	net    *network.Net
+	proxy  *egress.Proxy
+	broker *egress.Broker
+	dns    *egress.DNS
+	cancel context.CancelFunc
 }
 
 func (h *handle) ID() string { return h.id }
@@ -114,22 +129,39 @@ func resolveRunsc(cfg config.Config) (string, error) {
 // Name implements runtime.Backend.
 func (b *Backend) Name() string { return "gvisor" }
 
+// EnableNetns enables NetworkRestricted egress: a per-sandbox netns the sandbox
+// joins via `--network host`, with the SNI proxy, allowlist resolver and, when
+// credentials are granted, the broker on the gateway. sink receives each egress
+// decision and may be nil.
+func (b *Backend) EnableNetns(networks *network.Manager, sink func(egress.Event) error) {
+	b.networks = networks
+	b.egressSink = sink
+}
+
 // Capabilities implements runtime.Backend.
 func (b *Backend) Capabilities() runtime.Capabilities {
+	modes := []runtime.NetworkMode{runtime.NetworkNone}
+	if b.subtree != nil && b.networks != nil {
+		modes = append(modes, runtime.NetworkRestricted)
+	}
 	return runtime.Capabilities{
 		NativeExec:             true, // runsc exec, no in-sandbox agent
 		OwnsCgroups:            true, // delegated subtree under the runner
 		EnforcesResourceLimits: b.subtree != nil,
-		NetworkModes:           []runtime.NetworkMode{runtime.NetworkNone},
+		NetworkModes:           modes,
 	}
 }
 
 // globalFlags are the runsc flags common to every subcommand.
 //
 // --ignore-cgroups is required for rootless mode (the systemd cgroup manager
-// is denied by polkit); it is a flag, not a config-file setting.
-func (b *Backend) globalFlags() []string {
-	return []string{"--root", b.root, "--platform", b.platform, "--network", "none", "--ignore-cgroups"}
+// is denied by polkit); it is a flag, not a config-file setting. networkMode is
+// "none" normally and "host" only when the sandbox joins a prepared netns.
+func (b *Backend) globalFlags(networkMode string) []string {
+	if networkMode == "" {
+		networkMode = "none"
+	}
+	return []string{"--root", b.root, "--platform", b.platform, "--network", networkMode, "--ignore-cgroups"}
 }
 
 // run executes a runsc subcommand. Output is redirected to a temp file rather
@@ -137,10 +169,22 @@ func (b *Backend) globalFlags() []string {
 // inherits the file descriptors, so an os.Pipe would never close and Wait would
 // hang. The file is read back after the direct child exits.
 func (b *Backend) run(ctx context.Context, args ...string) (string, error) {
-	return b.runIn(ctx, nil, args...)
+	return b.runInOpts(ctx, runOpts{}, args...)
 }
 
 func (b *Backend) runIn(ctx context.Context, g *cgroup.Group, args ...string) (string, error) {
+	return b.runInOpts(ctx, runOpts{group: g}, args...)
+}
+
+// runOpts selects where a runsc invocation runs: a cgroup, and optionally a
+// prepared network namespace joined with nsenter (for --network host).
+type runOpts struct {
+	group       *cgroup.Group
+	netnsPID    int
+	networkMode string
+}
+
+func (b *Backend) runInOpts(ctx context.Context, o runOpts, args ...string) (string, error) {
 	f, err := os.CreateTemp("", "vora-runsc-out-*")
 	if err != nil {
 		return "", err
@@ -148,11 +192,19 @@ func (b *Backend) runIn(ctx context.Context, g *cgroup.Group, args ...string) (s
 	defer os.Remove(f.Name())
 	defer f.Close()
 
-	cmd := exec.CommandContext(ctx, b.runsc, append(b.globalFlags(), args...)...)
+	flags := b.globalFlags(o.networkMode)
+	var cmd *exec.Cmd
+	if o.netnsPID > 0 {
+		argv := append([]string{"-t", strconv.Itoa(o.netnsPID), "-n", b.runsc}, flags...)
+		argv = append(argv, args...)
+		cmd = exec.CommandContext(ctx, "nsenter", argv...)
+	} else {
+		cmd = exec.CommandContext(ctx, b.runsc, append(flags, args...)...)
+	}
 	cmd.Stdout = f
 	cmd.Stderr = f
-	if g != nil {
-		closer, err := g.ApplyTo(cmd)
+	if o.group != nil {
+		closer, err := o.group.ApplyTo(cmd)
 		if err != nil {
 			return "", err
 		}
@@ -172,9 +224,12 @@ func (b *Backend) Create(_ context.Context, spec runtime.SandboxSpec) (runtime.H
 	if err := spec.Validate(); err != nil {
 		return nil, err
 	}
-	if spec.Network.Mode != runtime.NetworkNone {
-		return nil, fmt.Errorf("%w: network mode %q (gvisor supports %q)",
-			runtime.ErrUnsupported, spec.Network.Mode, runtime.NetworkNone)
+	if spec.Network.Mode != runtime.NetworkNone && spec.Network.Mode != runtime.NetworkRestricted {
+		return nil, fmt.Errorf("%w: network mode %q (gvisor supports %q and %q)",
+			runtime.ErrUnsupported, spec.Network.Mode, runtime.NetworkNone, runtime.NetworkRestricted)
+	}
+	if spec.Network.Mode == runtime.NetworkRestricted && !b.Capabilities().SupportsNetwork(runtime.NetworkRestricted) {
+		return nil, fmt.Errorf("%w: NetworkRestricted is not configured on this runner", runtime.ErrUnsupported)
 	}
 	rootfs := spec.Workspace.RootfsDir
 	if rootfs == "" {
@@ -210,6 +265,95 @@ func (b *Backend) Start(ctx context.Context, h runtime.Handle) error {
 	if b.subtree == nil {
 		return fmt.Errorf("gvisor: resource limits unavailable (cgroup subtree not writable)")
 	}
+	if hd.spec.Network.Mode == runtime.NetworkRestricted {
+		return b.startRestricted(ctx, hd, nil)
+	}
+	return b.start(ctx, hd, runOpts{networkMode: "none"}, "")
+}
+
+// StartWithCredentials implements runtime.BrokerAware.
+func (b *Backend) StartWithCredentials(ctx context.Context, h runtime.Handle, creds []egress.Credential) error {
+	hd, err := b.handle(h)
+	if err != nil {
+		return err
+	}
+	if len(creds) == 0 {
+		return fmt.Errorf("%w: no broker credentials", runtime.ErrInvalidSpec)
+	}
+	if hd.spec.Network.Mode != runtime.NetworkRestricted {
+		return fmt.Errorf("%w: credential brokering requires network mode %q", runtime.ErrInvalidSpec, runtime.NetworkRestricted)
+	}
+	return b.startRestricted(ctx, hd, creds)
+}
+
+// startRestricted prepares the sandbox netns and gateway services, then starts
+// the sandbox in it with --network host. The gateway services and the proxy
+// must be live before `runsc start` so a granted alias or a name lookup never
+// hits a dead route.
+func (b *Backend) startRestricted(ctx context.Context, hd *handle, creds []egress.Credential) error {
+	netns, err := b.networks.Create(ctx, hd.id, network.Policy{Mode: runtime.NetworkRestricted, Enforcement: network.EnforceRunner})
+	if err != nil {
+		return fmt.Errorf("gvisor: network: %w", err)
+	}
+	hd.net = netns
+
+	sandboxCtx, cancel := context.WithCancel(context.Background())
+	hd.cancel = cancel
+
+	proxy := egress.New(hd.id, egress.Policy{AllowedDomains: hd.spec.Network.AllowedDomains}, b.logger, b.egressSink, egress.Limits{
+		MaxConnections: b.cfg.EgressMaxConnections,
+		IdleTimeout:    b.cfg.EgressIdleTimeout,
+	})
+	if err := proxy.Listen(sandboxCtx, netns.ProxyAddr()); err != nil {
+		b.cleanupNetns(ctx, hd)
+		return err
+	}
+	hd.proxy = proxy
+
+	if len(creds) > 0 {
+		broker := egress.NewBroker(hd.id, egress.Policy{AllowedDomains: hd.spec.Network.AllowedDomains}, creds, b.logger, b.egressSink, egress.Limits{
+			MaxConnections: b.cfg.EgressMaxConnections,
+			IdleTimeout:    b.cfg.EgressIdleTimeout,
+		})
+		if err := broker.Listen(sandboxCtx, netns.ServiceAddr(b.cfg.EgressBrokerPort)); err != nil {
+			b.cleanupNetns(ctx, hd)
+			return err
+		}
+		hd.broker = broker
+	}
+
+	dns := egress.NewDNS(hd.id, egress.Policy{AllowedDomains: hd.spec.Network.AllowedDomains}, b.logger, b.egressSink, egress.Limits{
+		MaxConnections: b.cfg.EgressMaxConnections,
+	})
+	if err := dns.Listen(sandboxCtx, netns.ServiceAddr(network.DefaultDNSPort)); err != nil {
+		b.cleanupNetns(ctx, hd)
+		return err
+	}
+	hd.dns = dns
+
+	resolvConf, err := writeResolvConf(hd.spec, netns)
+	if err != nil {
+		b.cleanupNetns(ctx, hd)
+		return err
+	}
+
+	// Expose the broker base URL (a non-secret gateway address) so a granted
+	// alias can be called without the workload guessing the address.
+	if len(hd.spec.Network.BrokerAliases) > 0 {
+		env := cloneEnv(hd.spec.Env)
+		env["VORA_BROKER_URL"] = "http://" + netns.ServiceAddr(b.cfg.EgressBrokerPort)
+		hd.spec.Env = env
+	}
+
+	if err := b.start(ctx, hd, runOpts{networkMode: "host", netnsPID: netns.NetnsPID}, resolvConf); err != nil {
+		b.cleanupNetns(ctx, hd)
+		return err
+	}
+	return nil
+}
+
+// start provisions and starts a sandbox, optionally inside a prepared netns.
+func (b *Backend) start(ctx context.Context, hd *handle, opts runOpts, resolvConf string) error {
 	group, err := b.subtree.Create(ctx, hd.id, hd.spec.Resources)
 	if err != nil {
 		return fmt.Errorf("gvisor: cgroup: %w", err)
@@ -228,24 +372,62 @@ func (b *Backend) Start(ctx context.Context, h runtime.Handle) error {
 		hd.group = nil
 		return fmt.Errorf("gvisor: %w", err)
 	}
-	if err := writeBundle(b.runsc, hd.bundleDir, hd.spec); err != nil {
+	if err := writeBundle(b.runsc, hd.bundleDir, hd.spec, resolvConf); err != nil {
 		_ = group.Destroy()
 		hd.group = nil
 		return err
 	}
-	if out, err := b.runIn(ctx, group, "create", "--bundle", hd.bundleDir, hd.id); err != nil {
+	opts.group = group
+	if out, err := b.runInOpts(ctx, opts, "create", "--bundle", hd.bundleDir, hd.id); err != nil {
 		_ = group.Destroy()
 		hd.group = nil
 		return fmt.Errorf("gvisor: create: %w: %s", err, out)
 	}
-	if out, err := b.runIn(ctx, group, "start", hd.id); err != nil {
+	if out, err := b.runInOpts(ctx, opts, "start", hd.id); err != nil {
 		_, _ = b.run(ctx, "delete", "--force", hd.id)
 		_ = group.Destroy()
 		hd.group = nil
 		return fmt.Errorf("gvisor: start: %w: %s", err, out)
 	}
-	b.logger.Info("sandbox started", "sandbox_id", hd.id, "backend", "gvisor", "platform", b.platform)
+	b.logger.Info("sandbox started", "sandbox_id", hd.id, "backend", "gvisor", "platform", b.platform, "network", string(hd.spec.Network.Mode))
 	return nil
+}
+
+// cleanupNetns tears down the egress services, cgroup and sandbox network.
+func (b *Backend) cleanupNetns(ctx context.Context, hd *handle) {
+	if hd.cancel != nil {
+		hd.cancel()
+		hd.cancel = nil
+	}
+	if hd.proxy != nil {
+		_ = hd.proxy.Close()
+		hd.proxy = nil
+	}
+	if hd.broker != nil {
+		_ = hd.broker.Close()
+		hd.broker = nil
+	}
+	if hd.dns != nil {
+		_ = hd.dns.Close()
+		hd.dns = nil
+	}
+	if hd.group != nil {
+		_ = hd.group.Kill()
+		_ = hd.group.Destroy()
+		hd.group = nil
+	}
+	if b.networks != nil && hd.net != nil {
+		_ = b.networks.Destroy(ctx, hd.id)
+		hd.net = nil
+	}
+}
+
+func cloneEnv(env map[string]string) map[string]string {
+	out := make(map[string]string, len(env)+1)
+	for k, v := range env {
+		out[k] = v
+	}
+	return out
 }
 
 // Exec runs a command in a running sandbox via `runsc exec`.
@@ -259,7 +441,7 @@ func (b *Backend) Exec(ctx context.Context, h runtime.Handle, req runtime.ExecRe
 	}
 
 	execCtx, cancel := context.WithCancel(ctx)
-	args := append(b.globalFlags(), "exec", hd.id, req.Command)
+	args := append(b.globalFlags("none"), "exec", hd.id, req.Command)
 	args = append(args, req.Args...)
 	cmd := exec.CommandContext(execCtx, b.runsc, args...)
 	if len(req.Stdin) > 0 {
@@ -321,10 +503,13 @@ func (b *Backend) Stop(ctx context.Context, h runtime.Handle) error {
 		return err
 	}
 	out, err := b.run(ctx, "kill", hd.id, "KILL")
-	if err != nil && isMissing(out) {
-		return nil
+	if err != nil && !isMissing(out) {
+		return err
 	}
-	return err
+	if hd.net != nil {
+		b.cleanupNetns(ctx, hd)
+	}
+	return nil
 }
 
 // Destroy kills and deletes the sandbox and removes its bundle.
@@ -337,7 +522,9 @@ func (b *Backend) Destroy(ctx context.Context, h runtime.Handle) error {
 	if out, err := b.run(ctx, "delete", "--force", hd.id); err != nil && !isMissing(out) {
 		b.logger.Warn("gvisor delete failed", "sandbox_id", hd.id, "error", err, "output", out)
 	}
-	if hd.group != nil {
+	if hd.net != nil {
+		b.cleanupNetns(ctx, hd)
+	} else if hd.group != nil {
 		_ = hd.group.Destroy()
 		hd.group = nil
 	}
@@ -371,6 +558,9 @@ func (b *Backend) List(ctx context.Context) ([]string, error) {
 func (b *Backend) Reap(ctx context.Context, id string) error {
 	_, _ = b.run(ctx, "kill", id, "KILL")
 	_, err := b.run(ctx, "delete", "--force", id)
+	if b.networks != nil {
+		_ = b.networks.Destroy(ctx, id)
+	}
 	if b.subtree != nil {
 		if g, aerr := b.subtree.Attach(ctx, id); aerr == nil {
 			_ = g.Destroy()

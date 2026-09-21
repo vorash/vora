@@ -62,8 +62,11 @@ scan (ADR 015); `TestDiskQuotaBoundsHostWrites` covers the hard path.
   that logs its own broker responses sees what the API returned.
 - **The gateway resolver sees query names.** Only allowlisted names are
   answered, but the runner learns which of them the sandbox asked for.
-- **gVisor has no restricted networking.** It remains `NetworkNone` by decision
-  (ADR 012), so brokering and gateway DNS are bwrap-only.
+- **gVisor restricted egress is enforced in the runner netns (ADR 017).**
+  gVisor `NetworkRestricted` uses the same gateway proxy/DNS/broker as bwrap,
+  but its policy is applied on the runner's inbound path because netstack
+  bypasses the sandbox output hook. `NetworkFull`/`NetworkPrivate` remain
+  bwrap-only.
 
 ## Verification policy
 
@@ -81,7 +84,7 @@ The matrix runs against **every available backend** as subtests:
 | Backend | How it runs | Covered by the matrix |
 | ------- | ----------- | --------------------- |
 | `bwrap` | unprivileged, cgroups v2 via systemd | full table including fork/memory and user-ns |
-| `gVisor` | `runsc` Method 2 inside a `rootlesskit` user namespace; limits via delegated cgroup subtree | full table except `TestUnprivilegedUserNamespace`; no `NetworkRestricted`, so no broker/DNS rows |
+| `gVisor` | `runsc` Method 2 inside a `rootlesskit` user namespace; limits via delegated cgroup subtree | full table except `TestUnprivilegedUserNamespace`; `NetworkRestricted` via runner-side policy (ADR 017) |
 
 `make test-security` runs the bwrap leg (and skips the gVisor subtests when the
 runner is unprivileged). `make test-security-all` additionally runs the gVisor

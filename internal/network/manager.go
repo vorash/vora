@@ -64,6 +64,20 @@ const (
 // explicitly permits a peer, per ADR 004.
 const privateDestinations = "{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 127.0.0.0/8 }"
 
+// Enforcement selects where a NetworkRestricted sandbox's egress policy is
+// applied. Bubblewrap uses the sandbox netns output hook; gVisor's userspace
+// netstack bypasses that hook, so its policy is applied in the runner netns
+// instead, on the inbound frames arriving from the sandbox's veth.
+type Enforcement string
+
+const (
+	// EnforceSandbox applies DNAT in the sandbox's own network namespace.
+	EnforceSandbox Enforcement = "sandbox"
+	// EnforceRunner applies DNAT in the runner's network namespace, keyed by
+	// the sandbox's veth. Required for gVisor.
+	EnforceRunner Enforcement = "runner"
+)
+
 // Policy selects what a sandbox's network may reach.
 type Policy struct {
 	// Mode is NetworkRestricted, NetworkFull or NetworkPrivate.
@@ -71,12 +85,17 @@ type Policy struct {
 	// TenantID scopes NetworkPrivate peer connectivity. It is required for
 	// NetworkPrivate and ignored otherwise.
 	TenantID string
+	// Enforcement selects where restricted-egress policy is applied. Empty
+	// means EnforceSandbox. Ignored for NetworkFull/NetworkPrivate, which are
+	// always runner-side.
+	Enforcement Enforcement
 }
 
 // Net describes one prepared sandbox network.
 type Net struct {
 	ID          string
 	Mode        runtime.NetworkMode
+	Enforcement Enforcement
 	TenantID    string
 	NetnsPID    int
 	GatewayIP   string
@@ -171,7 +190,11 @@ func (m *Manager) Create(ctx context.Context, id string, pol Policy) (*Net, erro
 	}
 	idx := m.next
 	m.next++
-	n := &Net{ID: id, Mode: pol.Mode, TenantID: pol.TenantID, ProxyPort: m.ports.proxy}
+	enforcement := pol.Enforcement
+	if enforcement == "" {
+		enforcement = EnforceSandbox
+	}
+	n := &Net{ID: id, Mode: pol.Mode, Enforcement: enforcement, TenantID: pol.TenantID, ProxyPort: m.ports.proxy}
 	if pol.Mode == runtime.NetworkPrivate {
 		if pol.TenantID == "" {
 			m.mu.Unlock()
@@ -278,6 +301,15 @@ func (m *Manager) setup(ctx context.Context, n *Net) error {
 			return err
 		}
 	}
+	if n.Enforcement == EnforceRunner && n.Mode == runtime.NetworkRestricted {
+		// gVisor: policy lives in the runner netns, on the inbound frames from
+		// the sandbox veth. No forwarding is needed; non-DNAT'd traffic is
+		// dropped in the forward chain.
+		if err := applyRules(ctx, runnerRestrictedRules(n, m.ports)); err != nil {
+			return err
+		}
+		return nil
+	}
 	if err := m.applyInNetns(ctx, n.NetnsPID, sandboxRules(n, m.ports)); err != nil {
 		return err
 	}
@@ -338,6 +370,7 @@ func (m *Manager) teardown(n *Net) {
 	// another sandbox's forwarding or NAT.
 	_ = run(ctx, "nft", "delete", "table", "ip", fwdTable(n.ID))
 	_ = run(ctx, "nft", "delete", "table", "ip", natTable(n.ID))
+	_ = run(ctx, "nft", "delete", "table", "inet", filtTable(n.ID))
 }
 
 func (n *Net) peerIface() string {
@@ -347,7 +380,7 @@ func (n *Net) peerIface() string {
 // writeState records a live network so a later process can reap it.
 func (m *Manager) writeState(n *Net) {
 	st := netState{
-		ID: n.ID, Mode: string(n.Mode), TenantID: n.TenantID,
+		ID: n.ID, Mode: string(n.Mode), Enforcement: string(n.Enforcement), TenantID: n.TenantID,
 		NetnsPID: n.NetnsPID, GatewayIP: n.GatewayIP, SandboxIP: n.SandboxIP,
 		SandboxCIDR: n.SandboxCIDR, ProxyPort: n.ProxyPort, Iface: n.iface,
 	}
@@ -409,6 +442,7 @@ func (m *Manager) teardownContext(ctx context.Context, n *Net) {
 	_ = run(ctx, "ip", "link", "del", n.iface)
 	_ = run(ctx, "nft", "delete", "table", "ip", fwdTable(n.ID))
 	_ = run(ctx, "nft", "delete", "table", "ip", natTable(n.ID))
+	_ = run(ctx, "nft", "delete", "table", "inet", filtTable(n.ID))
 }
 
 // holderAlive reports whether pid is still the netns holder we started, not a
@@ -429,6 +463,7 @@ func holderAlive(pid int) bool {
 type netState struct {
 	ID          string `json:"id"`
 	Mode        string `json:"mode,omitempty"`
+	Enforcement string `json:"enforcement,omitempty"`
 	TenantID    string `json:"tenant_id,omitempty"`
 	NetnsPID    int    `json:"netns_pid"`
 	GatewayIP   string `json:"gateway_ip"`
@@ -440,7 +475,7 @@ type netState struct {
 
 func (s netState) net() *Net {
 	return &Net{
-		ID: s.ID, Mode: runtime.NetworkMode(s.Mode), TenantID: s.TenantID,
+		ID: s.ID, Mode: runtime.NetworkMode(s.Mode), Enforcement: Enforcement(s.Enforcement), TenantID: s.TenantID,
 		NetnsPID: s.NetnsPID, GatewayIP: s.GatewayIP, SandboxIP: s.SandboxIP,
 		SandboxCIDR: s.SandboxCIDR, ProxyPort: s.ProxyPort, iface: s.Iface,
 	}
@@ -514,8 +549,50 @@ table ip %s {
 // policy would drop every other sandbox's forwarded traffic when evaluated, so
 // each sandbox gets its own policy-accept table that only drops its own
 // traffic.
-func fwdTable(id string) string { return tableName("vora_fwd", id) }
-func natTable(id string) string { return tableName("vora_nat", id) }
+func fwdTable(id string) string  { return tableName("vora_fwd", id) }
+func natTable(id string) string  { return tableName("vora_nat", id) }
+func filtTable(id string) string { return tableName("vora_filt", id) }
+
+// runnerRestrictedRules is the NetworkRestricted policy for a sandbox whose
+// egress frames arrive in the runner netns (gVisor's userspace netstack). It
+// mirrors nftRuleset but lives on the runner's inbound path: DNAT the sandbox's
+// TCP (and UDP/53) to the gateway services, accept only those service ports for
+// the sandbox's interface, and drop everything else it sends, so nothing is
+// forwarded onward. Each sandbox gets its own tables with policy accept, so a
+// drop here cannot affect another sandbox's traffic.
+func runnerRestrictedRules(n *Net, ports servicePorts) string {
+	var nat, input strings.Builder
+	fmt.Fprintf(&nat, "\t\tiifname %q ip daddr != %s meta l4proto tcp dnat to %s:%s\n",
+		n.iface, n.GatewayIP, n.GatewayIP, ports.proxy)
+	if ports.dns != "" {
+		fmt.Fprintf(&nat, "\t\tiifname %q ip daddr != %s meta l4proto udp th dport %s dnat to %s:%s\n",
+			n.iface, n.GatewayIP, ports.dns, n.GatewayIP, ports.dns)
+	}
+	fmt.Fprintf(&input, "\t\tiifname %q ip daddr %s meta l4proto tcp th dport %s accept\n", n.iface, n.GatewayIP, ports.proxy)
+	if ports.broker != "" {
+		fmt.Fprintf(&input, "\t\tiifname %q ip daddr %s meta l4proto tcp th dport %s accept\n", n.iface, n.GatewayIP, ports.broker)
+	}
+	if ports.dns != "" {
+		fmt.Fprintf(&input, "\t\tiifname %q ip daddr %s meta l4proto udp th dport %s accept\n", n.iface, n.GatewayIP, ports.dns)
+		fmt.Fprintf(&input, "\t\tiifname %q ip daddr %s meta l4proto tcp th dport %s accept\n", n.iface, n.GatewayIP, ports.dns)
+	}
+	fmt.Fprintf(&input, "\t\tiifname %q drop\n", n.iface)
+	return fmt.Sprintf(`table ip %s {
+	chain prerouting {
+		type nat hook prerouting priority -100; policy accept;
+%s	}
+}
+table inet %s {
+	chain input {
+		type filter hook input priority 0; policy accept;
+%s	}
+	chain forward {
+		type filter hook forward priority 0; policy accept;
+		iifname %q drop
+	}
+}
+`, natTable(n.ID), nat.String(), filtTable(n.ID), input.String(), n.iface)
+}
 
 func tableName(prefix, id string) string {
 	var b strings.Builder

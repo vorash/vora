@@ -167,3 +167,27 @@ func TestTableNameIsSanitized(t *testing.T) {
 		t.Fatalf("tableName = %q", got)
 	}
 }
+
+func TestRunnerRestrictedRules(t *testing.T) {
+	n := &Net{
+		ID: "sbx_gv", Mode: runtime.NetworkRestricted, Enforcement: EnforceRunner,
+		GatewayIP: "10.7.0.1", SandboxIP: "10.7.0.2", iface: "vora-h0",
+	}
+	rules := runnerRestrictedRules(n, servicePorts{proxy: "8443", broker: "8080", dns: "53"})
+	for _, want := range []string{
+		"table ip vora_nat_sbx_gv",
+		"type nat hook prerouting priority -100",
+		`iifname "vora-h0" ip daddr != 10.7.0.1 meta l4proto tcp dnat to 10.7.0.1:8443`,
+		`iifname "vora-h0" ip daddr != 10.7.0.1 meta l4proto udp th dport 53 dnat to 10.7.0.1:53`,
+		"table inet vora_filt_sbx_gv",
+		`iifname "vora-h0" ip daddr 10.7.0.1 meta l4proto tcp th dport 8443 accept`,
+		`iifname "vora-h0" ip daddr 10.7.0.1 meta l4proto tcp th dport 8080 accept`,
+		`iifname "vora-h0" ip daddr 10.7.0.1 meta l4proto udp th dport 53 accept`,
+		// Everything else from the sandbox is dropped, and nothing is forwarded.
+		`iifname "vora-h0" drop`,
+	} {
+		if !contains(rules, want) {
+			t.Errorf("runner restricted rules missing %q:\n%s", want, rules)
+		}
+	}
+}

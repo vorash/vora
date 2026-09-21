@@ -11,11 +11,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/vorash/vora/internal/cgroup"
 	"github.com/vorash/vora/internal/config"
+	"github.com/vorash/vora/internal/egress"
+	"github.com/vorash/vora/internal/network"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/runtime/gvisor"
 	"github.com/vorash/vora/internal/workspace"
@@ -218,4 +221,85 @@ func buildHello(t *testing.T, out string) {
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build hello: %v\n%s", err, b)
 	}
+}
+
+// TestGvisorRestrictedEgress proves gVisor NetworkRestricted sends its egress
+// to the gateway: a raw TCP connection with no TLS SNI is denied there (and
+// recorded), rather than escaping or hanging. The policy runs in the runner
+// netns because gVisor's userspace netstack bypasses the sandbox output hook
+// (ADR 017). Needs uid 0 + KVM + runsc, so it runs under rootlesskit or root.
+func TestGvisorRestrictedEgress(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("gVisor Method 2 requires a rootlesskit userns or root")
+	}
+	if _, err := os.Stat("/dev/kvm"); err != nil {
+		t.Skipf("/dev/kvm unavailable: %v", err)
+	}
+	rootfs := imageRootfs(t, "base")
+
+	cfg := config.Config{StateDir: t.TempDir(), GvisorPlatform: "kvm", GvisorRunRoot: filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "vora-gvisor-egress-itest")}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	subtree, err := cgroup.NewSubtree()
+	if err != nil {
+		t.Skipf("cgroup subtree unavailable: %v", err)
+	}
+	backend, err := gvisor.New(cfg, logger, subtree)
+	if err != nil {
+		t.Skipf("gvisor backend unavailable: %v", err)
+	}
+
+	var mu sync.Mutex
+	var events []egress.Event
+	networks := network.NewManager(cfg.StateDir, network.ManagerConfig{ProxyPort: network.DefaultProxyPort, BrokerPort: cfg.EgressBrokerPort}, logger)
+	backend.EnableNetns(networks, func(e egress.Event) error {
+		mu.Lock()
+		events = append(events, e)
+		mu.Unlock()
+		return nil
+	})
+
+	id := "sbx_gv_egress_" + strings.ReplaceAll(time.Now().UTC().Format("150405.000000000"), ".", "")
+	ws := workspace.NewManager(cfg.SandboxesDir())
+	wsp := ws.Paths(id)
+	wsp.RootfsDir = rootfs
+	if _, err := ws.Create(wsp); err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Destroy(id) })
+
+	spec := runtime.SandboxSpec{
+		ID:        id,
+		Image:     "base",
+		Resources: runtime.ResourceLimits{CPUMillis: 1000, MemoryBytes: 256 << 20, Pids: 64},
+		Network:   runtime.NetworkPolicy{Mode: runtime.NetworkRestricted, AllowedDomains: []string{"example.com"}},
+		TTL:       time.Minute,
+		Workspace: wsp,
+	}
+	ctx := context.Background()
+	h, err := backend.Create(ctx, spec)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Cleanup(func() { _ = backend.Destroy(context.Background(), h) })
+	if err := backend.Start(ctx, h); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// A raw TCP connect (no TLS SNI) must be denied at the gateway, not escape.
+	// The audit event below is the assertion; the exec just generates the flow.
+	_, _ = execGvisor(t, backend, h, "/bin/bash", []string{"-c",
+		"exec 3<>/dev/tcp/1.2.3.4/80 && echo UNEXPECTED; head -1 <&3 || true"})
+	waitFor(t, 10*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(events) > 0
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	for _, e := range events {
+		if e.SandboxID == id && !e.Allowed {
+			return // denied and audited: the gateway saw the connection
+		}
+	}
+	t.Fatalf("no denied egress event recorded for %s (events=%+v)", id, events)
 }

@@ -474,12 +474,11 @@ requirement (`/etc/resolv.conf` must exist in the image layers for
   and unpacked into the rootless containerd `native` snapshotter and the
   snapshot rootfs is bound read-only; the Docker-export cache remains only as a
   fallback when containerd is unavailable.
-- **Egress, DNS, and brokering are bwrap-only (documented limitation, not
-  pending work).** `NetworkRestricted` is enforced for the bubblewrap backend.
-  gVisor supports `NetworkNone` only: its host network mode escapes to the
-  runner namespace, and joining a prepared netns via the OCI spec makes
-  netstack egress time out (ADR 012). Closing this would need a
-  userspace-netstack gateway, which is out of scope for v0.x.
+- **`NetworkFull`/`NetworkPrivate` are bwrap-only.** `NetworkRestricted` is
+  enforced for **both** backends: bwrap via the sandbox-netns DNAT, gVisor via a
+  runner-netns prerouting DNAT (ADR 017). gVisor's `NetworkFull`/`NetworkPrivate`
+  and its `NetworkNone`-only history through v0.4 are covered in
+  [ADR 016](docs/adr/016-network-modes.md) / [ADR 017](docs/adr/017-gvisor-restricted-egress.md).
 - **DNS is allowlist-only, and the resolver sees the names.** Restricted
   sandboxes resolve through the gateway; only allowlisted names are answered,
   but the runner does learn which of them were asked for.
