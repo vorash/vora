@@ -6,6 +6,7 @@ import (
 	"time"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
+	"github.com/vorash/vora/internal/tunnel"
 )
 
 func TestRejectReason(t *testing.T) {
@@ -102,5 +103,48 @@ func TestPlaceRunnerRejectsIncapableRunner(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected no capable runner")
+	}
+}
+
+func TestRegisterMarksTunnelledRunner(t *testing.T) {
+	s := New(Options{Store: NewMemStore(), Now: time.Now, Tunnel: tunnel.NewServer("", nil)})
+	ctx := context.Background()
+	if _, err := s.Register(ctx, &v1.RegisterRunnerRequest{
+		RunnerId: "run_nat", Address: "", Backends: []string{"bwrap"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Register(ctx, &v1.RegisterRunnerRequest{
+		RunnerId: "run_direct", Address: "10.0.0.5:9200", Backends: []string{"bwrap"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	nat, err := s.store.Runner(ctx, "run_nat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !nat.Tunneled {
+		t.Fatal("a runner that registers without an address must be tunnelled")
+	}
+	direct, err := s.store.Runner(ctx, "run_direct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if direct.Tunneled {
+		t.Fatal("a runner with an address is not tunnelled")
+	}
+}
+
+func TestDialTunnelledRunnerWithoutTunnelFails(t *testing.T) {
+	s := New(Options{
+		Store: NewMemStore(),
+		DialRunner: func(string) (RunnerClient, error) {
+			t.Fatal("must not dial the network for a tunnelled runner without a tunnel")
+			return nil, nil
+		},
+		Now: time.Now,
+	})
+	if _, err := s.dialRunner(Runner{ID: "run_nat", Tunneled: true}); err == nil {
+		t.Fatal("dialing a tunnelled runner without a tunnel must fail")
 	}
 }

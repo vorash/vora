@@ -33,6 +33,7 @@ import (
 	"github.com/vorash/vora/internal/sandbox"
 	"github.com/vorash/vora/internal/telemetry"
 	"github.com/vorash/vora/internal/tlsutil"
+	"github.com/vorash/vora/internal/tunnel"
 	"github.com/vorash/vora/internal/ulid"
 	"github.com/vorash/vora/internal/version"
 )
@@ -125,6 +126,12 @@ func run() error {
 	grpcServer := grpc.NewServer(grpc.StatsHandler(otelgrpc.NewServerHandler()))
 	v1.RegisterRunnerServiceServer(grpcServer, server)
 
+	// Optional reverse tunnel: connect out to vora-api and serve RunnerService
+	// over it, so a runner behind NAT can be driven by the control plane. When
+	// tunnelled the runner registers with no dialable address. The client is
+	// started once the run context exists, below.
+	tunnelAddr := os.Getenv("VORA_API_TUNNEL_ADDR")
+
 	// Optional TCP gRPC endpoint so a remote control plane can reach this
 	// runner. The Unix socket remains the local CLI path.
 	var tcpServer *grpc.Server
@@ -174,6 +181,29 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Reverse tunnel: serve RunnerService to vora-api over a connection the
+	// runner opens, for the NAT'd case.
+	if tunnelAddr != "" {
+		tc := &tunnel.Client{
+			Addr:      tunnelAddr,
+			RunnerID:  runnerID,
+			JoinToken: os.Getenv("VORA_API_JOIN_TOKEN"),
+			Logger:    logger,
+		}
+		if tunnelLn, err := tc.Listen(ctx); err != nil {
+			logger.Warn("tunnel connect failed", "addr", tunnelAddr, "error", err)
+		} else {
+			tunnelServer := grpc.NewServer()
+			v1.RegisterRunnerServiceServer(tunnelServer, server)
+			go func() {
+				if err := tunnelServer.Serve(tunnelLn); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+					logger.Warn("tunnel serve stopped", "error", err)
+				}
+			}()
+			logger.Info("tunnel connected", "addr", tunnelAddr)
+		}
+	}
+
 	// Register with vora-api and heartbeat, when configured. The runner dials
 	// out, so it can sit behind NAT.
 	if apiAddr := os.Getenv("VORA_API_GRPC"); apiAddr != "" {
@@ -198,6 +228,9 @@ func run() error {
 			advertise := os.Getenv("VORA_RUNNER_ADVERTISE_ADDR")
 			if advertise == "" {
 				advertise = os.Getenv("VORA_RUNNER_ADDR")
+			}
+			if tunnelAddr != "" {
+				advertise = "" // reached through the tunnel, not a dialable address
 			}
 			reporter := &runregistry.Reporter{
 				Client:       rc,

@@ -28,6 +28,7 @@ import (
 	"github.com/vorash/vora/internal/secret"
 	"github.com/vorash/vora/internal/telemetry"
 	"github.com/vorash/vora/internal/tlsutil"
+	"github.com/vorash/vora/internal/tunnel"
 	"github.com/vorash/vora/internal/ulid"
 )
 
@@ -70,6 +71,9 @@ type Options struct {
 	// AllowInsecureBroker permits sending resolved credentials to a runner
 	// over a channel without transport encryption. Off by default.
 	AllowInsecureBroker bool
+	// Tunnel, when set, lets the API reach runners it cannot dial (NAT) over a
+	// runner-initiated reverse tunnel.
+	Tunnel *tunnel.Server
 	// BootstrapKey, when set, is accepted as an admin API key.
 	BootstrapKey string
 	Now          func() time.Time
@@ -130,13 +134,19 @@ func (s *Server) Register(ctx context.Context, req *v1.RegisterRunnerRequest) (*
 	if err := s.checkJoinToken(ctx); err != nil {
 		return nil, err
 	}
-	if req.GetRunnerId() == "" || req.GetAddress() == "" {
-		return nil, status.Error(codes.InvalidArgument, "runner_id and address are required")
+	if req.GetRunnerId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "runner_id is required")
+	}
+	// An empty address means the runner is reached through the reverse tunnel.
+	// Without a tunnel configured such a runner would be unroutable, so refuse.
+	if req.GetAddress() == "" && s.opts.Tunnel == nil {
+		return nil, status.Error(codes.InvalidArgument, "address is required when no tunnel is configured")
 	}
 	now := s.now()
 	r := Runner{
 		ID:            req.GetRunnerId(),
 		Address:       req.GetAddress(),
+		Tunneled:      req.GetAddress() == "",
 		Backends:      req.GetBackends(),
 		NetworkModes:  req.GetNetworkModes(),
 		CPUMillis:     req.GetCapacity().GetCpuMillis(),
@@ -358,7 +368,7 @@ func (s *Server) listSandboxes(w http.ResponseWriter, r *http.Request) {
 	include := r.URL.Query().Get("include_destroyed") == "true"
 	all := &v1.ListSandboxesResponse{}
 	for _, runner := range s.runners(r.Context()) {
-		rc, err := s.opts.DialRunner(runner.Address)
+		rc, err := s.dialRunner(runner)
 		if err != nil {
 			continue
 		}
@@ -794,7 +804,7 @@ func (s *Server) placeRunner(ctx context.Context, spec *v1.SandboxSpec) (*placem
 	if len(candidates) == 1 {
 		reason = "only-runner"
 	}
-	rc, err := s.opts.DialRunner(chosen.Address)
+	rc, err := s.dialRunner(chosen)
 	if err != nil {
 		return nil, fmt.Errorf("api: runner %s unreachable: %w", chosen.ID, err)
 	}
@@ -902,6 +912,18 @@ func (s *Server) authorizedRoute(ctx context.Context, sandboxID string) (Sandbox
 	return route, nil
 }
 
+// dialRunner returns a client for a runner, over the reverse tunnel when the
+// runner is tunnelled and a tunnel is configured.
+func (s *Server) dialRunner(r Runner) (RunnerClient, error) {
+	if r.Tunneled {
+		if s.opts.Tunnel == nil {
+			return nil, fmt.Errorf("api: runner %s is tunnelled but no tunnel is configured", r.ID)
+		}
+		return client.DialTunnel(r.ID, s.opts.Tunnel)
+	}
+	return s.opts.DialRunner(r.Address)
+}
+
 // runnerFor returns a client for the runner that owns an authorized sandbox.
 func (s *Server) runnerFor(ctx context.Context, sandboxID string) (RunnerClient, error) {
 	route, err := s.authorizedRoute(ctx, sandboxID)
@@ -912,7 +934,7 @@ func (s *Server) runnerFor(ctx context.Context, sandboxID string) (RunnerClient,
 	if err != nil {
 		return nil, fmt.Errorf("api: runner %s unknown", route.RunnerID)
 	}
-	rc, err := s.opts.DialRunner(r.Address)
+	rc, err := s.dialRunner(r)
 	if err != nil {
 		return nil, fmt.Errorf("api: runner %s unreachable: %w", route.RunnerID, err)
 	}

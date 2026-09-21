@@ -25,6 +25,7 @@ import (
 	"github.com/vorash/vora/internal/secret"
 	"github.com/vorash/vora/internal/telemetry"
 	"github.com/vorash/vora/internal/tlsutil"
+	"github.com/vorash/vora/internal/tunnel"
 	"github.com/vorash/vora/internal/version"
 )
 
@@ -106,14 +107,35 @@ func run() error {
 			"hint", "set VORA_RUNNER_TLS_{CERT,KEY,CA} or VORA_ALLOW_INSECURE_BROKER=1")
 	}
 
+	joinToken := os.Getenv("VORA_API_JOIN_TOKEN")
+
+	// Optional reverse tunnel: lets runners the API cannot dial (NAT) still be
+	// driven. The runner connects out; the API multiplexes RunnerService over it.
+	var tunnelSrv *tunnel.Server
+	if addr := os.Getenv("VORA_API_TUNNEL_ADDR"); addr != "" {
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("listen tunnel %s: %w", addr, err)
+		}
+		defer ln.Close()
+		tunnelSrv = tunnel.NewServer(joinToken, logger)
+		go func() {
+			if err := tunnelSrv.Serve(ctx, ln); err != nil {
+				logger.Warn("tunnel server stopped", "error", err)
+			}
+		}()
+		logger.Info("tunnel listening", "addr", addr)
+	}
+
 	server := api.New(api.Options{
 		Store:               store,
 		Logger:              logger,
-		JoinToken:           os.Getenv("VORA_API_JOIN_TOKEN"),
+		JoinToken:           joinToken,
 		BootstrapKey:        os.Getenv("VORA_API_BOOTSTRAP_KEY"),
 		Secrets:             secrets,
 		AllowInsecureBroker: allowInsecureBroker,
 		RunnerTLS:           runnerTLS,
+		Tunnel:              tunnelSrv,
 	})
 	defer server.Close()
 

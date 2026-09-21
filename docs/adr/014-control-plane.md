@@ -62,9 +62,10 @@ Add a separate **`vora-api`** process (`cmd/vora-api`):
 - Sandbox create is compensating: start or route-persistence failure destroys
   the runner sandbox on a detached timeout so request cancellation cannot leave
   an unrouteable workload.
-- **API → runner requires the runner's gRPC address to be reachable.** This is
-  NAT-friendly for registration but not for command delivery; a reverse tunnel
-  (runner-initiated command stream) is a follow-up for the fully-hosted case.
+- **API → runner works for NAT'd runners (ADR 022).** A runner normally needs a
+  reachable gRPC address; with `VORA_API_TUNNEL_ADDR` it instead connects out and
+  the API multiplexes RunnerService over a reverse tunnel (yamux), so NAT'd
+  runners can be placed and driven.
 - **Scheduling is capacity-aware (ADR 021):** runners are filtered by backend
   and network capability and by committed capacity, then the least-loaded is
   chosen. The reverse tunnel for fully-hosted/NAT'd runners remains a follow-up.
