@@ -146,6 +146,16 @@ func (s *PostgresStore) TouchKey(ctx context.Context, id string, at time.Time) e
 }
 
 func (s *PostgresStore) UpsertRunner(ctx context.Context, r Runner) error {
+	// A nil []string is sent as SQL NULL, which violates the not-null columns;
+	// empty arrays are the right value for a runner with no backends/modes.
+	backends := r.Backends
+	if backends == nil {
+		backends = []string{}
+	}
+	networkModes := r.NetworkModes
+	if networkModes == nil {
+		networkModes = []string{}
+	}
 	_, err := s.pool.Exec(ctx,
 		`insert into runners (id, address, tunneled, backends, network_modes, cpu_millis, memory_bytes, max_sandboxes, running, version, registered_at, last_heartbeat)
 		 values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
@@ -160,7 +170,7 @@ func (s *PostgresStore) UpsertRunner(ctx context.Context, r Runner) error {
 		   running = excluded.running,
 		   version = excluded.version,
 		   last_heartbeat = excluded.last_heartbeat`,
-		r.ID, r.Address, r.Tunneled, r.Backends, r.NetworkModes, r.CPUMillis, r.MemoryBytes, r.MaxSandboxes, r.Running, r.Version, r.RegisteredAt, r.LastHeartbeat)
+		r.ID, r.Address, r.Tunneled, backends, networkModes, r.CPUMillis, r.MemoryBytes, r.MaxSandboxes, r.Running, r.Version, r.RegisteredAt, r.LastHeartbeat)
 	return err
 }
 
