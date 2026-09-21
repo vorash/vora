@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
@@ -58,8 +59,18 @@ func run() error {
 		cfg.StateDir = *stateFlag
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := slog.New(telemetry.ContextHandler{Handler: slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})})
 	slog.SetDefault(logger)
+
+	shutdownTracing, err := telemetry.SetupTracing(context.Background(), telemetry.TracingConfig{
+		Endpoint:    os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		ServiceName: "vora-runner",
+		Insecure:    true,
+	})
+	if err != nil {
+		return fmt.Errorf("tracing: %w", err)
+	}
+	defer func() { _ = shutdownTracing(context.Background()) }()
 
 	if err := os.MkdirAll(cfg.SandboxesDir(), 0o755); err != nil {
 		return fmt.Errorf("create state dir: %w", err)
@@ -110,7 +121,7 @@ func run() error {
 		return fmt.Errorf("chmod socket: %w", err)
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(grpc.StatsHandler(otelgrpc.NewServerHandler()))
 	v1.RegisterRunnerServiceServer(grpcServer, server)
 
 	// Optional TCP gRPC endpoint so a remote control plane can reach this
@@ -140,7 +151,7 @@ func run() error {
 			logger.Warn("runner gRPC endpoint is plaintext; brokered create requests will be refused",
 				"hint", "set VORA_RUNNER_TLS_{CERT,KEY,CA}")
 		}
-		tcpServer = grpc.NewServer(tcpOpts...)
+		tcpServer = grpc.NewServer(append(tcpOpts, grpc.StatsHandler(otelgrpc.NewServerHandler()))...)
 		v1.RegisterRunnerServiceServer(tcpServer, server)
 		go func() { _ = tcpServer.Serve(tcpLn) }()
 		logger.Info("runner gRPC listening", "addr", addr, "tls", runnerTLS.Enabled())

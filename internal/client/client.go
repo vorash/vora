@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"fmt"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -21,18 +22,25 @@ type Client struct {
 
 // Dial connects to the runner control socket.
 func Dial(socket string) (*Client, error) {
-	conn, err := grpc.NewClient("unix://"+socket,
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient("unix://"+socket, dialOptions(insecure.NewCredentials())...)
 	if err != nil {
 		return nil, fmt.Errorf("client: dial %s: %w", socket, err)
 	}
 	return &Client{conn: conn, stub: v1.NewRunnerServiceClient(conn)}, nil
 }
 
+// dialOptions carries the transport credentials plus the OTel client handler,
+// so a CLI-to-runner or API-to-runner RPC continues the caller's trace.
+func dialOptions(creds credentials.TransportCredentials) []grpc.DialOption {
+	return []grpc.DialOption{
+		grpc.WithTransportCredentials(creds),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
+	}
+}
+
 // DialAddress connects to a runner's TCP gRPC endpoint (used by vora-api).
 func DialAddress(addr string) (*Client, error) {
-	conn, err := grpc.NewClient(addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(addr, dialOptions(insecure.NewCredentials())...)
 	if err != nil {
 		return nil, fmt.Errorf("client: dial %s: %w", addr, err)
 	}
@@ -41,7 +49,7 @@ func DialAddress(addr string) (*Client, error) {
 
 // DialAddressTLS connects to a runner's TCP gRPC endpoint over TLS.
 func DialAddressTLS(addr string, cfg *tls.Config) (*Client, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(credentials.NewTLS(cfg)))
+	conn, err := grpc.NewClient(addr, dialOptions(credentials.NewTLS(cfg))...)
 	if err != nil {
 		return nil, fmt.Errorf("client: dial %s: %w", addr, err)
 	}

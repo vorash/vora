@@ -66,7 +66,10 @@ snapshots. Written in Go, with no Kubernetes in the path.
 - **Audit trail** behind a `Store` interface: local JSONL, or **PostgreSQL /
   Supabase** (`VORA_AUDIT_DSN`), with lifecycle events, per-execution records,
   and restricted-network decisions (`vora logs --egress`).
-- **Prometheus metrics** at `127.0.0.1:9101/metrics`.
+- **Prometheus metrics** at `127.0.0.1:9101/metrics`, and **OpenTelemetry
+tracing** across API → runner → runtime (off unless
+`OTEL_EXPORTER_OTLP_ENDPOINT` is set), with trace ids in logs and an
+`X-Trace-Id` response header ([ADR 019](docs/adr/019-opentelemetry.md)).
 - A dual-backend **isolation security suite** and a **benchmark harness**.
 - A **control plane** (`vora-api`, [ADR 014](docs/adr/014-control-plane.md)):
   HTTP/JSON API with hashed, scoped **API keys**, **strict tenant isolation**,

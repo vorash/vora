@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -312,6 +313,11 @@ func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) 
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
+	ctx, span := telemetry.Start(ctx, "runtime.start",
+		attribute.String("sandbox.id", rec.ID),
+		attribute.String("vora.image", rec.Spec.Image),
+		attribute.String("vora.backend", backend.Name()))
+	defer span.End()
 	h, err := backend.Create(ctx, rec.Spec)
 	if err != nil {
 		s.fail(rec, runtime.ReasonRuntimeFailure)
@@ -362,8 +368,12 @@ func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStrea
 	}
 
 	started := time.Now().UTC()
-	baseline := s.usageBaseline(stream.Context(), backend, h)
-	es, err := backend.Exec(stream.Context(), h, execReq)
+	execCtx, span := telemetry.Start(stream.Context(), "runtime.exec",
+		attribute.String("sandbox.id", req.GetSandboxId()),
+		attribute.String("vora.exec.command", execReq.Command))
+	defer span.End()
+	baseline := s.usageBaseline(execCtx, backend, h)
+	es, err := backend.Exec(execCtx, h, execReq)
 	if err != nil {
 		s.recordExec(req.GetSandboxId(), execReq, started, 0, 0, 0, runtime.ReasonRuntimeFailure, 0, 0)
 		s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure)).Inc()
