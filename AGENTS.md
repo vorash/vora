@@ -30,6 +30,7 @@ architectural claims.
 | `docs/adr/` | numbered architecture decision records |
 | `docs/architecture/` | overview, sandbox lifecycle, security boundaries, threat model |
 | `deploy/systemd`, `scripts/`, `images/` | units, tooling, sandbox rootfs images |
+| `sdk/typescript/` | TypeScript SDK for the HTTP API; its own npm package and `vitest` suite |
 
 ## Build & test
 
