@@ -124,7 +124,7 @@ func newBrokerFixture(t *testing.T) (*fixture, *network.Manager) {
 	if err != nil {
 		t.Skipf("bwrap backend unavailable: %v", err)
 	}
-	backend.SetRestricted(subtree, nets, sink)
+	backend.EnableNetns(subtree, nets, sink)
 	return &fixture{t: t, backend: backend, ws: workspace.NewManager(cfg.SandboxesDir()), cfg: cfg}, nets
 }
 

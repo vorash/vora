@@ -126,8 +126,14 @@ func (s SandboxSpec) Validate() error {
 	default:
 		// Non-none modes are validated per backend; the spec itself is valid.
 	}
+	if len(s.Network.AllowedDomains) > 0 && s.Network.Mode != NetworkRestricted {
+		return fmt.Errorf("%w: allowed domains require network mode %q", ErrInvalidSpec, NetworkRestricted)
+	}
 	if len(s.Network.BrokerAliases) > 0 && s.Network.Mode != NetworkRestricted {
 		return fmt.Errorf("%w: broker aliases require network mode %q", ErrInvalidSpec, NetworkRestricted)
+	}
+	if s.Network.Mode == NetworkPrivate && s.TenantID == "" {
+		return fmt.Errorf("%w: network mode %q requires a tenant", ErrInvalidSpec, NetworkPrivate)
 	}
 	return nil
 }

@@ -16,6 +16,7 @@ import (
 
 	"github.com/vorash/vora/internal/egress"
 	"github.com/vorash/vora/internal/network"
+	"github.com/vorash/vora/internal/runtime"
 )
 
 // TestDNSThroughNetns proves the gateway resolver from inside a real sandbox
@@ -66,7 +67,7 @@ func TestDNSThroughNetns(t *testing.T) {
 		BrokerPort: network.DefaultBrokerPort,
 	}, logger)
 
-	n, err := manager.Create(ctx, "sbx_dns_netns")
+	n, err := manager.Create(ctx, "sbx_dns_netns", network.Policy{Mode: runtime.NetworkRestricted})
 	if err != nil {
 		t.Fatalf("network Create: %v", err)
 	}

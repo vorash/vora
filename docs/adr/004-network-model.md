@@ -38,4 +38,5 @@ hardest primitives to get right.
   header injection but avoids MITM certificate lifecycle and pinning problems.
 - Denials are first-class events and must appear in the audit trail with the
   attempted host and reason.
-- `NetworkFull`/`NetworkPrivate` remain reserved modes and are not implemented.
+- `NetworkFull`/`NetworkPrivate` were reserved modes through v0.4 and are
+  implemented in v0.5 ([ADR 016](016-network-modes.md)).

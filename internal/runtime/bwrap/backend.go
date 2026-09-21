@@ -36,7 +36,8 @@ type Backend struct {
 	initPath string
 	bwrapBin string
 
-	// Restricted-network path (NetworkRestricted). Enabled by SetRestricted.
+	// Runner-launched netns path (every mode except NetworkNone). Enabled by
+	// EnableNetns.
 	subtree    cgroup.Subtree
 	networks   *network.Manager
 	egressSink func(egress.Event) error
@@ -52,7 +53,8 @@ type handle struct {
 	// NetworkNone path: a transient systemd unit + in-sandbox agent.
 	unit   *cgroup.Unit
 	client *agentproto.Client
-	// NetworkRestricted path: a runner-launched sandbox in its own netns.
+	// Runner-launched netns path: a sandbox in its own netns, started by the
+	// runner rather than systemd-run.
 	group  *cgroup.Group
 	proxy  *egress.Proxy
 	broker *egress.Broker
@@ -85,12 +87,12 @@ func New(cfg config.Config, cgroups cgroup.Manager, logger *slog.Logger) (*Backe
 	}, nil
 }
 
-// SetRestricted enables the NetworkRestricted path: a per-sandbox network
-// namespace, an SNI egress proxy, and cgroup limits from the delegated
-// subtree. The sandbox is launched by the runner (not via systemd-run) so it
-// can join the prepared netns. sink receives each egress decision and may be
-// nil.
-func (b *Backend) SetRestricted(subtree cgroup.Subtree, networks *network.Manager, sink func(egress.Event) error) {
+// EnableNetns enables the runner-launched network-namespace path used by every
+// mode except NetworkNone: a per-sandbox network namespace, cgroup limits from
+// the delegated subtree, and (for NetworkRestricted) an SNI egress proxy. The
+// sandbox is launched by the runner rather than via systemd-run so it can join
+// the prepared netns. sink receives each egress decision and may be nil.
+func (b *Backend) EnableNetns(subtree cgroup.Subtree, networks *network.Manager, sink func(egress.Event) error) {
 	b.subtree = subtree
 	b.networks = networks
 	b.egressSink = sink
@@ -102,8 +104,8 @@ func (b *Backend) Name() string { return "bwrap" }
 // Capabilities implements runtime.Backend.
 func (b *Backend) Capabilities() runtime.Capabilities {
 	modes := []runtime.NetworkMode{runtime.NetworkNone}
-	if b.subtree != nil && b.networks != nil && b.bwrapBin != "" {
-		modes = append(modes, runtime.NetworkRestricted)
+	if b.netnsReady() {
+		modes = append(modes, runtime.NetworkRestricted, runtime.NetworkFull, runtime.NetworkPrivate)
 	}
 	return runtime.Capabilities{
 		NativeExec:             false, // exec is mediated by vora-init
@@ -113,17 +115,29 @@ func (b *Backend) Capabilities() runtime.Capabilities {
 	}
 }
 
+// netnsReady reports whether the runner can launch sandboxes in a prepared
+// network namespace (needed by every mode except NetworkNone).
+func (b *Backend) netnsReady() bool {
+	return b.subtree != nil && b.networks != nil && b.bwrapBin != ""
+}
+
 // Create validates the spec and reserves a handle.
 func (b *Backend) Create(_ context.Context, spec runtime.SandboxSpec) (runtime.Handle, error) {
 	if err := spec.Validate(); err != nil {
 		return nil, err
 	}
-	if spec.Network.Mode != runtime.NetworkNone && spec.Network.Mode != runtime.NetworkRestricted {
-		return nil, fmt.Errorf("%w: network mode %q (bwrap supports %q and %q)",
-			runtime.ErrUnsupported, spec.Network.Mode, runtime.NetworkNone, runtime.NetworkRestricted)
-	}
-	if spec.Network.Mode == runtime.NetworkRestricted && !b.Capabilities().SupportsNetwork(runtime.NetworkRestricted) {
-		return nil, fmt.Errorf("%w: NetworkRestricted is not configured on this runner", runtime.ErrUnsupported)
+	switch spec.Network.Mode {
+	case runtime.NetworkNone:
+	case runtime.NetworkRestricted, runtime.NetworkFull, runtime.NetworkPrivate:
+		if !b.Capabilities().SupportsNetwork(spec.Network.Mode) {
+			return nil, fmt.Errorf("%w: network mode %q is not configured on this runner", runtime.ErrUnsupported, spec.Network.Mode)
+		}
+		if spec.Network.Mode == runtime.NetworkPrivate && spec.TenantID == "" {
+			return nil, fmt.Errorf("%w: network mode %q requires a tenant", runtime.ErrInvalidSpec, spec.Network.Mode)
+		}
+	default:
+		return nil, fmt.Errorf("%w: network mode %q (bwrap supports %q, %q, %q and %q)",
+			runtime.ErrUnsupported, spec.Network.Mode, runtime.NetworkNone, runtime.NetworkRestricted, runtime.NetworkFull, runtime.NetworkPrivate)
 	}
 	rootfs := spec.Workspace.RootfsDir
 	if rootfs == "" {
@@ -149,10 +163,14 @@ func (b *Backend) Start(ctx context.Context, h runtime.Handle) error {
 	if err != nil {
 		return err
 	}
-	if hd.spec.Network.Mode == runtime.NetworkRestricted {
+	switch hd.spec.Network.Mode {
+	case runtime.NetworkRestricted:
 		return b.startRestricted(ctx, hd, nil)
+	case runtime.NetworkFull, runtime.NetworkPrivate:
+		return b.startInNetns(ctx, hd, nil)
+	default:
+		return b.startUnit(ctx, hd)
 	}
-	return b.startUnit(ctx, hd)
 }
 
 // StartWithCredentials implements runtime.BrokerAware: it starts a
@@ -204,11 +222,34 @@ func writeResolvConf(spec runtime.SandboxSpec, netns *network.Net) (string, erro
 	return path, nil
 }
 
-// startRestricted launches a NetworkRestricted sandbox from the runner: it
-// joins the prepared netns via nsenter, applies cgroup limits from the
-// delegated subtree, and starts the sandbox's egress proxy (and, when
-// credentials are granted, the broker) before the agent is reachable.
+// writePublicResolvConf points a NetworkFull sandbox at public resolvers. It
+// returns "" (no override) when the image has no /etc/resolv.conf to bind
+// over, rather than failing the start. NetworkPrivate gets no resolver: peer
+// connectivity is by address, and there is no public egress for DNS anyway.
+func writePublicResolvConf(spec runtime.SandboxSpec) string {
+	imageFile := filepath.Join(spec.Workspace.RootfsDir, "etc", "resolv.conf")
+	if _, err := os.Stat(imageFile); err != nil {
+		return ""
+	}
+	path := filepath.Join(spec.Workspace.RootDir, "resolv.conf")
+	content := "# Managed by Vora: public resolvers for NetworkFull (ADR 004).\nnameserver 1.1.1.1\nnameserver 8.8.8.8\noptions timeout:2 attempts:2\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return ""
+	}
+	return path
+}
+
+// startRestricted launches a NetworkRestricted sandbox whose egress proxy (and,
+// when credentials are granted, broker and resolver) must be live before the
+// agent is reachable.
 func (b *Backend) startRestricted(ctx context.Context, hd *handle, creds []egress.Credential) error {
+	return b.startInNetns(ctx, hd, creds)
+}
+
+// startInNetns launches a sandbox in a prepared network namespace. Restricted
+// sandboxes get the egress proxy/broker/resolver; NetworkFull and
+// NetworkPrivate get only the namespace and its firewall policy.
+func (b *Backend) startInNetns(ctx context.Context, hd *handle, creds []egress.Credential) error {
 	ws := hd.spec.Workspace
 	if err := os.MkdirAll(ws.IPCDir, 0o755); err != nil {
 		return fmt.Errorf("bwrap: ipc dir: %w", err)
@@ -220,7 +261,7 @@ func (b *Backend) startRestricted(ctx context.Context, hd *handle, creds []egres
 		return fmt.Errorf("bwrap: %w", err)
 	}
 
-	netns, err := b.networks.Create(ctx, hd.id)
+	netns, err := b.networks.Create(ctx, hd.id, network.Policy{Mode: hd.spec.Network.Mode, TenantID: hd.spec.TenantID})
 	if err != nil {
 		return fmt.Errorf("bwrap: network: %w", err)
 	}
@@ -231,48 +272,59 @@ func (b *Backend) startRestricted(ctx context.Context, hd *handle, creds []egres
 	sandboxCtx, cancel := context.WithCancel(context.Background())
 	hd.cancel = cancel
 
-	proxy := egress.New(hd.id, egress.Policy{AllowedDomains: hd.spec.Network.AllowedDomains}, b.logger, b.egressSink, egress.Limits{
-		MaxConnections: b.cfg.EgressMaxConnections,
-		IdleTimeout:    b.cfg.EgressIdleTimeout,
-	})
-	if err := proxy.Listen(sandboxCtx, netns.ProxyAddr()); err != nil {
-		b.cleanupRestricted(ctx, hd)
-		return err
-	}
-	hd.proxy = proxy
-
-	// The broker listens on its own gateway port and is reachable only from
-	// the sandbox side of the veth. It is started before the workload so a
-	// granted alias can never resolve to a dead route.
-	if len(creds) > 0 {
-		broker := egress.NewBroker(hd.id, egress.Policy{AllowedDomains: hd.spec.Network.AllowedDomains}, creds, b.logger, b.egressSink, egress.Limits{
+	restricted := hd.spec.Network.Mode == runtime.NetworkRestricted
+	// resolvConf is the host file bound over /etc/resolv.conf, if any.
+	var resolvConf string
+	var sbEnv map[string]string
+	if restricted {
+		proxy := egress.New(hd.id, egress.Policy{AllowedDomains: hd.spec.Network.AllowedDomains}, b.logger, b.egressSink, egress.Limits{
 			MaxConnections: b.cfg.EgressMaxConnections,
 			IdleTimeout:    b.cfg.EgressIdleTimeout,
 		})
-		if err := broker.Listen(sandboxCtx, netns.ServiceAddr(b.cfg.EgressBrokerPort)); err != nil {
+		if err := proxy.Listen(sandboxCtx, netns.ProxyAddr()); err != nil {
 			b.cleanupRestricted(ctx, hd)
 			return err
 		}
-		hd.broker = broker
-	}
+		hd.proxy = proxy
 
-	// The sandbox's only resolver is on the gateway. It is started before the
-	// workload so name resolution cannot hit a dead route, and the sandbox is
-	// pointed at it through a bound resolv.conf.
-	dns := egress.NewDNS(hd.id, egress.Policy{AllowedDomains: hd.spec.Network.AllowedDomains}, b.logger, b.egressSink, egress.Limits{
-		MaxConnections: b.cfg.EgressMaxConnections,
-	})
-	if err := dns.Listen(sandboxCtx, netns.ServiceAddr(network.DefaultDNSPort)); err != nil {
-		b.cleanupRestricted(ctx, hd)
-		return err
-	}
-	hd.dns = dns
-	resolvConf, err := writeResolvConf(hd.spec, netns)
-	if err != nil {
-		b.cleanupRestricted(ctx, hd)
-		return err
-	}
+		// The broker listens on its own gateway port and is reachable only from
+		// the sandbox side of the veth. It is started before the workload so a
+		// granted alias can never resolve to a dead route.
+		if len(creds) > 0 {
+			broker := egress.NewBroker(hd.id, egress.Policy{AllowedDomains: hd.spec.Network.AllowedDomains}, creds, b.logger, b.egressSink, egress.Limits{
+				MaxConnections: b.cfg.EgressMaxConnections,
+				IdleTimeout:    b.cfg.EgressIdleTimeout,
+			})
+			if err := broker.Listen(sandboxCtx, netns.ServiceAddr(b.cfg.EgressBrokerPort)); err != nil {
+				b.cleanupRestricted(ctx, hd)
+				return err
+			}
+			hd.broker = broker
+		}
 
+		// The sandbox's only resolver is on the gateway. It is started before
+		// the workload so name resolution cannot hit a dead route, and the
+		// sandbox is pointed at it through a bound resolv.conf.
+		dns := egress.NewDNS(hd.id, egress.Policy{AllowedDomains: hd.spec.Network.AllowedDomains}, b.logger, b.egressSink, egress.Limits{
+			MaxConnections: b.cfg.EgressMaxConnections,
+		})
+		if err := dns.Listen(sandboxCtx, netns.ServiceAddr(network.DefaultDNSPort)); err != nil {
+			b.cleanupRestricted(ctx, hd)
+			return err
+		}
+		hd.dns = dns
+		resolvConf, err = writeResolvConf(hd.spec, netns)
+		if err != nil {
+			b.cleanupRestricted(ctx, hd)
+			return err
+		}
+		sbEnv = sandboxEnv(hd.spec, netns.ServiceAddr(b.cfg.EgressBrokerPort))
+	} else if hd.spec.Network.Mode == runtime.NetworkFull {
+		resolvConf = writePublicResolvConf(hd.spec)
+		sbEnv = hd.spec.Env
+	} else {
+		sbEnv = hd.spec.Env
+	}
 	group, err := b.subtree.Create(ctx, hd.id, hd.spec.Resources)
 	if err != nil {
 		b.cleanupRestricted(ctx, hd)
@@ -285,7 +337,7 @@ func (b *Backend) startRestricted(ctx context.Context, hd *handle, creds []egres
 		WorkspaceDir: ws.WorkspaceDir,
 		HomeDir:      ws.HomeDir,
 		IPCDir:       ws.IPCDir,
-		Env:          sandboxEnv(hd.spec, netns.ServiceAddr(b.cfg.EgressBrokerPort)),
+		Env:          sbEnv,
 		ShareNet:     true,
 		ResolvConf:   resolvConf,
 	})
@@ -319,7 +371,7 @@ func (b *Backend) startRestricted(ctx context.Context, hd *handle, creds []egres
 		b.cleanupRestricted(ctx, hd)
 		return err
 	}
-	b.logger.Info("sandbox started", "sandbox_id", hd.id, "backend", "bwrap", "network", "restricted", "gateway", netns.GatewayIP)
+	b.logger.Info("sandbox started", "sandbox_id", hd.id, "backend", "bwrap", "network", string(hd.spec.Network.Mode), "gateway", netns.GatewayIP)
 	return nil
 }
 

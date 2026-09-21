@@ -7,12 +7,14 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/vorash/vora/internal/network"
+	"github.com/vorash/vora/internal/runtime"
 )
 
 // TestNetworkRestrictedDNAT proves the enforcement primitive: in a prepared
@@ -32,7 +34,7 @@ func TestNetworkRestrictedDNAT(t *testing.T) {
 	m := network.NewManager(t.TempDir(), network.ManagerConfig{ProxyPort: network.DefaultProxyPort}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	n, err := m.Create(ctx, "sbx_net_test")
+	n, err := m.Create(ctx, "sbx_net_test", network.Policy{Mode: runtime.NetworkRestricted})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -129,4 +131,137 @@ func nsenterErr(pid int, args ...string) (string, error) {
 	cmd := exec.Command("nsenter", full...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// requireNetnsTools skips unless the test can build a sandbox network, which
+// needs uid 0 (in a user namespace) and the netlink/nft tooling.
+func requireNetnsTools(t *testing.T) {
+	t.Helper()
+	if os.Getuid() != 0 {
+		t.Skip("needs uid 0 in a user namespace (run under rootlesskit)")
+	}
+	for _, bin := range []string{"unshare", "ip", "nft", "nsenter", "bash", "timeout"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Skipf("%s not found", bin)
+		}
+	}
+}
+
+// TestNetworkFullBlocksPrivateRanges proves that NetworkFull gives routed
+// egress without exposing private ranges: RFC1918, link-local (metadata) and
+// loopback stay blocked, and the runner's own gateway services are private too.
+func TestNetworkFullBlocksPrivateRanges(t *testing.T) {
+	requireNetnsTools(t)
+
+	m := network.NewManager(t.TempDir(), network.ManagerConfig{}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	n, err := m.Create(ctx, "sbx_full_net", network.Policy{Mode: runtime.NetworkFull})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Cleanup(func() { _ = m.Destroy(context.Background(), "sbx_full_net") })
+
+	for _, dst := range []string{"10.0.0.1", "192.168.1.1", "169.254.169.254"} {
+		out, err := nsenterErr(n.NetnsPID, "timeout", "2", "bash", "-c", "exec 3<>/dev/tcp/"+dst+"/80 && echo UNEXPECTED")
+		if err == nil || strings.Contains(out, "UNEXPECTED") {
+			t.Fatalf("private range %s reachable in NetworkFull: %q (%v)", dst, out, err)
+		}
+	}
+
+	// A live service on the gateway (which sits in 10/8) must be blocked.
+	gw, err := net.Listen("tcp", net.JoinHostPort(n.GatewayIP, "0"))
+	if err != nil {
+		t.Fatalf("listen on gateway: %v", err)
+	}
+	defer gw.Close()
+	port := strconv.Itoa(gw.Addr().(*net.TCPAddr).Port)
+	if out, err := nsenterErr(n.NetnsPID, "timeout", "2", "bash", "-c", "exec 3<>/dev/tcp/"+n.GatewayIP+"/"+port+" && echo UNEXPECTED"); err == nil || strings.Contains(out, "UNEXPECTED") {
+		t.Fatalf("gateway service reachable in NetworkFull: %q (%v)", out, err)
+	}
+
+	// The blocking rule is actually installed in the sandbox namespace.
+	if rules := nsenterRun(t, n.NetnsPID, "nft", "list", "ruleset"); !strings.Contains(rules, "169.254.0.0/16") {
+		t.Fatalf("private-range drop rule not installed:\n%s", rules)
+	}
+}
+
+// TestNetworkPrivateIsolatesTenants proves that NetworkPrivate lets two
+// sandboxes of one tenant reach each other while denying public egress, other
+// tenants, and the host's private ranges.
+func TestNetworkPrivateIsolatesTenants(t *testing.T) {
+	requireNetnsTools(t)
+	serve := buildNetServe(t)
+
+	m := network.NewManager(t.TempDir(), network.ManagerConfig{}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	a, err := m.Create(ctx, "sbx_pa", network.Policy{Mode: runtime.NetworkPrivate, TenantID: "tenant-a"})
+	if err != nil {
+		t.Fatalf("Create a: %v", err)
+	}
+	b, err := m.Create(ctx, "sbx_pb", network.Policy{Mode: runtime.NetworkPrivate, TenantID: "tenant-a"})
+	if err != nil {
+		t.Fatalf("Create b: %v", err)
+	}
+	c, err := m.Create(ctx, "sbx_pc", network.Policy{Mode: runtime.NetworkPrivate, TenantID: "tenant-b"})
+	if err != nil {
+		t.Fatalf("Create c: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = m.Destroy(context.Background(), "sbx_pa")
+		_ = m.Destroy(context.Background(), "sbx_pb")
+		_ = m.Destroy(context.Background(), "sbx_pc")
+	})
+
+	// Serve inside b's namespace.
+	addr := net.JoinHostPort(b.SandboxIP, "9999")
+	srv := exec.Command("nsenter", "-t", strconv.Itoa(b.NetnsPID), "-n", serve, "-addr", addr)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("start netserve: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Process.Kill(); _, _ = srv.Process.Wait() })
+	waitForTCP(t, addr)
+
+	// Same tenant: a reaches b.
+	out := nsenterRun(t, a.NetnsPID, "bash", "-c", "exec 3<>/dev/tcp/"+b.SandboxIP+"/9999; head -1 <&3")
+	if !strings.Contains(out, "NETSERVE") {
+		t.Fatalf("same-tenant peer unreachable: %q", out)
+	}
+
+	// Different tenant: a must not reach c.
+	if out, err := nsenterErr(a.NetnsPID, "timeout", "2", "bash", "-c", "exec 3<>/dev/tcp/"+c.SandboxIP+"/9999 && echo UNEXPECTED"); err == nil || strings.Contains(out, "UNEXPECTED") {
+		t.Fatalf("cross-tenant peer reachable: %q (%v)", out, err)
+	}
+
+	// Public egress is denied.
+	if out, err := nsenterErr(a.NetnsPID, "timeout", "2", "bash", "-c", "exec 3<>/dev/tcp/1.1.1.1/80 && echo UNEXPECTED"); err == nil || strings.Contains(out, "UNEXPECTED") {
+		t.Fatalf("public egress allowed in NetworkPrivate: %q (%v)", out, err)
+	}
+}
+
+func buildNetServe(t *testing.T) string {
+	t.Helper()
+	out := filepath.Join(t.TempDir(), "netserve")
+	cmd := exec.Command("go", "build", "-o", out, "./tests/integration/testdata/netserve")
+	cmd.Dir = filepath.Join("..", "..")
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build netserve: %v\n%s", err, b)
+	}
+	return out
+}
+
+func waitForTCP(t *testing.T, addr string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond); err == nil {
+			_ = c.Close()
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("listener %s not ready", addr)
 }
