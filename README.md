@@ -375,6 +375,7 @@ cmd/            vora (CLI), vora-runner (daemon), vora-init (sandbox agent), vor
 internal/       runtime, cgroup, images, workspace, sandbox, runner, cli, telemetry
 docs/           architecture docs, ADRs and benchmark reports
 tests/          integration, security and benchmark suites
+examples/       real-world recipes: CI gates, autograders, plugin runners, fan-out, agent tools
 images/         rootfs image definitions (base, python, node)
 sdk/typescript/ TypeScript SDK for the HTTP API
 sdk/mcp/        MCP server exposing sandboxes to coding agents

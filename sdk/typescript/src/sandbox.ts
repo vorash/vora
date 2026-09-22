@@ -1,4 +1,5 @@
 import { decodeText, ndjson } from "./codec.js";
+import { VoraError } from "./errors.js";
 import type { Transport } from "./http.js";
 import {
   decodeExecChunk,
@@ -61,6 +62,7 @@ export class Sandbox {
     const stderr: Uint8Array[] = [];
     let exitCode = 0;
     let reason: ExecResult["reason"];
+    let sawExit = false;
     for await (const chunk of this.stream(toExecRequest(commandOrOptions, options))) {
       switch (chunk.type) {
         case "stdout":
@@ -70,10 +72,21 @@ export class Sandbox {
           stderr.push(chunk.data);
           break;
         case "exit":
+          sawExit = true;
           exitCode = chunk.exitCode;
           reason = chunk.reason;
           break;
       }
+    }
+    // A stream that ends without an exit record is a killed run, not a
+    // successful one: fail loudly and hand back whatever output there was.
+    if (!sawExit) {
+      throw new VoraError("exec: stream ended without an exit record (the run was killed)", {
+        body: {
+          stdout: decodeText(concat(stdout)),
+          stderr: decodeText(concat(stderr)),
+        },
+      });
     }
     const result: ExecResult = {
       stdout: decodeText(concat(stdout)),

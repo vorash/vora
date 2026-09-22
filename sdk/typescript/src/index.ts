@@ -15,6 +15,7 @@ export { Vora, Sandboxes } from "./client.js";
 export type { ListSandboxesOptions, VoraOptions } from "./client.js";
 export { Sandbox } from "./sandbox.js";
 export type { WriteFileOptions } from "./sandbox.js";
+export { Snapshots, Snapshot } from "./snapshots.js";
 export { VoraError } from "./errors.js";
 export { Transport } from "./http.js";
 export type { JsonRequestOptions, RequestOptions, TransportOptions } from "./http.js";

@@ -325,3 +325,27 @@ describe("environment defaults", () => {
     expect(api.requests[0]?.headers.authorization).toBe("Bearer vora_from_env");
   });
 });
+
+describe("exec", () => {
+  it("fails loudly when an exec stream ends without an exit record", async () => {
+    // A killed run (timeout, OOM, agent death) closes the stream with no exit
+    // chunk. Reporting that as exit 0 would make every gate fail open.
+    const api = await boot((request) => {
+      if (request.url?.includes("/exec") === true) {
+        return {
+          contentType: "application/x-ndjson",
+          ndjson: [{ stdout: b64("partial output") }],
+        };
+      }
+      return undefined;
+    });
+    const vora = new Vora({ baseUrl: api.baseUrl, apiKey: "vora_test" });
+    const sandbox = await vora.sandboxes.get("sbx_01TEST");
+
+    await expect(sandbox.exec("sh -c 'while :; do :; done'")).rejects.toMatchObject({
+      name: "VoraError",
+      message: expect.stringContaining("without an exit record"),
+      body: { stdout: "partial output" },
+    });
+  });
+});

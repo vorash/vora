@@ -122,6 +122,17 @@ export interface SandboxEgress {
   alias?: string;
 }
 
+/** A capture of a sandbox's writable state (ADR 023). */
+export interface SnapshotInfo {
+  id: string;
+  sandboxId?: string;
+  tenantId?: string;
+  runnerId?: string;
+  spec?: SandboxSpec;
+  bytes?: number;
+  createdAtUnixMs?: number;
+}
+
 /** One unit of streamed exec output. */
 export type ExecChunk =
   | { type: "stdout"; data: Uint8Array }
@@ -269,6 +280,19 @@ function asArray<T>(value: unknown, item: (raw: unknown) => T | undefined): T[] 
     }
   }
   return out;
+}
+
+export function decodeSnapshotInfo(raw: unknown): SnapshotInfo {
+  const source = asObject(raw) ?? {};
+  const info: SnapshotInfo = { id: asString(source.id) ?? "" };
+  const spec = decodeSandboxSpec(source.spec);
+  if (spec !== undefined) info.spec = spec;
+  assign(info, "sandboxId", asString(source.sandboxId));
+  assign(info, "tenantId", asString(source.tenantId));
+  assign(info, "runnerId", asString(source.runnerId));
+  assign(info, "bytes", asNumber(source.bytes));
+  assign(info, "createdAtUnixMs", asNumber(source.createdAtUnixMs));
+  return info;
 }
 
 export function decodeSandboxInfo(raw: unknown): SandboxInfo {
