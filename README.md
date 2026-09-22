@@ -350,6 +350,7 @@ tests/          integration, security and benchmark suites
 images/         rootfs image definitions (base, python, node)
 sdk/typescript/ TypeScript SDK for the HTTP API
 sdk/mcp/        MCP server exposing sandboxes to coding agents
+integrations/   adapters for agent frameworks (OpenAI Agents)
 scripts/        image build and benchmark helpers
 deploy/         systemd units for the system install (vora-ansible is its own repo)
 ```
