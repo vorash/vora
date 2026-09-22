@@ -29,11 +29,13 @@ iteration; the `WorkspaceSpec` stored in the record still points at the source
 sandbox and is replaced by the fork's fresh layout.
 
 **Snapshot data is untrusted input.** The workload authored every byte, so
-restore refuses anything that could write outside the target directories:
-malformed paths, symlinked path components, symlink targets resolving outside
-their directory, and any non regular/dir/symlink entry. Nothing is silently
-dropped — unsupported entries fail loudly. Only permission bits are restored
-(no ownership, no setuid).
+restore never writes outside the target directories and never follows a
+symlink: malformed paths are contained, symlinked path components are refused,
+and leaves are replaced rather than written through. Symlinks are restored
+verbatim — an escaping link is inert data the workload could create at runtime
+anyway. Non regular/dir/symlink entries (hardlinks, devices, FIFOs) fail
+loudly; nothing is silently dropped. Only permission bits are restored (no
+ownership, no setuid).
 
 **Routing follows the data.** Snapshotting is a runner operation (the runner
 owns the filesystem); `vora-api` tracks snapshot→runner the way it tracks

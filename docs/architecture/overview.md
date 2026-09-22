@@ -49,6 +49,7 @@ snapshots, SDKs, multi-runner scheduling, Kubernetes.
 | `images` | read-only rootfs cache shared by all sandboxes |
 | `workspace` | per-sandbox mutable directories and mount points |
 | `sandbox.Store` | persisted metadata and state machine |
+| `snapshot` | captured writable state and forks (ADR 023) |
 | `telemetry` | structured logs and Prometheus metrics |
 
 ## Design principles
