@@ -2,10 +2,16 @@ package runner
 
 import (
 	"context"
+	"io"
 	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+
+	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/sandbox"
 )
@@ -41,5 +47,148 @@ func TestUsageDeltaWithoutBaselineIsZero(t *testing.T) {
 	cpu, peak := s.usageDelta(context.Background(), nil, nil, usageBaseline{})
 	if cpu != 0 || peak != 0 {
 		t.Fatalf("cpu=%d peak=%d, want 0/0", cpu, peak)
+	}
+}
+
+type fakeHandle struct{ id string }
+
+func (h fakeHandle) ID() string { return h.id }
+
+// fakeExecStream yields its chunks, then holds the stream open before EOF so a
+// test can observe external state at the exact moment the client would have
+// seen the exit chunk.
+type fakeExecStream struct {
+	chunks  []runtime.ExecChunk
+	i       int
+	release chan struct{}
+	once    sync.Once
+}
+
+func (f *fakeExecStream) Recv() (runtime.ExecChunk, error) {
+	if f.i < len(f.chunks) {
+		c := f.chunks[f.i]
+		f.i++
+		return c, nil
+	}
+	<-f.release
+	return runtime.ExecChunk{}, io.EOF
+}
+
+func (f *fakeExecStream) Close() error {
+	f.once.Do(func() { close(f.release) })
+	return nil
+}
+
+type fakeExecBackend struct{ stream *fakeExecStream }
+
+func (b *fakeExecBackend) Name() string { return "fake" }
+func (b *fakeExecBackend) Capabilities() runtime.Capabilities {
+	return runtime.Capabilities{EnforcesResourceLimits: true, NetworkModes: []runtime.NetworkMode{runtime.NetworkNone}}
+}
+func (b *fakeExecBackend) Create(_ context.Context, spec runtime.SandboxSpec) (runtime.Handle, error) {
+	return fakeHandle{id: spec.ID}, nil
+}
+func (b *fakeExecBackend) Start(context.Context, runtime.Handle) error { return nil }
+func (b *fakeExecBackend) Exec(context.Context, runtime.Handle, runtime.ExecRequest) (runtime.ExecStream, error) {
+	return b.stream, nil
+}
+func (b *fakeExecBackend) Signal(context.Context, runtime.Handle, int32) error { return nil }
+func (b *fakeExecBackend) Stats(context.Context, runtime.Handle) (*runtime.Stats, error) {
+	return &runtime.Stats{}, nil
+}
+func (b *fakeExecBackend) Stop(context.Context, runtime.Handle) error    { return nil }
+func (b *fakeExecBackend) Destroy(context.Context, runtime.Handle) error { return nil }
+
+// execServerStream captures what a gRPC stream would hand a client.
+type execServerStream struct {
+	grpc.ServerStream
+	mu   sync.Mutex
+	sent []*v1.ExecChunk
+	got  chan struct{}
+}
+
+func (s *execServerStream) Context() context.Context { return context.Background() }
+func (s *execServerStream) Send(c *v1.ExecChunk) error {
+	s.mu.Lock()
+	s.sent = append(s.sent, c)
+	s.mu.Unlock()
+	select {
+	case s.got <- struct{}{}:
+	default:
+	}
+	return nil
+}
+func (s *execServerStream) exitSeen() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.sent {
+		if c.GetExit() != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// TestExecRecordPersistsBeforeExitChunk pins the ordering invariant: clients
+// act on the exit chunk the instant it arrives (the API closes its response
+// right there and callers destroy the sandbox), so the exec record must be on
+// disk before the chunk is forwarded. Recording afterwards raced teardown and
+// resurrected sandboxes/<id>/logs inside deleted state.
+func TestExecRecordPersistsBeforeExitChunk(t *testing.T) {
+	stream := &fakeExecStream{
+		chunks:  []runtime.ExecChunk{{Exit: &runtime.ExecResult{ExitCode: 7, Reason: runtime.ReasonTimeout}}},
+		release: make(chan struct{}),
+	}
+	reg := runtime.NewRegistry()
+	if err := reg.Register(&fakeExecBackend{stream: stream}); err != nil {
+		t.Fatal(err)
+	}
+	s := testServer(t, reg)
+
+	// A cache-layout rootfs so StartSandbox resolves the image without containerd.
+	if err := os.MkdirAll(filepath.Join(s.cfg.StateDir, "images", "img", "latest", "rootfs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	created, err := s.CreateSandbox(ctx, &v1.CreateSandboxRequest{Spec: &v1.SandboxSpec{
+		SandboxId: "sbx_order", Image: "img", Backend: "fake",
+		Resources: &v1.ResourceLimits{CpuMillis: 100, MemoryBytes: 1 << 20, Pids: 4},
+		Network:   &v1.NetworkPolicy{Mode: v1.NetworkMode_NETWORK_NONE},
+	}})
+	if err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+	if _, err := s.StartSandbox(ctx, &v1.StartSandboxRequest{SandboxId: created.GetSandbox().GetId()}); err != nil {
+		t.Fatalf("StartSandbox: %v", err)
+	}
+
+	ss := &execServerStream{got: make(chan struct{}, 8)}
+	done := make(chan error, 1)
+	go func() {
+		done <- s.ExecSandbox(&v1.ExecSandboxRequest{SandboxId: "sbx_order", Exec: &v1.ExecRequest{Command: "true"}}, ss)
+	}()
+
+	deadline := time.After(5 * time.Second)
+	for !ss.exitSeen() {
+		select {
+		case <-ss.got:
+		case <-deadline:
+			t.Fatal("exit chunk was never forwarded")
+		}
+	}
+
+	// The moment a client could see the exit, the record must be readable.
+	execs, err := s.GetSandboxExecs(ctx, &v1.GetSandboxExecsRequest{SandboxId: "sbx_order"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(execs.GetExecs()) != 1 || execs.GetExecs()[0].GetReason() != v1.ExitReason_TIMEOUT_EXCEEDED {
+		t.Fatalf("exec records at exit-chunk time = %v, want the finished record already persisted", execs.GetExecs())
+	}
+
+	stream.once.Do(func() { close(stream.release) })
+	if err := <-done; err != nil {
+		t.Fatalf("ExecSandbox: %v", err)
 	}
 }
