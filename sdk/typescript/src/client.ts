@@ -1,5 +1,6 @@
 import { Transport } from "./http.js";
 import { Sandbox } from "./sandbox.js";
+import { Snapshots } from "./snapshots.js";
 import { decodeSandboxInfo, encodeSandboxSpec } from "./types.js";
 import type { CreateSandboxOptions, SandboxInfo } from "./types.js";
 
@@ -19,11 +20,14 @@ export interface ListSandboxesOptions {
 /** Entry point: `const vora = new Vora({ apiKey })`. */
 export class Vora {
   readonly sandboxes: Sandboxes;
+  readonly snapshots: Snapshots;
 
   constructor(options: VoraOptions = {}) {
     const baseUrl = options.baseUrl ?? env("VORA_API_URL") ?? "http://127.0.0.1:9300";
     const apiKey = options.apiKey ?? env("VORA_API_KEY");
-    this.sandboxes = new Sandboxes(new Transport({ baseUrl, apiKey, fetch: options.fetch }));
+    const transport = new Transport({ baseUrl, apiKey, fetch: options.fetch });
+    this.sandboxes = new Sandboxes(transport);
+    this.snapshots = new Snapshots(transport);
   }
 }
 
