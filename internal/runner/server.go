@@ -408,9 +408,17 @@ func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStrea
 
 	code := 0
 	reason := runtime.ReasonExited
-	if exit != nil {
+	switch {
+	case exit != nil:
 		code = exit.ExitCode
 		reason = exit.Reason
+	default:
+		// EOF with no exit record is a killed run (watchdog, timeout, agent
+		// death) — never a silent success.
+		cpu, peak := s.usageDelta(stream.Context(), backend, h, baseline)
+		s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure, cpu, peak)
+		s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure)).Inc()
+		return status.Error(codes.Internal, "exec stream ended without an exit record (the run was killed)")
 	}
 	cpu, peak := s.usageDelta(stream.Context(), backend, h, baseline)
 	s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, code, reason, cpu, peak)

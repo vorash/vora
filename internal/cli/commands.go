@@ -457,9 +457,13 @@ func (a *app) runExec(ctx context.Context, c client.API, id string, req *v1.Exec
 		return 0, err
 	}
 	var exit int32
+	sawExit := false
 	for {
 		chunk, err := stream.Recv()
 		if err == io.EOF {
+			if !sawExit {
+				return exit, fmt.Errorf("exec stream ended without an exit record (the run was killed)")
+			}
 			return exit, nil
 		}
 		if err != nil {
@@ -472,6 +476,7 @@ func (a *app) runExec(ctx context.Context, c client.API, id string, req *v1.Exec
 			_, _ = stderr.Write(b)
 		}
 		if e := chunk.GetExit(); e != nil {
+			sawExit = true
 			exit = e.GetExitCode()
 		}
 	}
