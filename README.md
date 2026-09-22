@@ -63,6 +63,13 @@ snapshots. Written in Go, with no Kubernetes in the path.
   see [Limitations](#limitations-honest).
 - State persistence, a **TTL reaper**, and startup **reconciliation** (incl.
   reaping orphaned `runsc` containers and systemd units).
+- **Snapshots and forks** ([ADR 023](docs/adr/023-snapshot-fork.md)).
+  `vora snapshot create` captures a sandbox's writable state live and
+  crash-consistent while it runs; `vora snapshot fork` starts independent
+  sandboxes from the copy — the fan-out primitive for parallel agents.
+  Snapshots outlive their source sandbox, and a fork restores them as what
+  they are (workload-authored archives: never followed, never able to write
+  outside its own writable roots).
 - **Audit trail** behind a `Store` interface: local JSONL, or **PostgreSQL /
   Supabase** (`VORA_AUDIT_DSN`), with lifecycle events, per-execution records,
   and restricted-network decisions (`vora logs --egress`).
@@ -170,6 +177,22 @@ pid limit: 0
 $ vora sandbox destroy sbx_01M2NVHE1KRD8JT3D6QG6R0EW3
 Destroyed sbx_01M2NVHE1KRD8JT3D6QG6R0EW3
 ```
+
+### Snapshot and fork
+
+```console
+$ vora snapshot create sbx_01M2NVHE1KRD8JT3D6QG6R0EW3
+Snapshot created: snap_01M2PE4G7QW3X8Y5Z6A7B8C9D0 (18432 bytes)
+
+$ vora snapshot fork snap_01M2PE4G7QW3X8Y5Z6A7B8C9D0
+Sandbox forked: sbx_01M2PF2K4M6N8P0Q2R4S6T8V0W
+
+$ vora exec sbx_01M2PF2K4M6N8P0Q2R4S6T8V0W -- ls /workspace
+main.py
+```
+
+The fork inherits the source's spec verbatim and sees the writable state as of
+the snapshot; its writes are invisible to its siblings from the first one.
 
 ### Brokered credentials
 
@@ -550,7 +573,8 @@ requirement (`/etc/resolv.conf` must exist in the image layers for
 | v0.5 | External CLI plugin dispatch, API files routes, `DiskBytes` project quota (ADR 015), `NetworkFull`/`NetworkPrivate` (ADR 016), gVisor `NetworkRestricted` (ADR 017), enriched execution traces |
 | v0.6 | bwrap seccomp deny-list (ADR 018), OpenTelemetry (ADR 019), image signing (ADR 020), capacity-aware placement (ADR 021), reverse tunnel for NAT'd runners (ADR 022) |
 | **v0.7 (this)** | **TypeScript SDK (`sdk/typescript`), MCP server (`sdk/mcp`), OpenAI Agents adapter (`integrations/openai-agents`), stdin forwarding for `vora exec`** |
-| v1.0 | Firecracker microVM tier, snapshots/forks |
+| v0.8 | Sandbox snapshots and forks ([ADR 023](docs/adr/023-snapshot-fork.md)) |
+| v1.0 | Firecracker microVM tier |
 
 Host deployment is [vora-ansible](https://github.com/vorash/vora-ansible).
 

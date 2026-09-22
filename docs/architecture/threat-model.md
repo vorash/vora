@@ -79,6 +79,7 @@ infallible; the design minimises the trusted surface.
 | Credential exposure on the control-plane channel | a brokered create is refused when the API-to-runner channel has no transport encryption, unless `VORA_ALLOW_INSECURE_BROKER=1`; the runner refuses the same request over a plaintext endpoint | credentials |
 | Sandbox survives runner death | in-sandbox agent exits when the runner disappears; reconciler reaps orphans | lifecycle |
 | Malicious image | image rootfs is data only, read-only, no execution at build time | supply chain |
+| Hostile snapshot archive | restore refuses traversal and special-file entries, never follows a symlink, and fails loudly: a fork's workload-authored state cannot write outside its own writable roots (ADR 023) | storage |
 | Malicious CLI plugin on `$PATH` | `vora <name>` dispatches only to a strictly named `vora-<name>` resolved with `exec.LookPath`: no shell, no config-supplied command line, built-ins and Vora's own companion binaries always win, and `VORA_DISABLE_PLUGINS=1` opts out. Same trust model as `git`/`kubectl` — a writable early `$PATH` already implies code execution. | CLI |
 
 Credential brokering is delivered for bwrap (ADR 013) and its decisions appear in

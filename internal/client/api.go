@@ -22,6 +22,11 @@ type API interface {
 	Egress(ctx context.Context, id string) ([]*v1.SandboxEgress, error)
 	GetFile(ctx context.Context, id, path string) ([]byte, error)
 	PutFile(ctx context.Context, id, path string, content []byte, createParents bool) (int64, error)
+	SnapshotSandbox(ctx context.Context, id string) (*v1.Snapshot, error)
+	GetSnapshot(ctx context.Context, id string) (*v1.Snapshot, error)
+	ListSnapshots(ctx context.Context) ([]*v1.Snapshot, error)
+	DeleteSnapshot(ctx context.Context, id string) error
+	ForkSnapshot(ctx context.Context, id string) (*v1.Sandbox, error)
 	Exec(ctx context.Context, req *v1.ExecSandboxRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ExecChunk], error)
 	Close() error
 }

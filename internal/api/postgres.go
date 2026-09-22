@@ -48,6 +48,15 @@ alter table sandbox_routes add column if not exists tenant_id text not null defa
 alter table sandbox_routes add column if not exists cpu_millis bigint not null default 0;
 alter table sandbox_routes add column if not exists memory_bytes bigint not null default 0;
 create index if not exists sandbox_routes_tenant_idx on sandbox_routes (tenant_id);
+
+create table if not exists snapshot_routes (
+  snapshot_id text primary key,
+  runner_id   text not null,
+  tenant_id   text not null default '',
+  sandbox_id  text not null default '',
+  created_at  timestamptz not null default now()
+);
+create index if not exists snapshot_routes_tenant_idx on snapshot_routes (tenant_id);
 `
 
 // PostgresStore is a persistent Store backed by PostgreSQL/Supabase.
@@ -245,5 +254,29 @@ func (s *PostgresStore) ListRoutes(ctx context.Context) ([]SandboxRoute, error) 
 
 func (s *PostgresStore) DeleteRoute(ctx context.Context, sandboxID string) error {
 	_, err := s.pool.Exec(ctx, `delete from sandbox_routes where sandbox_id = $1`, sandboxID)
+	return err
+}
+
+func (s *PostgresStore) SetSnapshotRoute(ctx context.Context, route SnapshotRoute) error {
+	_, err := s.pool.Exec(ctx,
+		`insert into snapshot_routes (snapshot_id, runner_id, tenant_id, sandbox_id) values ($1,$2,$3,$4)
+		 on conflict (snapshot_id) do update set runner_id = excluded.runner_id, tenant_id = excluded.tenant_id,
+		   sandbox_id = excluded.sandbox_id`,
+		route.SnapshotID, route.RunnerID, route.TenantID, route.SandboxID)
+	return err
+}
+
+func (s *PostgresStore) SnapshotRoute(ctx context.Context, snapshotID string) (SnapshotRoute, error) {
+	route := SnapshotRoute{SnapshotID: snapshotID}
+	err := s.pool.QueryRow(ctx, `select runner_id, tenant_id, sandbox_id from snapshot_routes where snapshot_id = $1`, snapshotID).
+		Scan(&route.RunnerID, &route.TenantID, &route.SandboxID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SnapshotRoute{}, ErrNotFound
+	}
+	return route, err
+}
+
+func (s *PostgresStore) DeleteSnapshotRoute(ctx context.Context, snapshotID string) error {
+	_, err := s.pool.Exec(ctx, `delete from snapshot_routes where snapshot_id = $1`, snapshotID)
 	return err
 }

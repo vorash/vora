@@ -12,12 +12,13 @@ import (
 
 // Identifier prefixes. Format: <prefix>_<ULID>, e.g. sbx_01J....
 const (
-	PrefixSandbox = "sbx"
-	PrefixRunner  = "run"
-	PrefixExec    = "exe"
-	PrefixAgent   = "agt"
-	PrefixAPIKey  = "key"
-	PrefixSecret  = "sec"
+	PrefixSandbox  = "sbx"
+	PrefixRunner   = "run"
+	PrefixExec     = "exe"
+	PrefixAgent    = "agt"
+	PrefixAPIKey   = "key"
+	PrefixSecret   = "sec"
+	PrefixSnapshot = "snap"
 )
 
 // entropy is monotonic so that identifiers created within the same millisecond
@@ -58,6 +59,9 @@ func NewAPIKeyID() string { return New(PrefixAPIKey) }
 // NewSecretID returns a new brokered credential identifier.
 func NewSecretID() string { return New(PrefixSecret) }
 
+// NewSnapshot returns a new snapshot identifier.
+func NewSnapshot() string { return New(PrefixSnapshot) }
+
 // Valid reports whether id is a well-formed prefixed ULID with one of the
 // known prefixes.
 func Valid(id string) bool {
@@ -66,7 +70,7 @@ func Valid(id string) bool {
 		return false
 	}
 	switch prefix {
-	case PrefixSandbox, PrefixRunner, PrefixExec, PrefixAgent, PrefixAPIKey, PrefixSecret:
+	case PrefixSandbox, PrefixRunner, PrefixExec, PrefixAgent, PrefixAPIKey, PrefixSecret, PrefixSnapshot:
 	default:
 		return false
 	}

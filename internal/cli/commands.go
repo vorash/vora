@@ -20,6 +20,151 @@ func (a *app) sandboxCmd() *cobra.Command {
 	return cmd
 }
 
+func (a *app) snapshotCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "snapshot", Short: "Capture sandbox state and fork it"}
+	cmd.AddCommand(a.snapshotCreateCmd(), a.snapshotListCmd(), a.snapshotInspectCmd(), a.snapshotRmCmd(), a.snapshotForkCmd())
+	return cmd
+}
+
+func (a *app) snapshotCreateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "create <sandbox-id>",
+		Short: "Snapshot a sandbox's writable state (live, crash-consistent)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, ctx, cancel, err := a.dial()
+			if err != nil {
+				return err
+			}
+			defer cancel()
+			defer c.Close()
+
+			snap, err := c.SnapshotSandbox(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			if a.json {
+				return a.jsonOut(snap)
+			}
+			fmt.Printf("Snapshot created: %s (%d bytes)\n", snap.GetId(), snap.GetBytes())
+			return nil
+		},
+	}
+}
+
+func (a *app) snapshotListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "ls",
+		Aliases: []string{"list"},
+		Short:   "List snapshots",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			c, ctx, cancel, err := a.dial()
+			if err != nil {
+				return err
+			}
+			defer cancel()
+			defer c.Close()
+
+			snaps, err := c.ListSnapshots(ctx)
+			if err != nil {
+				return err
+			}
+			if a.json {
+				return a.jsonOut(&v1.ListSnapshotsResponse{Snapshots: snaps})
+			}
+			if len(snaps) == 0 {
+				fmt.Println("no snapshots")
+				return nil
+			}
+			fmt.Printf("%-30s %-30s %-12s %s\n", "ID", "SANDBOX", "BYTES", "CREATED")
+			for _, snap := range snaps {
+				created := time.UnixMilli(snap.GetCreatedAtUnixMs()).Format(time.RFC3339)
+				fmt.Printf("%-30s %-30s %-12d %s\n", snap.GetId(), snap.GetSandboxId(), snap.GetBytes(), created)
+			}
+			return nil
+		},
+	}
+}
+
+func (a *app) snapshotInspectCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "inspect <snapshot-id>",
+		Short: "Show a snapshot",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, ctx, cancel, err := a.dial()
+			if err != nil {
+				return err
+			}
+			defer cancel()
+			defer c.Close()
+
+			snap, err := c.GetSnapshot(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			if a.json {
+				return a.jsonOut(snap)
+			}
+			fmt.Printf("id:       %s\n", snap.GetId())
+			fmt.Printf("sandbox:  %s\n", snap.GetSandboxId())
+			fmt.Printf("image:    %s\n", snap.GetSpec().GetImage())
+			fmt.Printf("bytes:    %d\n", snap.GetBytes())
+			fmt.Printf("runner:   %s\n", snap.GetRunnerId())
+			fmt.Printf("created:  %s\n", time.UnixMilli(snap.GetCreatedAtUnixMs()).Format(time.RFC3339))
+			return nil
+		},
+	}
+}
+
+func (a *app) snapshotRmCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "rm <snapshot-id>",
+		Aliases: []string{"delete"},
+		Short:   "Delete a snapshot (forks are unaffected)",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, ctx, cancel, err := a.dial()
+			if err != nil {
+				return err
+			}
+			defer cancel()
+			defer c.Close()
+			if err := c.DeleteSnapshot(ctx, args[0]); err != nil {
+				return err
+			}
+			fmt.Printf("Deleted %s\n", args[0])
+			return nil
+		},
+	}
+}
+
+func (a *app) snapshotForkCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "fork <snapshot-id>",
+		Short: "Create and start a sandbox from a snapshot",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, ctx, cancel, err := a.dial()
+			if err != nil {
+				return err
+			}
+			defer cancel()
+			defer c.Close()
+
+			sb, err := c.ForkSnapshot(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			if a.json {
+				return a.jsonOut(sb)
+			}
+			fmt.Printf("Sandbox forked: %s\n", sb.GetId())
+			return nil
+		},
+	}
+}
+
 func (a *app) sandboxCreateCmd() *cobra.Command {
 	var (
 		image, memory, cpu, network, ttl string

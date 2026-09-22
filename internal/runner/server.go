@@ -25,6 +25,7 @@ import (
 	"github.com/vorash/vora/internal/quota"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/sandbox"
+	"github.com/vorash/vora/internal/snapshot"
 	"github.com/vorash/vora/internal/telemetry"
 	"github.com/vorash/vora/internal/ulid"
 	"github.com/vorash/vora/internal/workspace"
@@ -39,6 +40,7 @@ type Server struct {
 	registry   *runtime.Registry
 	images     *images.Resolver
 	workspaces *workspace.Manager
+	snapshots  *snapshot.Store
 	quota      *quota.Manager
 	audit      audit.Store
 	runnerID   string
@@ -76,6 +78,7 @@ func NewServer(cfg config.Config, store *sandbox.Store, registry *runtime.Regist
 		registry:    registry,
 		images:      images.NewResolver(cfg, logger),
 		workspaces:  workspaces,
+		snapshots:   snapshot.NewStore(cfg.SnapshotsDir()),
 		quota:       quota.New(cfg.SandboxesDir()),
 		audit:       jsonl.New(workspaces.LogsDir),
 		runnerID:    runnerID,

@@ -228,6 +228,48 @@ func (c *HTTPClient) PutFile(ctx context.Context, id, path string, content []byt
 	return body.BytesWritten, nil
 }
 
+// SnapshotSandbox captures a sandbox's writable state through vora-api.
+func (c *HTTPClient) SnapshotSandbox(ctx context.Context, id string) (*v1.Snapshot, error) {
+	snap := &v1.Snapshot{}
+	if err := c.do(ctx, http.MethodPost, "/v1/sandboxes/"+id+"/snapshot", nil, snap); err != nil {
+		return nil, err
+	}
+	return snap, nil
+}
+
+// GetSnapshot returns a snapshot by id.
+func (c *HTTPClient) GetSnapshot(ctx context.Context, id string) (*v1.Snapshot, error) {
+	snap := &v1.Snapshot{}
+	if err := c.do(ctx, http.MethodGet, "/v1/snapshots/"+id, nil, snap); err != nil {
+		return nil, err
+	}
+	return snap, nil
+}
+
+// ListSnapshots lists snapshots visible to the caller's tenant.
+func (c *HTTPClient) ListSnapshots(ctx context.Context) ([]*v1.Snapshot, error) {
+	resp := &v1.ListSnapshotsResponse{}
+	if err := c.do(ctx, http.MethodGet, "/v1/snapshots", nil, resp); err != nil {
+		return nil, err
+	}
+	return resp.GetSnapshots(), nil
+}
+
+// DeleteSnapshot removes a snapshot and its archive.
+func (c *HTTPClient) DeleteSnapshot(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/snapshots/"+id, nil, nil)
+}
+
+// ForkSnapshot creates and starts a sandbox from a snapshot. The control plane
+// resolves the inherited spec's broker aliases itself.
+func (c *HTTPClient) ForkSnapshot(ctx context.Context, id string) (*v1.Sandbox, error) {
+	sb := &v1.Sandbox{}
+	if err := c.do(ctx, http.MethodPost, "/v1/snapshots/"+id+"/fork", nil, sb); err != nil {
+		return nil, err
+	}
+	return sb, nil
+}
+
 // Exec starts a command and returns an NDJSON-backed stream.
 func (c *HTTPClient) Exec(ctx context.Context, req *v1.ExecSandboxRequest, _ ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ExecChunk], error) {
 	data, err := protojson.Marshal(req.GetExec())

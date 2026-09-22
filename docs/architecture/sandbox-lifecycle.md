@@ -110,6 +110,15 @@ termination reasons are read from the sandbox cgroup:
   3. leftover `vora-sbx_*` systemd units are stopped and reset.
 - Handles are in-memory; exec after a restart requires a new sandbox.
 
+## Snapshots and forks
+
+A snapshot captures a RUNNING or stopped sandbox's writable state
+(crash-consistent; ADR 023) and a fork is an ordinary create whose workspace
+is restored from that copy instead of starting empty. The fork goes through
+the same `REQUESTED → … → RUNNING` path and gets a fresh TTL; the snapshot
+record outlives the source sandbox, so forking after the source is gone is
+valid.
+
 ## Cleanup guarantees
 
 Destroying a sandbox must: stop the unit, kill the process tree, remove the

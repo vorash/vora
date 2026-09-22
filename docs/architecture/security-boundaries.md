@@ -40,7 +40,7 @@ scan (ADR 015); `TestDiskQuotaBoundsHostWrites` covers the hard path.
 
 | Host resource | Protection |
 | ------------- | ---------- |
-| Filesystem | rootfs mounted read-only; host paths never bind-mounted; no host `/` exposure |
+| Filesystem | rootfs mounted read-only; host paths never bind-mounted; no host `/` exposure; snapshot restore never writes outside a sandbox's writable roots and never follows a symlink ([ADR 023](../adr/023-snapshot-fork.md)) |
 | Kernel | bwrap: unprivileged user namespace + a seccomp deny-list installed by `vora-init` (ADR 018). gVisor: user-space kernel (KVM) |
 | PID 1 / init | sandbox has its own PID namespace |
 | Devices | minimal `/dev` from Bubblewrap / gVisor OCI spec |
