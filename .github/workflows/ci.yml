@@ -83,6 +83,28 @@ jobs:
       - name: Test
         run: npm test
 
+  python:
+    name: python sdk (vorash)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -e .[dev]
+        working-directory: sdk/python
+
+      - name: Typecheck
+        run: mypy src
+        working-directory: sdk/python
+
+      - name: Test
+        run: pytest
+        working-directory: sdk/python
+
   isolation:
     name: isolation
     runs-on: ubuntu-latest

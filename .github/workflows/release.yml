@@ -66,9 +66,18 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Build release artifacts
         run: ./scripts/release.sh --version "${{ needs.resolve.outputs.version }}"
+
+      - name: Build the Python SDK artifacts
+        run: |
+          python -m pip install build
+          python -m build
+        working-directory: sdk/python
 
       - name: Verify checksums and the reported version
         run: |
@@ -88,6 +97,8 @@ jobs:
             dist/vora-api
             dist/SHA256SUMS
             "dist/vora_${VERSION}_linux_amd64.tar.gz"
+            sdk/python/dist/vorash-*.whl
+            sdk/python/dist/vorash-*.tar.gz
           )
 
           # The release stays a draft until every asset is uploaded, so a consumer
