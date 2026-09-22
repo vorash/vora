@@ -90,9 +90,10 @@ tracing** across API → runner → runtime (off unless
   `VORA_DISABLE_PLUGINS=1` turns dispatch off.
 - **Agent-facing tooling.** A TypeScript SDK for the HTTP API
   (`sdk/typescript`), an MCP server that exposes sandboxes to coding agents
-  (`sdk/mcp`), and an OpenAI Agents adapter that runs agent code inside
-  sandboxes (`integrations/openai-agents`); `vora exec` forwards stdin to the
-  command it runs.
+  (`sdk/mcp`), an OpenAI Agents adapter that runs agent code inside
+  sandboxes (`integrations/openai-agents`), and a TypeSafe JEV decision-model
+  tool for agents (`integrations/typesafe-jev`, ADR 024); `vora exec` forwards
+  stdin to the command it runs.
 
 ## Architecture
 
@@ -379,7 +380,7 @@ examples/       real-world recipes: CI gates, autograders, plugin runners, fan-o
 images/         rootfs image definitions (base, python, node)
 sdk/typescript/ TypeScript SDK for the HTTP API
 sdk/mcp/        MCP server exposing sandboxes to coding agents
-integrations/   adapters for agent frameworks (OpenAI Agents)
+integrations/   adapters for agent frameworks (OpenAI Agents, TypeSafe JEV)
 scripts/        image build and benchmark helpers
 deploy/         systemd units for the system install (vora-ansible is its own repo)
 ```
