@@ -385,37 +385,46 @@ func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStrea
 	defer es.Close()
 
 	var stdoutBytes, stderrBytes int64
-	var exit *runtime.ExecResult
+	var recorded bool
 	for {
 		chunk, err := es.Recv()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			cpu, peak := s.usageDelta(stream.Context(), backend, h, baseline)
-			s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure, cpu, peak)
+			if !recorded {
+				cpu, peak := s.usageDelta(stream.Context(), backend, h, baseline)
+				s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure, cpu, peak)
+				s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure)).Inc()
+			}
 			return status.Errorf(codes.Internal, "exec stream: %v", err)
 		}
 		stdoutBytes += int64(len(chunk.Stdout))
 		stderrBytes += int64(len(chunk.Stderr))
-		if chunk.Exit != nil {
-			exit = chunk.Exit
+		if chunk.Exit != nil && !recorded {
+			// Persist before observing: the client may destroy the sandbox the
+			// moment it sees the exit chunk (the API closes its response right
+			// after forwarding it), so the record must be on disk first. The exit
+			// chunk is final, so the byte totals are complete here.
+			cpu, peak := s.usageDelta(stream.Context(), backend, h, baseline)
+			s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, chunk.Exit.ExitCode, chunk.Exit.Reason, cpu, peak)
+			s.metrics.ExecTotal.WithLabelValues("ok").Inc()
+			recorded = true
 		}
 		if err := stream.Send(execChunkToProto(chunk)); err != nil {
 			return err
 		}
 	}
 
-	code := 0
-	reason := runtime.ReasonExited
-	if exit != nil {
-		code = exit.ExitCode
-		reason = exit.Reason
+	if recorded {
+		return nil
 	}
+	// EOF with no exit record is a killed run (watchdog, timeout, agent
+	// death) — never a silent success.
 	cpu, peak := s.usageDelta(stream.Context(), backend, h, baseline)
-	s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, code, reason, cpu, peak)
-	s.metrics.ExecTotal.WithLabelValues("ok").Inc()
-	return nil
+	s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure, cpu, peak)
+	s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure)).Inc()
+	return status.Error(codes.Internal, "exec stream ended without an exit record (the run was killed)")
 }
 
 // recordExec persists an execution audit record. Failures are logged, not

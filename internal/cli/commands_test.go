@@ -85,13 +85,20 @@ type fakeRunner struct {
 	mu    sync.Mutex
 	stdin []byte
 	execs int
+	// killNext makes the next exec end without an exit chunk, the way a killed
+	// run (timeout, watchdog, agent death) does.
+	killNext bool
 }
 
 func (f *fakeRunner) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStreamingServer[v1.ExecChunk]) error {
 	f.mu.Lock()
 	f.stdin = append([]byte(nil), req.GetExec().GetStdin()...)
 	f.execs++
+	killed := f.killNext
 	f.mu.Unlock()
+	if killed {
+		return nil
+	}
 	return stream.Send(&v1.ExecChunk{Payload: &v1.ExecChunk_Exit{Exit: &v1.ExecExit{ExitCode: 0}}})
 }
 
@@ -130,6 +137,29 @@ func TestExecForwardsStdinToSandbox(t *testing.T) {
 	}
 	if got := string(f.sentStdin()); got != "STDIN-PROBE-1471" {
 		t.Fatalf("stdin reaching the sandbox = %q, want %q", got, "STDIN-PROBE-1471")
+	}
+}
+
+// TestExecFailsLoudWhenRunIsKilled pins the contract with killed runs: a
+// stream that ends without an exit record must never look like success (exit 0
+// would silently pass every CI gate built on `vora exec`).
+func TestExecFailsLoudWhenRunIsKilled(t *testing.T) {
+	socket, f := startFakeRunner(t)
+	silenceStdout(t)
+	f.mu.Lock()
+	f.killNext = true
+	f.mu.Unlock()
+
+	var out, errBuf strings.Builder
+	code := run(
+		[]string{"--socket", socket, "exec", "sbx_probe", "--", "sh", "-c", "while :; do :; done"},
+		strings.NewReader(""), &out, &errBuf,
+	)
+	if code == 0 {
+		t.Fatalf("exit code = 0 for a killed run, want non-zero (stderr %q)", errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "without an exit record") {
+		t.Fatalf("stderr = %q, want the killed-run explanation", errBuf.String())
 	}
 }
 

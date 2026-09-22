@@ -137,6 +137,9 @@ type agent struct {
 	grace    time.Duration
 	logger   *slog.Logger
 	lastSeen atomic.Int64
+	// activeStreams counts open gRPC streams: a long silent exec is proof the
+	// runner is still there and must not trip the watchdog.
+	activeStreams atomic.Int64
 
 	// execMu serialises command execution against the orphan reaper, which
 	// must never reap a child the Go runtime is waiting on.
@@ -171,6 +174,8 @@ func (a *agent) unaryInterceptor(ctx context.Context, req any, _ *grpc.UnaryServ
 }
 func (a *agent) streamInterceptor(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 	a.touch()
+	a.activeStreams.Add(1)
+	defer a.activeStreams.Add(-1)
 	return handler(srv, ss)
 }
 
@@ -188,6 +193,10 @@ func (a *agent) watchdog() {
 		case <-a.done:
 			return
 		case <-ticker.C:
+			if a.activeStreams.Load() > 0 {
+				a.touch()
+				continue
+			}
 			last := time.Unix(0, a.lastSeen.Load())
 			if time.Since(last) > a.grace {
 				a.logger.Warn("runner detached, exiting", "idle_for", time.Since(last).String())
@@ -275,6 +284,17 @@ func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.Exe
 	a.trackPID(pgid, true)
 	defer a.trackPID(pgid, false)
 
+	// Enforce the caller's deadline here: this is the only layer that can kill
+	// the workload and still send an exit record over the open stream.
+	var timedOut atomic.Bool
+	if req.GetTimeoutSeconds() > 0 {
+		timer := time.AfterFunc(time.Duration(req.GetTimeoutSeconds())*time.Second, func() {
+			timedOut.Store(true)
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		})
+		defer timer.Stop()
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go streamPipe(&wg, stdout, sendChunk, func(b []byte) *v1.ExecChunk {
@@ -314,9 +334,13 @@ func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.Exe
 			return waitErr
 		}
 	}
+	reason := v1.ExitReason_EXITED
+	if timedOut.Load() {
+		reason = v1.ExitReason_TIMEOUT_EXCEEDED
+	}
 	return sendChunk(&v1.ExecChunk{Payload: &v1.ExecChunk_Exit{Exit: &v1.ExecExit{
 		ExitCode: int32(exitCode),
-		Reason:   v1.ExitReason_EXITED,
+		Reason:   reason,
 	}}})
 }
 
