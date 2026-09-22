@@ -31,6 +31,7 @@ architectural claims.
 | `docs/architecture/` | overview, sandbox lifecycle, security boundaries, threat model |
 | `deploy/systemd`, `scripts/`, `images/` | units, tooling, sandbox rootfs images |
 | `sdk/typescript/` | TypeScript SDK for the HTTP API; its own npm package and `vitest` suite |
+| `sdk/mcp/` | MCP server exposing the sandbox tools to coding agents, built on the SDK |
 
 ## Build & test
 

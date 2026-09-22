@@ -1,0 +1,54 @@
+{
+  "name": "@vorash/mcp",
+  "version": "0.6.0",
+  "description": "MCP server that exposes Vora sandboxes to coding agents",
+  "license": "MIT",
+  "type": "module",
+  "homepage": "https://github.com/vorash/vora/tree/main/sdk/mcp",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vorash/vora.git",
+    "directory": "sdk/mcp"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "vora-mcp": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "vora",
+    "mcp",
+    "sandbox",
+    "agents"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@vorash/sdk": "^0.6.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

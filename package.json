@@ -1,0 +1,15 @@
+{
+  "name": "vora-js",
+  "version": "0.0.0",
+  "private": true,
+  "description": "npm workspace for the Vora JavaScript/TypeScript packages",
+  "workspaces": [
+    "sdk/typescript",
+    "sdk/mcp"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @vorash/sdk && npm run build --workspace @vorash/mcp",
+    "typecheck": "npm run typecheck --workspace @vorash/sdk && npm run typecheck --workspace @vorash/mcp",
+    "test": "npm run test --workspace @vorash/sdk && npm run test --workspace @vorash/mcp"
+  }
+}

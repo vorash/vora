@@ -349,6 +349,7 @@ docs/           architecture docs, ADRs and benchmark reports
 tests/          integration, security and benchmark suites
 images/         rootfs image definitions (base, python, node)
 sdk/typescript/ TypeScript SDK for the HTTP API
+sdk/mcp/        MCP server exposing sandboxes to coding agents
 scripts/        image build and benchmark helpers
 deploy/         systemd units for the system install (vora-ansible is its own repo)
 ```
