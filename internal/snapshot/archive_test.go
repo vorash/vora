@@ -116,15 +116,13 @@ func TestRestoreRefusesEscape(t *testing.T) {
 		"bucket outside snapshot": {
 			{Name: "../evil", Typeflag: tar.TypeReg, Mode: 0o644},
 		},
-		"symlink pointing outside": {
-			{Name: WorkspaceDir + "/link", Typeflag: tar.TypeSymlink, Linkname: "../../../etc", Mode: 0o777},
-		},
-		"absolute symlink": {
-			{Name: WorkspaceDir + "/link", Typeflag: tar.TypeSymlink, Linkname: "/etc", Mode: 0o777},
-		},
 		"write through symlinked dir": {
 			{Name: WorkspaceDir + "/d", Typeflag: tar.TypeSymlink, Linkname: "x", Mode: 0o777},
 			{Name: WorkspaceDir + "/d/file", Typeflag: tar.TypeReg, Mode: 0o644},
+		},
+		"write through escaping symlinked dir": {
+			{Name: WorkspaceDir + "/d", Typeflag: tar.TypeSymlink, Linkname: "../../../etc", Mode: 0o777},
+			{Name: WorkspaceDir + "/d/passwd", Typeflag: tar.TypeReg, Mode: 0o644},
 		},
 		"hardlink": {
 			{Name: WorkspaceDir + "/l", Typeflag: tar.TypeLink, Linkname: "f", Mode: 0o644},
@@ -155,27 +153,32 @@ func TestRestoreRefusesEscape(t *testing.T) {
 	}
 }
 
-// TestRestoreReplacesLeafSymlinks proves a later entry cannot write *through* a
-// symlink an earlier entry placed at the same path: the symlink is replaced,
-// not followed.
-func TestRestoreReplacesLeafSymlinks(t *testing.T) {
+// TestRestoreSymlinksAreInert proves the two halves of the symlink contract:
+// an escaping link is restored verbatim (it is inert data — the workload can
+// create it at runtime anyway), but nothing is ever written *through* one.
+func TestRestoreSymlinksAreInert(t *testing.T) {
 	dst, _ := setupDirs(t)
 	if err := os.WriteFile(filepath.Join(dst[HomeDir], "victim"), []byte("safe"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	entries := []tar.Header{
-		{Name: WorkspaceDir + "/f", Typeflag: tar.TypeSymlink, Linkname: "../home/victim", Mode: 0o777},
-	}
-	// The symlink itself points at its own directory root's sibling; reject it
-	// up front so the write-through case is built from an in-root link instead.
-	if err := Restore(buildTar(t, entries), dst); err == nil {
-		t.Fatal("restore: accepted an escaping symlink")
-	}
 
-	entries = []tar.Header{
-		{Name: WorkspaceDir + "/f", Typeflag: tar.TypeSymlink, Linkname: "g", Mode: 0o777},
+	entries := []tar.Header{
+		// The archive's own view of "outside": a link that would escape on the
+		// host. Restored as a link, never dereferenced.
+		{Name: WorkspaceDir + "/f", Typeflag: tar.TypeSymlink, Linkname: "../home/victim", Mode: 0o777},
+		// A later entry at the same path must replace the link, not write
+		// through it.
 		{Name: WorkspaceDir + "/f", Typeflag: tar.TypeReg, Mode: 0o644},
 	}
+	// First just the link: restored verbatim.
+	only := buildTar(t, entries[:1])
+	if err := Restore(only, dst); err != nil {
+		t.Fatalf("restore: escaping symlink refused, want verbatim: %v", err)
+	}
+	if link, err := os.Readlink(filepath.Join(dst[WorkspaceDir], "f")); err != nil || link != "../home/victim" {
+		t.Fatalf("restored link = %q (%v), want ../home/victim", link, err)
+	}
+
 	if err := Restore(buildTar(t, entries), dst); err != nil {
 		t.Fatalf("restore: %v", err)
 	}

@@ -112,12 +112,14 @@ func skipVanished(err error) error {
 // Restore extracts a snapshot tar into dirs.
 //
 // A snapshot is untrusted input (the workload authored it), so extraction
-// refuses anything that could write outside the target directories: paths that
-// are absolute or traverse upwards, symlinks as path components, symlink
-// targets resolving outside their directory, and any non regular/dir/symlink
-// entry (hardlinks, devices, FIFOs). Failures are loud; no entry is silently
-// dropped. Only permission bits are restored — ownership and setuid bits are
-// not (the runner is unprivileged and setuid in a snapshot is a footgun).
+// never writes outside the target directories and never follows a symlink:
+// paths that are absolute or traverse upwards are refused or contained,
+// symlinked path components are refused, and leaves are replaced rather than
+// written through. Symlinks are restored verbatim — an escaping link is inert
+// data the workload could create at runtime anyway. Non regular/dir/symlink
+// entries (hardlinks, devices, FIFOs) fail loudly. Only permission bits are
+// restored — ownership and setuid bits are not (the runner is unprivileged and
+// setuid in a snapshot is a footgun).
 func Restore(r io.Reader, dirs Folders) error {
 	tr := tar.NewReader(r)
 	for {
@@ -165,9 +167,6 @@ func Restore(r io.Reader, dirs Folders) error {
 				return err
 			}
 		case tar.TypeSymlink:
-			if err := safeLink(target, hdr.Linkname); err != nil {
-				return err
-			}
 			if err := replaceLeaf(target, func() error {
 				return os.Symlink(hdr.Linkname, target)
 			}); err != nil {
@@ -221,20 +220,6 @@ func safePath(root, target string) error {
 		if fi.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("snapshot: entry %q traverses a symlink", rel)
 		}
-	}
-	return nil
-}
-
-// safeLink rejects symlink targets that resolve outside the target's own root.
-func safeLink(target, link string) error {
-	if link == "" || filepath.IsAbs(link) {
-		return fmt.Errorf("snapshot: symlink %q has an absolute or empty target", target)
-	}
-	root := filepath.Dir(target)
-	resolved := filepath.Join(root, filepath.Clean(link))
-	if rel, err := filepath.Rel(root, resolved); err != nil ||
-		rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("snapshot: symlink %q points outside its directory", target)
 	}
 	return nil
 }
