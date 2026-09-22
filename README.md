@@ -89,7 +89,8 @@ tracing** across API → runner → runtime (off unless
   part of Vora without Vora depending on them. Built-in commands always win, and
   `VORA_DISABLE_PLUGINS=1` turns dispatch off.
 - **Agent-facing tooling.** A TypeScript SDK for the HTTP API
-  (`sdk/typescript`), an MCP server that exposes sandboxes to coding agents
+  (`sdk/typescript`), a Python SDK (`sdk/python`), an MCP server that exposes
+  sandboxes to coding agents
   (`sdk/mcp`), an OpenAI Agents adapter that runs agent code inside
   sandboxes (`integrations/openai-agents`), and a TypeSafe JEV decision-model
   tool for agents (`integrations/typesafe-jev`, ADR 024); `vora exec` forwards
@@ -379,6 +380,7 @@ tests/          integration, security and benchmark suites
 examples/       real-world recipes: CI gates, autograders, plugin runners, fan-out, agent tools
 images/         rootfs image definitions (base, python, node)
 sdk/typescript/ TypeScript SDK for the HTTP API
+sdk/python/    Python SDK for the HTTP API (PyPI: vorash, import: vora)
 sdk/mcp/        MCP server exposing sandboxes to coding agents
 integrations/   adapters for agent frameworks (OpenAI Agents, TypeSafe JEV)
 scripts/        image build and benchmark helpers
