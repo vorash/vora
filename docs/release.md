@@ -1,6 +1,6 @@
 # Releases and host artifacts
 
-Status: v0.4 · applies to `vora` releases cut by
+Status: v0.7 · applies to `vora` releases cut by
 [`.github/workflows/release.yml`](../.github/workflows/release.yml).
 
 ## What a release contains
