@@ -185,3 +185,48 @@ func (c *Client) SignalSandbox(ctx context.Context, id string, sig int32) error 
 	_, err := c.stub.SignalSandbox(ctx, &v1.SignalSandboxRequest{SandboxId: id, Signal: sig})
 	return err
 }
+
+// SnapshotSandbox captures a sandbox's writable state.
+func (c *Client) SnapshotSandbox(ctx context.Context, id string) (*v1.Snapshot, error) {
+	resp, err := c.stub.SnapshotSandbox(ctx, &v1.SnapshotSandboxRequest{SandboxId: id})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetSnapshot(), nil
+}
+
+// GetSnapshot returns a snapshot by id.
+func (c *Client) GetSnapshot(ctx context.Context, id string) (*v1.Snapshot, error) {
+	return c.stub.GetSnapshot(ctx, &v1.GetSnapshotRequest{SnapshotId: id})
+}
+
+// ListSnapshots lists snapshots.
+func (c *Client) ListSnapshots(ctx context.Context) ([]*v1.Snapshot, error) {
+	resp, err := c.stub.ListSnapshots(ctx, &v1.ListSnapshotsRequest{})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetSnapshots(), nil
+}
+
+// DeleteSnapshot removes a snapshot and its archive.
+func (c *Client) DeleteSnapshot(ctx context.Context, id string) error {
+	_, err := c.stub.DeleteSnapshot(ctx, &v1.DeleteSnapshotRequest{SnapshotId: id})
+	return err
+}
+
+// ForkSnapshot creates and starts a sandbox from a snapshot.
+func (c *Client) ForkSnapshot(ctx context.Context, id string) (*v1.Sandbox, error) {
+	return c.ForkSnapshotWithCredentials(ctx, id, nil)
+}
+
+// ForkSnapshotWithCredentials forks a snapshot and carries the resolved broker
+// credentials for the inherited spec's aliases. The credentials are used only
+// to build the fork's broker; they are never persisted.
+func (c *Client) ForkSnapshotWithCredentials(ctx context.Context, id string, creds []*v1.BrokerCredential) (*v1.Sandbox, error) {
+	resp, err := c.stub.ForkSnapshot(ctx, &v1.ForkSnapshotRequest{SnapshotId: id, BrokerSecrets: creds})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetSandbox(), nil
+}

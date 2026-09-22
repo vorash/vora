@@ -50,6 +50,11 @@ type RunnerClient interface {
 	Egress(ctx context.Context, id string) ([]*v1.SandboxEgress, error)
 	GetFile(ctx context.Context, id, path string) ([]byte, error)
 	PutFile(ctx context.Context, id, path string, content []byte, createParents bool) (int64, error)
+	SnapshotSandbox(ctx context.Context, id string) (*v1.Snapshot, error)
+	GetSnapshot(ctx context.Context, id string) (*v1.Snapshot, error)
+	ListSnapshots(ctx context.Context) ([]*v1.Snapshot, error)
+	DeleteSnapshot(ctx context.Context, id string) error
+	ForkSnapshotWithCredentials(ctx context.Context, id string, creds []*v1.BrokerCredential) (*v1.Sandbox, error)
 	Exec(ctx context.Context, req *v1.ExecSandboxRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ExecChunk], error)
 	Close() error
 }
@@ -214,6 +219,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/sandboxes/{id}/egress", s.auth(ScopeSandbox, s.egressSandbox))
 	mux.HandleFunc("GET /v1/sandboxes/{id}/files", s.auth(ScopeSandbox, s.getFile))
 	mux.HandleFunc("PUT /v1/sandboxes/{id}/files", s.auth(ScopeSandbox, s.putFile))
+	mux.HandleFunc("POST /v1/sandboxes/{id}/snapshot", s.auth(ScopeSandbox, s.snapshotSandbox))
+
+	mux.HandleFunc("GET /v1/snapshots", s.auth(ScopeSandbox, s.listSnapshots))
+	mux.HandleFunc("GET /v1/snapshots/{id}", s.auth(ScopeSandbox, s.getSnapshot))
+	mux.HandleFunc("DELETE /v1/snapshots/{id}", s.auth(ScopeSandbox, s.deleteSnapshot))
+	mux.HandleFunc("POST /v1/snapshots/{id}/fork", s.auth(ScopeSandbox, s.forkSnapshot))
 
 	mux.HandleFunc("GET /v1/runners", s.auth(ScopeAdmin, s.listRunners))
 	mux.HandleFunc("POST /v1/keys", s.auth(ScopeAdmin, s.createKey))
@@ -930,13 +941,18 @@ func (s *Server) runnerFor(ctx context.Context, sandboxID string) (RunnerClient,
 	if err != nil {
 		return nil, err
 	}
-	r, err := s.store.Runner(ctx, route.RunnerID)
+	return s.runnerByID(ctx, route.RunnerID)
+}
+
+// runnerByID returns a client for a registered runner.
+func (s *Server) runnerByID(ctx context.Context, runnerID string) (RunnerClient, error) {
+	r, err := s.store.Runner(ctx, runnerID)
 	if err != nil {
-		return nil, fmt.Errorf("api: runner %s unknown", route.RunnerID)
+		return nil, fmt.Errorf("api: runner %s unknown", runnerID)
 	}
 	rc, err := s.dialRunner(r)
 	if err != nil {
-		return nil, fmt.Errorf("api: runner %s unreachable: %w", route.RunnerID, err)
+		return nil, fmt.Errorf("api: runner %s unreachable: %w", runnerID, err)
 	}
 	return rc, nil
 }

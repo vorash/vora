@@ -94,6 +94,15 @@ type SandboxRoute struct {
 	MemoryBytes int64  `json:"memory_bytes,omitempty"`
 }
 
+// SnapshotRoute records which runner holds a snapshot and which tenant may
+// access it. The sandbox it was captured from may already be gone.
+type SnapshotRoute struct {
+	SnapshotID string `json:"snapshot_id"`
+	RunnerID   string `json:"runner_id"`
+	TenantID   string `json:"tenant_id"`
+	SandboxID  string `json:"sandbox_id"`
+}
+
 // Store persists control-plane state.
 type Store interface {
 	CreateKey(ctx context.Context, key APIKey) error
@@ -111,6 +120,10 @@ type Store interface {
 	Route(ctx context.Context, sandboxID string) (SandboxRoute, error)
 	ListRoutes(ctx context.Context) ([]SandboxRoute, error)
 	DeleteRoute(ctx context.Context, sandboxID string) error
+
+	SetSnapshotRoute(ctx context.Context, route SnapshotRoute) error
+	SnapshotRoute(ctx context.Context, snapshotID string) (SnapshotRoute, error)
+	DeleteSnapshotRoute(ctx context.Context, snapshotID string) error
 
 	Close() error
 }

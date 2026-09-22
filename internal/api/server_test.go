@@ -30,17 +30,21 @@ const (
 )
 
 type fakeRunner struct {
-	specs         []*v1.SandboxSpec
-	creds         [][]*v1.BrokerCredential
-	sandboxes     []*v1.Sandbox
-	chunks        []*v1.ExecChunk
-	createErr     error
-	startErr      error
-	destroyErr    error
-	destroyed     []string
-	destroyCtxErr error
-	files         map[string][]byte
-	closed        int
+	specs          []*v1.SandboxSpec
+	creds          [][]*v1.BrokerCredential
+	sandboxes      []*v1.Sandbox
+	chunks         []*v1.ExecChunk
+	createErr      error
+	startErr       error
+	destroyErr     error
+	destroyed      []string
+	destroyCtxErr  error
+	files          map[string][]byte
+	snapshotted    []string
+	deletedSnaps   []string
+	forked         []string
+	snapshotTenant string
+	closed         int
 }
 
 func (f *fakeRunner) CreateSandboxWithCredentials(_ context.Context, spec *v1.SandboxSpec, creds []*v1.BrokerCredential) (*v1.Sandbox, error) {
@@ -119,6 +123,45 @@ func (f *fakeRunner) Exec(_ context.Context, _ *v1.ExecSandboxRequest, _ ...grpc
 }
 
 func (f *fakeRunner) Close() error { f.closed++; return nil }
+
+func (f *fakeRunner) SnapshotSandbox(_ context.Context, id string) (*v1.Snapshot, error) {
+	f.snapshotted = append(f.snapshotted, id)
+	return &v1.Snapshot{
+		Id:        "snap_test",
+		SandboxId: id,
+		TenantId:  f.snapshotTenant,
+		RunnerId:  "run_test",
+		Spec:      &v1.SandboxSpec{SandboxId: id, Resources: &v1.ResourceLimits{CpuMillis: 1, MemoryBytes: 1}},
+	}, nil
+}
+
+func (f *fakeRunner) GetSnapshot(_ context.Context, id string) (*v1.Snapshot, error) {
+	return &v1.Snapshot{
+		Id:        id,
+		SandboxId: "sbx_test",
+		TenantId:  f.snapshotTenant,
+		RunnerId:  "run_test",
+		Spec:      &v1.SandboxSpec{SandboxId: "sbx_test", Resources: &v1.ResourceLimits{CpuMillis: 1, MemoryBytes: 1}},
+	}, nil
+}
+
+func (f *fakeRunner) ListSnapshots(_ context.Context) ([]*v1.Snapshot, error) {
+	return []*v1.Snapshot{{Id: "snap_test", SandboxId: "sbx_test", TenantId: f.snapshotTenant, RunnerId: "run_test", Spec: &v1.SandboxSpec{SandboxId: "sbx_test"}}}, nil
+}
+
+func (f *fakeRunner) DeleteSnapshot(_ context.Context, id string) error {
+	f.deletedSnaps = append(f.deletedSnaps, id)
+	return nil
+}
+
+func (f *fakeRunner) ForkSnapshotWithCredentials(_ context.Context, id string, _ []*v1.BrokerCredential) (*v1.Sandbox, error) {
+	f.forked = append(f.forked, id)
+	return &v1.Sandbox{
+		Id:    "sbx_fork",
+		State: v1.SandboxState_RUNNING,
+		Spec:  &v1.SandboxSpec{SandboxId: "sbx_fork", Resources: &v1.ResourceLimits{CpuMillis: 1, MemoryBytes: 1}},
+	}, nil
+}
 
 type fakeStream struct {
 	grpc.ClientStream

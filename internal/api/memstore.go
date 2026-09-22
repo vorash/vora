@@ -13,18 +13,20 @@ var ErrNotFound = errors.New("api: not found")
 
 // MemStore is an in-memory Store used for development and tests.
 type MemStore struct {
-	mu      sync.RWMutex
-	keys    map[string]APIKey
-	runners map[string]Runner
-	routes  map[string]SandboxRoute
+	mu         sync.RWMutex
+	keys       map[string]APIKey
+	runners    map[string]Runner
+	routes     map[string]SandboxRoute
+	snapRoutes map[string]SnapshotRoute
 }
 
 // NewMemStore returns an empty in-memory store.
 func NewMemStore() *MemStore {
 	return &MemStore{
-		keys:    map[string]APIKey{},
-		runners: map[string]Runner{},
-		routes:  map[string]SandboxRoute{},
+		keys:       map[string]APIKey{},
+		runners:    map[string]Runner{},
+		routes:     map[string]SandboxRoute{},
+		snapRoutes: map[string]SnapshotRoute{},
 	}
 }
 
@@ -161,6 +163,30 @@ func (m *MemStore) ListRoutes(_ context.Context) ([]SandboxRoute, error) {
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+func (m *MemStore) SetSnapshotRoute(_ context.Context, route SnapshotRoute) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.snapRoutes[route.SnapshotID] = route
+	return nil
+}
+
+func (m *MemStore) SnapshotRoute(_ context.Context, snapshotID string) (SnapshotRoute, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	route, ok := m.snapRoutes[snapshotID]
+	if !ok {
+		return SnapshotRoute{}, ErrNotFound
+	}
+	return route, nil
+}
+
+func (m *MemStore) DeleteSnapshotRoute(_ context.Context, snapshotID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.snapRoutes, snapshotID)
+	return nil
 }
 
 // Close implements Store.

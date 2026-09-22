@@ -85,6 +85,7 @@ func newRoot(a *app) *cobra.Command {
 
 	root.AddCommand(
 		a.sandboxCmd(),
+		a.snapshotCmd(),
 		a.execCmd(),
 		a.cpCmd(),
 		a.logsCmd(),
