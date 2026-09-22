@@ -441,6 +441,11 @@ func (b *Backend) Exec(ctx context.Context, h runtime.Handle, req runtime.ExecRe
 	}
 
 	execCtx, cancel := context.WithCancel(ctx)
+	if req.Timeout > 0 {
+		var timeoutCancel context.CancelFunc
+		execCtx, timeoutCancel = context.WithTimeout(ctx, req.Timeout)
+		cancel = timeoutCancel
+	}
 	args := append(b.globalFlags("none"), "exec", hd.id, req.Command)
 	args = append(args, req.Args...)
 	cmd := exec.CommandContext(execCtx, b.runsc, args...)
@@ -462,7 +467,7 @@ func (b *Backend) Exec(ctx context.Context, h runtime.Handle, req runtime.ExecRe
 		return nil, err
 	}
 
-	es := &execStream{ch: make(chan runtime.ExecChunk, 16), done: make(chan struct{}), cancel: cancel, cmd: cmd}
+	es := &execStream{ctx: execCtx, ch: make(chan runtime.ExecChunk, 16), done: make(chan struct{}), cancel: cancel, cmd: cmd}
 	go es.stream(stdout, stderr)
 	return es, nil
 }
@@ -592,6 +597,7 @@ func isMissing(out string) bool {
 type execStream struct {
 	ch     chan runtime.ExecChunk
 	done   chan struct{}
+	ctx    context.Context
 	cancel context.CancelFunc
 	cmd    *exec.Cmd
 	once   sync.Once
@@ -636,8 +642,12 @@ func (e *execStream) stream(stdout, stderr io.Reader) {
 			code = -1
 		}
 	}
+	reason := runtime.ReasonExited
+	if errors.Is(e.ctx.Err(), context.DeadlineExceeded) {
+		reason = runtime.ReasonTimeout
+	}
 	select {
-	case e.ch <- runtime.ExecChunk{Exit: &runtime.ExecResult{ExitCode: code, Reason: runtime.ReasonExited}}:
+	case e.ch <- runtime.ExecChunk{Exit: &runtime.ExecResult{ExitCode: code, Reason: reason}}:
 	case <-e.done:
 	}
 	close(e.ch)
