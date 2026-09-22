@@ -15,6 +15,7 @@ import (
 type ExecRecord struct {
 	ExecutionID string             `json:"execution_id"`
 	SandboxID   string             `json:"sandbox_id"`
+	Actor       Actor              `json:"actor"`
 	Command     string             `json:"command"`
 	Args        []string           `json:"args,omitempty"`
 	Cwd         string             `json:"cwd,omitempty"`

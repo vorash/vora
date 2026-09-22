@@ -357,6 +357,7 @@ type KeyInfo struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
 	TenantID  string    `json:"tenant_id"`
+	AgentID   string    `json:"agent_id,omitempty"`
 	Scopes    []string  `json:"scopes"`
 	CreatedAt time.Time `json:"created_at"`
 	Revoked   bool      `json:"revoked"`
@@ -373,9 +374,10 @@ func (c *HTTPClient) ListRunners(ctx context.Context) ([]RunnerInfo, error) {
 	return out.Runners, nil
 }
 
-// CreateKey creates an API key and returns the plaintext (shown once).
-func (c *HTTPClient) CreateKey(ctx context.Context, name, tenant string, scopes []string) (string, KeyInfo, error) {
-	req := map[string]any{"name": name, "tenant_id": tenant, "scopes": scopes}
+// CreateKey creates an API key and returns the plaintext (shown once). A
+// non-empty agent binds the key to that agent.
+func (c *HTTPClient) CreateKey(ctx context.Context, name, tenant, agent string, scopes []string) (string, KeyInfo, error) {
+	req := map[string]any{"name": name, "tenant_id": tenant, "agent_id": agent, "scopes": scopes}
 	var out struct {
 		Key    string  `json:"key"`
 		APIKey KeyInfo `json:"api_key"`

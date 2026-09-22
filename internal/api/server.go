@@ -24,6 +24,7 @@ import (
 
 	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/client"
+	"github.com/vorash/vora/internal/identity"
 	"github.com/vorash/vora/internal/sandbox"
 	"github.com/vorash/vora/internal/secret"
 	"github.com/vorash/vora/internal/telemetry"
@@ -40,10 +41,10 @@ var errTenantAccess = errors.New("api: sandbox not found")
 // RunnerClient is the subset of the runner gRPC client the API uses.
 type RunnerClient interface {
 	CreateSandboxWithCredentials(ctx context.Context, spec *v1.SandboxSpec, creds []*v1.BrokerCredential) (*v1.Sandbox, error)
-	StartSandbox(ctx context.Context, id string) (*v1.Sandbox, error)
+	StartSandboxAs(ctx context.Context, id string, actor *v1.Actor) (*v1.Sandbox, error)
 	GetSandbox(ctx context.Context, id string) (*v1.Sandbox, error)
 	ListSandboxes(ctx context.Context, includeDestroyed bool) ([]*v1.Sandbox, error)
-	DestroySandbox(ctx context.Context, id string) error
+	DestroySandboxAs(ctx context.Context, id string, actor *v1.Actor) error
 	StatsSandbox(ctx context.Context, id string) (*v1.Stats, error)
 	Events(ctx context.Context, id string) ([]*v1.SandboxEvent, error)
 	Execs(ctx context.Context, id string) ([]*v1.SandboxExec, error)
@@ -54,7 +55,7 @@ type RunnerClient interface {
 	GetSnapshot(ctx context.Context, id string) (*v1.Snapshot, error)
 	ListSnapshots(ctx context.Context) ([]*v1.Snapshot, error)
 	DeleteSnapshot(ctx context.Context, id string) error
-	ForkSnapshotWithCredentials(ctx context.Context, id string, creds []*v1.BrokerCredential) (*v1.Sandbox, error)
+	ForkSnapshotWithCredentials(ctx context.Context, id string, creds []*v1.BrokerCredential, actor *v1.Actor) (*v1.Sandbox, error)
 	Exec(ctx context.Context, req *v1.ExecSandboxRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ExecChunk], error)
 	Close() error
 }
@@ -317,6 +318,12 @@ func (s *Server) createSandbox(w http.ResponseWriter, r *http.Request) {
 		}
 		spec.TenantId = key.TenantID
 	}
+	if key.AgentID != "" {
+		// An agent-bound key cannot act as another agent; like the tenant
+		// above, the identity is forced from the key, never trusted from the
+		// request.
+		spec.AgentId = key.AgentID
+	}
 	pl, err := s.placeRunner(r.Context(), spec)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
@@ -340,9 +347,9 @@ func (s *Server) createSandbox(w http.ResponseWriter, r *http.Request) {
 		writeGRPCError(w, err)
 		return
 	}
-	started, err := rc.StartSandbox(r.Context(), created.GetId())
+	started, err := rc.StartSandboxAs(r.Context(), created.GetId(), actorFromKey(key))
 	if err != nil {
-		s.cleanupRunnerSandbox(rc, created.GetId(), "start failed")
+		s.cleanupRunnerSandbox(rc, created.GetId(), "start failed", actorFromKey(key))
 		writeGRPCError(w, err)
 		return
 	}
@@ -350,11 +357,12 @@ func (s *Server) createSandbox(w http.ResponseWriter, r *http.Request) {
 		SandboxID:   started.GetId(),
 		RunnerID:    runner.ID,
 		TenantID:    spec.GetTenantId(),
+		AgentID:     spec.GetAgentId(),
 		CPUMillis:   spec.GetResources().GetCpuMillis(),
 		MemoryBytes: spec.GetResources().GetMemoryBytes(),
 	}
 	if err := s.store.SetRoute(r.Context(), route); err != nil {
-		s.cleanupRunnerSandbox(rc, started.GetId(), "route persistence failed")
+		s.cleanupRunnerSandbox(rc, started.GetId(), "route persistence failed", actorFromKey(key))
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if deleteErr := s.store.DeleteRoute(cleanupCtx, started.GetId()); deleteErr != nil {
 			s.logger.Error("remove partial route failed", "sandbox_id", started.GetId(), "error", deleteErr)
@@ -367,10 +375,10 @@ func (s *Server) createSandbox(w http.ResponseWriter, r *http.Request) {
 	writeProto(w, http.StatusCreated, started)
 }
 
-func (s *Server) cleanupRunnerSandbox(rc RunnerClient, sandboxID, cause string) {
+func (s *Server) cleanupRunnerSandbox(rc RunnerClient, sandboxID, cause string, actor *v1.Actor) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := rc.DestroySandbox(ctx, sandboxID); err != nil {
+	if err := rc.DestroySandboxAs(ctx, sandboxID, actor); err != nil {
 		s.logger.Error("compensating sandbox cleanup failed", "sandbox_id", sandboxID, "cause", cause, "error", err)
 	}
 }
@@ -390,7 +398,7 @@ func (s *Server) listSandboxes(w http.ResponseWriter, r *http.Request) {
 		}
 		key := principalFrom(r.Context()).key
 		for _, sb := range items {
-			if canAccessTenant(key, sb.GetSpec().GetTenantId()) {
+			if canAccessTenant(key, sb.GetSpec().GetTenantId()) && canAccessAgent(key, sb.GetSpec().GetAgentId()) {
 				all.Sandboxes = append(all.Sandboxes, sb)
 			}
 		}
@@ -421,7 +429,7 @@ func (s *Server) destroySandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rc.Close()
-	if err := rc.DestroySandbox(r.Context(), id); err != nil {
+	if err := rc.DestroySandboxAs(r.Context(), id, actorFromKey(principalFrom(r.Context()).key)); err != nil {
 		writeGRPCError(w, err)
 		return
 	}
@@ -565,7 +573,7 @@ func (s *Server) execSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rc.Close()
 
-	stream, err := rc.Exec(r.Context(), &v1.ExecSandboxRequest{SandboxId: id, Exec: req})
+	stream, err := rc.Exec(r.Context(), &v1.ExecSandboxRequest{SandboxId: id, Exec: req, Actor: actorFromKey(principalFrom(r.Context()).key)})
 	if err != nil {
 		writeGRPCError(w, err)
 		return
@@ -639,6 +647,7 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name     string   `json:"name"`
 		TenantID string   `json:"tenant_id"`
+		AgentID  string   `json:"agent_id"`
 		Scopes   []string `json:"scopes"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
@@ -669,6 +678,21 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "non-admin keys require a tenant_id")
 		return
 	}
+	body.AgentID = strings.TrimSpace(body.AgentID)
+	if body.AgentID != "" {
+		if err := identity.ValidateName(body.AgentID); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if hasScope(body.Scopes, ScopeAdmin) {
+			writeError(w, http.StatusBadRequest, "agent binding requires the sandbox scope (admin keys are not workload credentials)")
+			return
+		}
+		if body.TenantID == "" {
+			writeError(w, http.StatusBadRequest, "agent binding requires a tenant_id")
+			return
+		}
+	}
 	plaintext, hash, err := NewAPIKey()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "key generation failed")
@@ -678,6 +702,7 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 		ID:        ulid.NewAPIKeyID(),
 		Name:      body.Name,
 		TenantID:  body.TenantID,
+		AgentID:   body.AgentID,
 		KeyHash:   hash,
 		Scopes:    body.Scopes,
 		CreatedAt: s.now(),
@@ -906,6 +931,23 @@ func canAccessTenant(key APIKey, tenantID string) bool {
 	return key.TenantID != "" && key.TenantID == tenantID
 }
 
+// canAccessAgent reports whether a key may act on a sandbox owned by agentID.
+// A key without an agent binding stands for the whole tenant and may act as any
+// of its agents; a bound key is confined to its own agent.
+func canAccessAgent(key APIKey, agentID string) bool {
+	return key.AgentID == "" || key.AgentID == agentID
+}
+
+// actorFromKey attributes a request-driven action to the authenticated key.
+// The bootstrap key is synthetic and unstoreable, so its actions carry no
+// key attribution.
+func actorFromKey(key APIKey) *v1.Actor {
+	if key.ID == "" {
+		return nil
+	}
+	return &v1.Actor{KeyId: key.ID}
+}
+
 func hasScope(scopes []string, scope string) bool {
 	for _, s := range scopes {
 		if s == scope {
@@ -917,7 +959,8 @@ func hasScope(scopes []string, scope string) bool {
 
 func (s *Server) authorizedRoute(ctx context.Context, sandboxID string) (SandboxRoute, error) {
 	route, err := s.store.Route(ctx, sandboxID)
-	if err != nil || !canAccessTenant(principalFrom(ctx).key, route.TenantID) {
+	key := principalFrom(ctx).key
+	if err != nil || !canAccessTenant(key, route.TenantID) || !canAccessAgent(key, route.AgentID) {
 		return SandboxRoute{}, errTenantAccess
 	}
 	return route, nil

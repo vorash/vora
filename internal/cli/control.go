@@ -197,6 +197,7 @@ func (a *app) keysCreateCmd() *cobra.Command {
 	var (
 		name   string
 		tenant string
+		agent  string
 		scopes []string
 	)
 	cmd := &cobra.Command{
@@ -211,7 +212,7 @@ func (a *app) keysCreateCmd() *cobra.Command {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			plaintext, info, err := c.CreateKey(ctx, name, tenant, scopes)
+			plaintext, info, err := c.CreateKey(ctx, name, tenant, agent, scopes)
 			if err != nil {
 				return err
 			}
@@ -220,6 +221,9 @@ func (a *app) keysCreateCmd() *cobra.Command {
 			}
 			fmt.Printf("key:    %s\n", plaintext)
 			fmt.Printf("id:     %s\n", info.ID)
+			if info.AgentID != "" {
+				fmt.Printf("agent:  %s\n", info.AgentID)
+			}
 			fmt.Printf("scopes: %s\n", strings.Join(info.Scopes, ","))
 			fmt.Println("store this key now; it is not shown again")
 			return nil
@@ -227,6 +231,7 @@ func (a *app) keysCreateCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&name, "name", "", "human-readable key name")
 	cmd.Flags().StringVar(&tenant, "tenant", "", "tenant id (defaults to the caller's)")
+	cmd.Flags().StringVar(&agent, "agent", "", "bind the key to one agent (sandbox scope only)")
 	cmd.Flags().StringArrayVar(&scopes, "scope", nil, "scope: admin or sandbox (repeatable; default sandbox; admin also permits sandbox routes)")
 	return cmd
 }
@@ -255,9 +260,9 @@ func (a *app) keysListCmd() *cobra.Command {
 				fmt.Println("no keys")
 				return nil
 			}
-			fmt.Printf("%-26s %-16s %-10s %-8s %s\n", "ID", "NAME", "REVOKED", "TENANT", "SCOPES")
+			fmt.Printf("%-26s %-16s %-10s %-8s %-10s %s\n", "ID", "NAME", "REVOKED", "TENANT", "AGENT", "SCOPES")
 			for _, k := range keys {
-				fmt.Printf("%-26s %-16s %-10v %-8s %s\n", k.ID, k.Name, k.Revoked, k.TenantID, strings.Join(k.Scopes, ","))
+				fmt.Printf("%-26s %-16s %-10v %-8s %-10s %s\n", k.ID, k.Name, k.Revoked, k.TenantID, k.AgentID, strings.Join(k.Scopes, ","))
 			}
 			return nil
 		},

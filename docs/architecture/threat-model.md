@@ -35,7 +35,7 @@ explicitly granted to it.
    [ADR 017](../adr/017-gvisor-restricted-egress.md));
    `NetworkFull`/`NetworkPrivate` are bwrap-only
    ([ADR 016](../adr/016-network-modes.md)).
-6. **Caller ↔ control plane** — API keys authenticate; tenant identity authorizes sandbox and key access.
+6. **Caller ↔ control plane** — API keys authenticate; tenant identity authorizes sandbox and key access, and an agent-bound key is confined to its own agent ([ADR 025](../adr/025-agent-identity.md)).
 7. **Control plane ↔ runner** — join token plus optional mTLS; runners are trusted execution hosts. Brokered credentials are refused on this channel without transport encryption.
 
 ## Adversary model
@@ -107,7 +107,8 @@ for both backends (ADR 012, closed for gVisor by ADR 017);
 - Deep multi-tenant network segmentation beyond `NetworkPrivate`'s per-tenant
   `/24` (ADR 016).
 - Cryptographic attestation of agent identity (image signatures cover image
-  provenance only — ADR 020).
+  provenance only — ADR 020). The identity itself is ADR 025's derived URI and
+  the authz subject; an SVID issuer can assert it later without policy changes.
 - Transparent (TLS-terminating) credential brokering; the broker route is
   explicit, and non-HTTP protocols are not brokered.
 - The gateway resolver sees the query *names* it is asked for; query content is

@@ -57,16 +57,21 @@ func TestPostgresAuditStore(t *testing.T) {
 
 	const sandboxID = "sbx_pg_test"
 	now := time.Now().UTC().Truncate(time.Millisecond)
+	actor := sandbox.Actor{
+		TenantID:      "tenant-a",
+		AgentIdentity: "spiffe://vora.sh/tenant/tenant-a/agent/analyst",
+		KeyID:         "key_1",
+	}
 
 	if err := store.AppendEvent(ctx, sandboxID, sandbox.Event{
-		SandboxID: sandboxID, From: sandbox.StateRequested, To: sandbox.StateCreating,
+		SandboxID: sandboxID, Actor: actor, From: sandbox.StateRequested, To: sandbox.StateCreating,
 		RunnerID: "run_test", Timestamp: now,
 	}); err != nil {
 		t.Fatalf("append event: %v", err)
 	}
 
 	rec := sandbox.ExecRecord{
-		ExecutionID: "exe_pg_1", SandboxID: sandboxID, Command: "/bin/echo",
+		ExecutionID: "exe_pg_1", SandboxID: sandboxID, Actor: actor, Command: "/bin/echo",
 		Args: []string{"hi"}, Cwd: "/workspace", StartedAt: now, FinishedAt: now.Add(time.Second),
 		ExitCode: 0, Reason: runtime.ReasonExited, StdoutBytes: 3, StderrBytes: 0,
 	}
@@ -86,6 +91,9 @@ func TestPostgresAuditStore(t *testing.T) {
 	if len(events) != 1 || events[0].From != sandbox.StateRequested || events[0].To != sandbox.StateCreating {
 		t.Fatalf("events = %+v", events)
 	}
+	if events[0].Actor != actor {
+		t.Fatalf("event actor = %+v, want %+v", events[0].Actor, actor)
+	}
 
 	execs, err := store.Execs(ctx, sandboxID)
 	if err != nil {
@@ -97,9 +105,12 @@ func TestPostgresAuditStore(t *testing.T) {
 	if execs[0].ExitCode != 7 || execs[0].Command != "/bin/echo" || len(execs[0].Args) != 1 || execs[0].Args[0] != "hi" {
 		t.Fatalf("exec record = %+v", execs[0])
 	}
+	if execs[0].Actor != actor {
+		t.Fatalf("exec actor = %+v, want %+v", execs[0].Actor, actor)
+	}
 
 	allowed := sandbox.EgressRecord{
-		SandboxID: sandboxID, Host: "example.com", Remote: "93.184.216.34:443",
+		SandboxID: sandboxID, Actor: actor, Host: "example.com", Remote: "93.184.216.34:443",
 		Alias: "github", Allowed: true, Reason: "dns_resolved", Timestamp: now,
 	}
 	denied := sandbox.EgressRecord{
@@ -123,6 +134,9 @@ func TestPostgresAuditStore(t *testing.T) {
 	// schema has no column a value could be stored in.
 	if egress[0].Alias != "github" {
 		t.Fatalf("brokered egress record lost its alias: %+v", egress[0])
+	}
+	if egress[0].Actor != actor {
+		t.Fatalf("egress actor = %+v, want %+v", egress[0].Actor, actor)
 	}
 	var columns int
 	pool, err := pgxpool.New(ctx, dsn)

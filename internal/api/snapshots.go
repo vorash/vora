@@ -17,7 +17,8 @@ var errSnapshotAccess = errors.New("api: snapshot not found")
 // tenant's snapshot is indistinguishable from one that does not exist.
 func (s *Server) authorizedSnapshotRoute(ctx context.Context, snapshotID string) (SnapshotRoute, error) {
 	route, err := s.store.SnapshotRoute(ctx, snapshotID)
-	if err != nil || !canAccessTenant(principalFrom(ctx).key, route.TenantID) {
+	key := principalFrom(ctx).key
+	if err != nil || !canAccessTenant(key, route.TenantID) || !canAccessAgent(key, route.AgentID) {
 		return SnapshotRoute{}, errSnapshotAccess
 	}
 	return route, nil
@@ -47,6 +48,7 @@ func (s *Server) snapshotSandbox(w http.ResponseWriter, r *http.Request) {
 		SnapshotID: snap.GetId(),
 		RunnerID:   snap.GetRunnerId(),
 		TenantID:   route.TenantID,
+		AgentID:    route.AgentID,
 		SandboxID:  snap.GetSandboxId(),
 	}
 	if err := s.store.SetSnapshotRoute(r.Context(), sroute); err != nil {
@@ -99,7 +101,7 @@ func (s *Server) listSnapshots(w http.ResponseWriter, r *http.Request) {
 		}
 		key := principalFrom(r.Context()).key
 		for _, snap := range items {
-			if canAccessTenant(key, snap.GetTenantId()) {
+			if canAccessTenant(key, snap.GetTenantId()) && canAccessAgent(key, snap.GetSpec().GetAgentId()) {
 				all.Snapshots = append(all.Snapshots, snap)
 			}
 		}
@@ -169,7 +171,7 @@ func (s *Server) forkSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 	defer zeroBrokerSecrets(creds)
 
-	sb, err := rc.ForkSnapshotWithCredentials(r.Context(), id, creds)
+	sb, err := rc.ForkSnapshotWithCredentials(r.Context(), id, creds, actorFromKey(principalFrom(r.Context()).key))
 	if err != nil {
 		writeGRPCError(w, err)
 		return
@@ -178,11 +180,12 @@ func (s *Server) forkSnapshot(w http.ResponseWriter, r *http.Request) {
 		SandboxID:   sb.GetId(),
 		RunnerID:    route.RunnerID,
 		TenantID:    route.TenantID,
+		AgentID:     route.AgentID,
 		CPUMillis:   sb.GetSpec().GetResources().GetCpuMillis(),
 		MemoryBytes: sb.GetSpec().GetResources().GetMemoryBytes(),
 	}
 	if err := s.store.SetRoute(r.Context(), froute); err != nil {
-		s.cleanupRunnerSandbox(rc, sb.GetId(), "route persistence failed")
+		s.cleanupRunnerSandbox(rc, sb.GetId(), "route persistence failed", actorFromKey(principalFrom(r.Context()).key))
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if deleteErr := s.store.DeleteRoute(cleanupCtx, sb.GetId()); deleteErr != nil {
 			s.logger.Error("remove partial route failed", "sandbox_id", sb.GetId(), "error", deleteErr)
