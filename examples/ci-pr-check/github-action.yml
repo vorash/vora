@@ -1,0 +1,26 @@
+# Run a PR's test suite inside a Vora sandbox on a self-hosted runner.
+#
+# The workflow itself is trusted code: it checks the PR out and reports. The
+# PR's *code* only ever executes inside the sandbox (no network, hard budgets),
+# so a hostile PR cannot reach the runner's credentials or your network.
+name: sandboxed-pr-tests
+
+on: [pull_request]
+
+jobs:
+  test:
+    runs-on: [self-hosted, vora]
+    steps:
+      # Untrusted input: the PR's head. Checked out to a scratch dir only —
+      # never executed on the host.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr
+
+      - name: Run tests in a Vora sandbox
+        run: ./examples/ci-pr-check/run.sh "$GITHUB_WORKSPACE/pr" npm test
+
+      # The sandbox is destroyed by run.sh's trap; the logs above are the
+      # durable record (and can be shipped to your audit store via
+      # VORA_AUDIT_DSN instead).

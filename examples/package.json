@@ -1,0 +1,13 @@
+{
+  "name": "vora-examples",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Real-world recipes for running untrusted code with Vora",
+  "type": "module",
+  "dependencies": {
+    "@vorash/sdk": "file:../sdk/typescript"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
