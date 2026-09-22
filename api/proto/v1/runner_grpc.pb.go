@@ -32,6 +32,11 @@ const (
 	RunnerService_GetSandboxFile_FullMethodName   = "/vora.v1.RunnerService/GetSandboxFile"
 	RunnerService_PutSandboxFile_FullMethodName   = "/vora.v1.RunnerService/PutSandboxFile"
 	RunnerService_DestroySandbox_FullMethodName   = "/vora.v1.RunnerService/DestroySandbox"
+	RunnerService_SnapshotSandbox_FullMethodName  = "/vora.v1.RunnerService/SnapshotSandbox"
+	RunnerService_GetSnapshot_FullMethodName      = "/vora.v1.RunnerService/GetSnapshot"
+	RunnerService_ListSnapshots_FullMethodName    = "/vora.v1.RunnerService/ListSnapshots"
+	RunnerService_DeleteSnapshot_FullMethodName   = "/vora.v1.RunnerService/DeleteSnapshot"
+	RunnerService_ForkSnapshot_FullMethodName     = "/vora.v1.RunnerService/ForkSnapshot"
 )
 
 // RunnerServiceClient is the client API for RunnerService service.
@@ -54,6 +59,11 @@ type RunnerServiceClient interface {
 	GetSandboxFile(ctx context.Context, in *GetSandboxFileRequest, opts ...grpc.CallOption) (*GetSandboxFileResponse, error)
 	PutSandboxFile(ctx context.Context, in *PutSandboxFileRequest, opts ...grpc.CallOption) (*PutSandboxFileResponse, error)
 	DestroySandbox(ctx context.Context, in *DestroySandboxRequest, opts ...grpc.CallOption) (*DestroySandboxResponse, error)
+	SnapshotSandbox(ctx context.Context, in *SnapshotSandboxRequest, opts ...grpc.CallOption) (*SnapshotSandboxResponse, error)
+	GetSnapshot(ctx context.Context, in *GetSnapshotRequest, opts ...grpc.CallOption) (*Snapshot, error)
+	ListSnapshots(ctx context.Context, in *ListSnapshotsRequest, opts ...grpc.CallOption) (*ListSnapshotsResponse, error)
+	DeleteSnapshot(ctx context.Context, in *DeleteSnapshotRequest, opts ...grpc.CallOption) (*DeleteSnapshotResponse, error)
+	ForkSnapshot(ctx context.Context, in *ForkSnapshotRequest, opts ...grpc.CallOption) (*ForkSnapshotResponse, error)
 }
 
 type runnerServiceClient struct {
@@ -203,6 +213,56 @@ func (c *runnerServiceClient) DestroySandbox(ctx context.Context, in *DestroySan
 	return out, nil
 }
 
+func (c *runnerServiceClient) SnapshotSandbox(ctx context.Context, in *SnapshotSandboxRequest, opts ...grpc.CallOption) (*SnapshotSandboxResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SnapshotSandboxResponse)
+	err := c.cc.Invoke(ctx, RunnerService_SnapshotSandbox_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) GetSnapshot(ctx context.Context, in *GetSnapshotRequest, opts ...grpc.CallOption) (*Snapshot, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Snapshot)
+	err := c.cc.Invoke(ctx, RunnerService_GetSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) ListSnapshots(ctx context.Context, in *ListSnapshotsRequest, opts ...grpc.CallOption) (*ListSnapshotsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListSnapshotsResponse)
+	err := c.cc.Invoke(ctx, RunnerService_ListSnapshots_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) DeleteSnapshot(ctx context.Context, in *DeleteSnapshotRequest, opts ...grpc.CallOption) (*DeleteSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteSnapshotResponse)
+	err := c.cc.Invoke(ctx, RunnerService_DeleteSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) ForkSnapshot(ctx context.Context, in *ForkSnapshotRequest, opts ...grpc.CallOption) (*ForkSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ForkSnapshotResponse)
+	err := c.cc.Invoke(ctx, RunnerService_ForkSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RunnerServiceServer is the server API for RunnerService service.
 // All implementations must embed UnimplementedRunnerServiceServer
 // for forward compatibility.
@@ -223,6 +283,11 @@ type RunnerServiceServer interface {
 	GetSandboxFile(context.Context, *GetSandboxFileRequest) (*GetSandboxFileResponse, error)
 	PutSandboxFile(context.Context, *PutSandboxFileRequest) (*PutSandboxFileResponse, error)
 	DestroySandbox(context.Context, *DestroySandboxRequest) (*DestroySandboxResponse, error)
+	SnapshotSandbox(context.Context, *SnapshotSandboxRequest) (*SnapshotSandboxResponse, error)
+	GetSnapshot(context.Context, *GetSnapshotRequest) (*Snapshot, error)
+	ListSnapshots(context.Context, *ListSnapshotsRequest) (*ListSnapshotsResponse, error)
+	DeleteSnapshot(context.Context, *DeleteSnapshotRequest) (*DeleteSnapshotResponse, error)
+	ForkSnapshot(context.Context, *ForkSnapshotRequest) (*ForkSnapshotResponse, error)
 	mustEmbedUnimplementedRunnerServiceServer()
 }
 
@@ -271,6 +336,21 @@ func (UnimplementedRunnerServiceServer) PutSandboxFile(context.Context, *PutSand
 }
 func (UnimplementedRunnerServiceServer) DestroySandbox(context.Context, *DestroySandboxRequest) (*DestroySandboxResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DestroySandbox not implemented")
+}
+func (UnimplementedRunnerServiceServer) SnapshotSandbox(context.Context, *SnapshotSandboxRequest) (*SnapshotSandboxResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SnapshotSandbox not implemented")
+}
+func (UnimplementedRunnerServiceServer) GetSnapshot(context.Context, *GetSnapshotRequest) (*Snapshot, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetSnapshot not implemented")
+}
+func (UnimplementedRunnerServiceServer) ListSnapshots(context.Context, *ListSnapshotsRequest) (*ListSnapshotsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListSnapshots not implemented")
+}
+func (UnimplementedRunnerServiceServer) DeleteSnapshot(context.Context, *DeleteSnapshotRequest) (*DeleteSnapshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteSnapshot not implemented")
+}
+func (UnimplementedRunnerServiceServer) ForkSnapshot(context.Context, *ForkSnapshotRequest) (*ForkSnapshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ForkSnapshot not implemented")
 }
 func (UnimplementedRunnerServiceServer) mustEmbedUnimplementedRunnerServiceServer() {}
 func (UnimplementedRunnerServiceServer) testEmbeddedByValue()                       {}
@@ -520,6 +600,96 @@ func _RunnerService_DestroySandbox_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunnerService_SnapshotSandbox_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SnapshotSandboxRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).SnapshotSandbox(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_SnapshotSandbox_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).SnapshotSandbox(ctx, req.(*SnapshotSandboxRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_GetSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).GetSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_GetSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).GetSnapshot(ctx, req.(*GetSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_ListSnapshots_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSnapshotsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).ListSnapshots(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_ListSnapshots_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).ListSnapshots(ctx, req.(*ListSnapshotsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_DeleteSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).DeleteSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_DeleteSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).DeleteSnapshot(ctx, req.(*DeleteSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_ForkSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ForkSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).ForkSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_ForkSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).ForkSnapshot(ctx, req.(*ForkSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RunnerService_ServiceDesc is the grpc.ServiceDesc for RunnerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -574,6 +744,26 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DestroySandbox",
 			Handler:    _RunnerService_DestroySandbox_Handler,
+		},
+		{
+			MethodName: "SnapshotSandbox",
+			Handler:    _RunnerService_SnapshotSandbox_Handler,
+		},
+		{
+			MethodName: "GetSnapshot",
+			Handler:    _RunnerService_GetSnapshot_Handler,
+		},
+		{
+			MethodName: "ListSnapshots",
+			Handler:    _RunnerService_ListSnapshots_Handler,
+		},
+		{
+			MethodName: "DeleteSnapshot",
+			Handler:    _RunnerService_DeleteSnapshot_Handler,
+		},
+		{
+			MethodName: "ForkSnapshot",
+			Handler:    _RunnerService_ForkSnapshot_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

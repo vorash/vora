@@ -22,6 +22,11 @@ service RunnerService {
   rpc GetSandboxFile(GetSandboxFileRequest) returns (GetSandboxFileResponse);
   rpc PutSandboxFile(PutSandboxFileRequest) returns (PutSandboxFileResponse);
   rpc DestroySandbox(DestroySandboxRequest) returns (DestroySandboxResponse);
+  rpc SnapshotSandbox(SnapshotSandboxRequest) returns (SnapshotSandboxResponse);
+  rpc GetSnapshot(GetSnapshotRequest) returns (Snapshot);
+  rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
+  rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
+  rpc ForkSnapshot(ForkSnapshotRequest) returns (ForkSnapshotResponse);
 }
 
 message CreateSandboxRequest {
@@ -165,3 +170,52 @@ message DestroySandboxRequest {
 }
 
 message DestroySandboxResponse {}
+
+// Snapshot is a capture of a sandbox's writable state (workspace and home;
+// the rootfs stays the shared read-only image — ADR 023). spec is the source
+// sandbox's specification; its workspace paths point at the source and are
+// replaced by the fork's own layout.
+message Snapshot {
+  string id = 1;
+  string sandbox_id = 2;
+  string tenant_id = 3;
+  string runner_id = 4;
+  SandboxSpec spec = 5;
+  int64 bytes = 6;
+  int64 created_at_unix_ms = 7;
+}
+
+message SnapshotSandboxRequest {
+  string sandbox_id = 1;
+}
+
+message SnapshotSandboxResponse {
+  Snapshot snapshot = 1;
+}
+
+message GetSnapshotRequest {
+  string snapshot_id = 1;
+}
+
+message ListSnapshotsRequest {}
+
+message ListSnapshotsResponse {
+  repeated Snapshot snapshots = 1;
+}
+
+message DeleteSnapshotRequest {
+  string snapshot_id = 1;
+}
+
+message DeleteSnapshotResponse {}
+
+message ForkSnapshotRequest {
+  string snapshot_id = 1;
+  // broker_secrets mirror CreateSandboxRequest: resolved credentials for the
+  // inherited spec's broker_aliases, transient and never persisted.
+  repeated BrokerCredential broker_secrets = 2;
+}
+
+message ForkSnapshotResponse {
+  Sandbox sandbox = 1;
+}

@@ -9,6 +9,7 @@ import (
 	"github.com/vorash/vora/internal/egress"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/sandbox"
+	"github.com/vorash/vora/internal/snapshot"
 )
 
 // specFromProto converts a proto spec into a runtime spec, applying defaults.
@@ -295,22 +296,38 @@ func envMap(env []string) map[string]string {
 
 func toProtoSandbox(rec *sandbox.Record) *v1.Sandbox {
 	return &v1.Sandbox{
-		Id:    rec.ID,
-		State: stateToProto(rec.State),
-		Spec: &v1.SandboxSpec{
-			SandboxId:  rec.Spec.ID,
-			TenantId:   rec.Spec.TenantID,
-			AgentId:    rec.Spec.AgentID,
-			Image:      rec.Spec.Image,
-			Backend:    rec.Spec.Backend,
-			Resources:  resourceLimitsToProto(rec.Spec.Resources),
-			Network:    networkPolicyToProto(rec.Spec.Network),
-			TtlSeconds: int64(rec.Spec.TTL / time.Second),
-		},
+		Id:              rec.ID,
+		State:           stateToProto(rec.State),
+		Spec:            specToProto(rec.Spec),
 		RunnerId:        rec.RunnerID,
 		Reason:          reasonToProto(rec.Reason),
 		CreatedAtUnixMs: rec.CreatedAt.UnixMilli(),
 		UpdatedAtUnixMs: rec.UpdatedAt.UnixMilli(),
 		ImageRootfs:     rec.Spec.Workspace.RootfsDir,
+	}
+}
+
+func specToProto(spec runtime.SandboxSpec) *v1.SandboxSpec {
+	return &v1.SandboxSpec{
+		SandboxId:  spec.ID,
+		TenantId:   spec.TenantID,
+		AgentId:    spec.AgentID,
+		Image:      spec.Image,
+		Backend:    spec.Backend,
+		Resources:  resourceLimitsToProto(spec.Resources),
+		Network:    networkPolicyToProto(spec.Network),
+		TtlSeconds: int64(spec.TTL / time.Second),
+	}
+}
+
+func toProtoSnapshot(rec *snapshot.Record) *v1.Snapshot {
+	return &v1.Snapshot{
+		Id:              rec.ID,
+		SandboxId:       rec.SandboxID,
+		TenantId:        rec.TenantID,
+		RunnerId:        rec.RunnerID,
+		Spec:            specToProto(rec.Spec),
+		Bytes:           rec.Bytes,
+		CreatedAtUnixMs: rec.CreatedAt.UnixMilli(),
 	}
 }

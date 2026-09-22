@@ -90,6 +90,9 @@ func (c Config) ImagesDir() string { return filepath.Join(c.StateDir, "images") 
 // SandboxesDir is the per-sandbox state root.
 func (c Config) SandboxesDir() string { return filepath.Join(c.StateDir, "sandboxes") }
 
+// SnapshotsDir is the snapshot store root.
+func (c Config) SnapshotsDir() string { return filepath.Join(c.StateDir, "snapshots") }
+
 // Default returns the configuration for the current user, with environment
 // overrides:
 //
