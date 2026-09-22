@@ -5,6 +5,7 @@
 # Build artifacts
 /bin/
 /dist/
+/node_modules/
 *.test
 *.out
 

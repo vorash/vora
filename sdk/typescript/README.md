@@ -100,12 +100,14 @@ Errors are thrown as `VoraError` with `status` and the parsed `body`
 
 ## Development
 
+This package is an npm workspace member, so install from the repository root:
+
 ```sh
-npm install
-npm run build      # ESM + CJS + type declarations into dist/
-npm run typecheck  # run after build; the example imports the built output
-npm test           # vitest, against a local HTTP stand-in
-npm run example    # runs examples/basic.ts against a live vora-api
+npm install                                    # from the repository root
+npm run build --workspace @vorash/sdk          # ESM + CJS + type declarations into dist/
+npm run typecheck --workspace @vorash/sdk      # run after build; the example imports the built output
+npm test --workspace @vorash/sdk               # vitest, against a local HTTP stand-in
+npm run example --workspace @vorash/sdk        # runs examples/basic.ts against a live vora-api
 ```
 
 `npm run build` emits `dist/esm` (ESM) and `dist/cjs` (CommonJS, marked with a

@@ -67,8 +67,10 @@ test: ## Run unit tests
 	$(GO) test ./...
 
 .PHONY: test-sdk
-test-sdk: ## Build and test the TypeScript SDK (needs `npm install` in sdk/typescript)
-	cd sdk/typescript && npm run build && npm run typecheck && npm test
+test-sdk: ## Build and test the JavaScript packages (@vorash/sdk + @vorash/mcp); needs `npm install` at the repo root
+	npm run build
+	npm run typecheck
+	npm test
 
 .PHONY: test-integration
 test-integration: ## Run integration tests (real runner, unix socket)
