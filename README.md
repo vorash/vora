@@ -10,7 +10,7 @@ network decision. Isolation is Bubblewrap (namespaces plus cgroup v2 through
 systemd) or gVisor (`runsc`), chosen per sandbox; the rootfs comes from containerd
 snapshots. Written in Go, with no Kubernetes in the path.
 
-> **Status: v0.4, a proof of concept.** What is described here is implemented and
+> **Status: v0.7, a proof of concept.** What is described here is implemented and
 > covered by tests, but it has not been independently audited and is not ready to
 > be trusted with anything that matters. [Limitations](#limitations-honest) lists
 > what is missing on purpose and what is a hard v0.x boundary;
@@ -81,6 +81,11 @@ tracing** across API → runner → runtime (off unless
   `$PATH` (the `git`/`kubectl` pattern), so tools such as `vora-probe` read as
   part of Vora without Vora depending on them. Built-in commands always win, and
   `VORA_DISABLE_PLUGINS=1` turns dispatch off.
+- **Agent-facing tooling.** A TypeScript SDK for the HTTP API
+  (`sdk/typescript`), an MCP server that exposes sandboxes to coding agents
+  (`sdk/mcp`), and an OpenAI Agents adapter that runs agent code inside
+  sandboxes (`integrations/openai-agents`); `vora exec` forwards stdin to the
+  command it runs.
 
 ## Architecture
 
@@ -531,8 +536,8 @@ requirement (`/etc/resolv.conf` must exist in the image layers for
   capacity-aware placement is in [ADR 021](docs/adr/021-capacity-placement.md),
   and the default API store is in-memory
   ([ADR 014](docs/adr/014-control-plane.md)).
-- **Not production-ready.** No auth on the runner Unix socket, no security
-  audit, and no NAT reverse tunnel for runners yet.
+- **Not production-ready.** No auth on the runner Unix socket, and no security
+  audit.
 
 ## Roadmap
 
@@ -541,8 +546,13 @@ requirement (`/etc/resolv.conf` must exist in the image layers for
 | v0.1 | Go runner, Bubblewrap backend, cgroups v2, in-sandbox exec agent, CLI, security suite, benchmarks |
 | v0.2 | gVisor backend (direct `runsc`, Method 2), backend selection, rootlesskit runner service, PostgreSQL/Supabase audit, dual-backend isolation matrix |
 | **v0.3** | containerd-snapshot rootfs (ADR 009), bwrap `NetworkRestricted` with filter+audit (ADR 012), `vora-api` with tenant isolation, split TLS, and failure-safe create (ADR 014) |
-| **v0.4 (this)** | **Allowlist-only gateway DNS (ADR 012) and credential brokering (ADR 013) for restricted bwrap sandboxes.** gVisor egress recorded as a documented limitation. **Deferred:** multi-runner scheduling, SDK/MCP, Ansible deployment, bwrap seccomp, disk quota, image signing |
+| **v0.4** | Allowlist-only gateway DNS (ADR 012) and credential brokering (ADR 013) for restricted bwrap sandboxes. gVisor egress recorded as a documented limitation (closed in v0.5) |
+| v0.5 | External CLI plugin dispatch, API files routes, `DiskBytes` project quota (ADR 015), `NetworkFull`/`NetworkPrivate` (ADR 016), gVisor `NetworkRestricted` (ADR 017), enriched execution traces |
+| v0.6 | bwrap seccomp deny-list (ADR 018), OpenTelemetry (ADR 019), image signing (ADR 020), capacity-aware placement (ADR 021), reverse tunnel for NAT'd runners (ADR 022) |
+| **v0.7 (this)** | **TypeScript SDK (`sdk/typescript`), MCP server (`sdk/mcp`), OpenAI Agents adapter (`integrations/openai-agents`), stdin forwarding for `vora exec`** |
 | v1.0 | Firecracker microVM tier, snapshots/forks |
+
+Host deployment is [vora-ansible](https://github.com/vorash/vora-ansible).
 
 ## License
 

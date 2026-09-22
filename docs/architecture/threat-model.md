@@ -1,6 +1,6 @@
 # Threat Model
 
-Status: draft · Applies to: v0.4
+Status: draft · Applies to: v0.7
 
 ## Security objective
 
@@ -28,7 +28,13 @@ explicitly granted to it.
 3. **Runner ↔ image cache** — images are read-only inputs; a malicious image
    must not affect the host.
 4. **Sandbox ↔ sandbox** — mutually untrusted.
-5. **Sandbox ↔ network** — deny by default (`NetworkNone`), or allowlisted TLS via the egress proxy plus an allowlist-only resolver and an optional credential broker (`NetworkRestricted`, bwrap).
+5. **Sandbox ↔ network** — deny by default (`NetworkNone`), or allowlisted TLS
+   via the egress proxy plus an allowlist-only resolver and an optional
+   credential broker (`NetworkRestricted`, both backends —
+   [ADR 012](../adr/012-egress-gateway.md),
+   [ADR 017](../adr/017-gvisor-restricted-egress.md));
+   `NetworkFull`/`NetworkPrivate` are bwrap-only
+   ([ADR 016](../adr/016-network-modes.md)).
 6. **Caller ↔ control plane** — API keys authenticate; tenant identity authorizes sandbox and key access.
 7. **Control plane ↔ runner** — join token plus optional mTLS; runners are trusted execution hosts. Brokered credentials are refused on this channel without transport encryption.
 
@@ -46,7 +52,7 @@ infallible; the design minimises the trusted surface.
 
 ## Threats and mitigations
 
-| Threat | Mitigation (v0.3) | Boundary |
+| Threat | Mitigation | Boundary |
 | ------ | ----------------- | -------- |
 | Host filesystem read | read-only bind of a minimal rootfs; host paths not mounted | filesystem |
 | Host filesystem write | rootfs read-only; only `/workspace`, `/root`, `/tmp` writable | filesystem |
@@ -58,8 +64,8 @@ infallible; the design minimises the trusted surface.
 | Fork bomb | `pids.max` via cgroup | cgroup |
 | Memory bomb / OOM | `memory.max`, `memory.swap.max=0` | cgroup |
 | CPU monopolisation | `cpu.max` quota | cgroup |
-| Disk exhaustion | per-sandbox workspace only; **disk quota is not enforced** | storage |
-| Metadata service access | unrestricted network is never granted; `--unshare-net`, or (bwrap `NetworkRestricted`) filter+DNAT to the egress proxy that denies non-TLS and private IPs | network |
+| Disk exhaustion | `DiskBytes` filesystem project quota, falling back to a periodic usage scan ([ADR 015](../adr/015-disk-quota.md)) | storage |
+| Metadata service access | unrestricted network is never granted; `--unshare-net`, or `NetworkRestricted` filter+DNAT to the egress proxy that denies non-TLS and private IPs | network |
 | Private-network probing | no network namespace route exists, or non-proxy traffic is dropped and private/link-local/CGNAT destinations are blocked | network |
 | DNS exfiltration / rebinding | the only resolver is the gateway's: it answers allowlisted names only, refuses loopback/private/link-local/CGNAT answers (so a rebinding name cannot reach the metadata service), refuses non-address query types, and audits every query | network |
 | Reverse shell / exfiltration | no network egress, or egress restricted to an allowlisted TLS SNI set with durable audit | network |
@@ -77,7 +83,8 @@ infallible; the design minimises the trusted surface.
 
 Credential brokering is delivered for bwrap (ADR 013) and its decisions appear in
 the same audit trail. Restricted egress and the gateway resolver are delivered
-for bwrap only (ADR 012); gVisor remains `NetworkNone` by decision.
+for both backends (ADR 012, closed for gVisor by ADR 017);
+`NetworkFull`/`NetworkPrivate` remain bwrap-only (ADR 016).
 
 ## Assumptions
 
@@ -87,15 +94,19 @@ for bwrap only (ADR 012); gVisor remains `NetworkNone` by decision.
 - The operator's `$PATH` is under their control; a writable entry ahead of the
   real tools already implies code execution as that operator.
 - The runner process and its socket are protected by filesystem permissions.
-- Images come from trusted references; content is not independently verified.
+- Images come from trusted references; content is verified only when
+  `VORA_IMAGE_POLICY=enforce` requires a signature
+  ([ADR 020](../adr/020-image-signing.md)).
 
-## Out of scope for v0.4
+## Out of scope
 
 - Kernel exploits and side channels (Spectre-class).
 - Physical access and host-level compromise.
 - GPU isolation, browser isolation, Docker-in-Docker.
-- Multi-tenant network segmentation (no network exists).
-- Cryptographic attestation of images or agent identity.
+- Deep multi-tenant network segmentation beyond `NetworkPrivate`'s per-tenant
+  `/24` (ADR 016).
+- Cryptographic attestation of agent identity (image signatures cover image
+  provenance only — ADR 020).
 - Transparent (TLS-terminating) credential brokering; the broker route is
   explicit, and non-HTTP protocols are not brokered.
 - The gateway resolver sees the query *names* it is asked for; query content is

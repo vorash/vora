@@ -1,6 +1,6 @@
 # Security Boundaries
 
-Status: draft · Applies to: v0.4
+Status: draft · Applies to: v0.7
 
 This document answers a single question for every resource type:
 
@@ -47,7 +47,7 @@ scan (ADR 015); `TestDiskQuotaBoundsHostWrites` covers the hard path.
 | cgroup hierarchy | bwrap: transient systemd units. gVisor: delegated subtree under `vora-runner.service` (`Delegate=yes`) |
 | Availability | memory/PID caps prevent host exhaustion; CPU quota bounds utilisation |
 
-## Residual risks (accepted in v0.4)
+## Residual risks (accepted)
 
 - **Shared kernel on bwrap.** Bubblewrap isolates namespaces but shares the
   kernel; a kernel vulnerability could escape. gVisor reduces this surface.
@@ -56,9 +56,11 @@ scan (ADR 015); `TestDiskQuotaBoundsHostWrites` covers the hard path.
   gVisor's user-space kernel is stronger still where it is available.
 - **Read-only rootfs assumptions.** Some toolchains expect writable paths
   outside `/workspace`; those calls fail closed rather than being permitted.
-- **Disk quota is directory-bounded, not enforced by a filesystem quota**; the
-  sandbox can fill its workspace up to host free space.
-- **Images are trusted.** No signature verification.
+- **Disk quota is hard only under an enforcing project quota**
+  ([ADR 015](../adr/015-disk-quota.md)). Without one, the periodic usage scan
+  bounds the sandbox but not a burst that lands between scans.
+- **Images are trusted** unless `VORA_IMAGE_POLICY=enforce` verifies a
+  signature ([ADR 020](../adr/020-image-signing.md)).
 - **The brokered hop inside the netns is plaintext HTTP.** The credential is
   attached by the gateway, so it still never enters the sandbox, but a workload
   that logs its own broker responses sees what the API returned.
