@@ -5,11 +5,12 @@
   "description": "npm workspace for the Vora JavaScript/TypeScript packages",
   "workspaces": [
     "sdk/typescript",
-    "sdk/mcp"
+    "sdk/mcp",
+    "integrations/openai-agents"
   ],
   "scripts": {
-    "build": "npm run build --workspace @vorash/sdk && npm run build --workspace @vorash/mcp",
-    "typecheck": "npm run typecheck --workspace @vorash/sdk && npm run typecheck --workspace @vorash/mcp",
-    "test": "npm run test --workspace @vorash/sdk && npm run test --workspace @vorash/mcp"
+    "build": "npm run build --workspace @vorash/sdk && npm run build --workspace @vorash/mcp && npm run build --workspace @vorash/openai-agents",
+    "typecheck": "npm run typecheck --workspace @vorash/sdk && npm run typecheck --workspace @vorash/mcp && npm run typecheck --workspace @vorash/openai-agents",
+    "test": "npm run test --workspace @vorash/sdk && npm run test --workspace @vorash/mcp && npm run test --workspace @vorash/openai-agents"
   }
 }

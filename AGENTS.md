@@ -32,6 +32,7 @@ architectural claims.
 | `deploy/systemd`, `scripts/`, `images/` | units, tooling, sandbox rootfs images |
 | `sdk/typescript/` | TypeScript SDK for the HTTP API; its own npm package and `vitest` suite |
 | `sdk/mcp/` | MCP server exposing the sandbox tools to coding agents, built on the SDK |
+| `integrations/openai-agents/` | OpenAI Agents adapter that runs agent code in sandboxes; built on the SDK, not part of the core |
 
 ## Build & test
 

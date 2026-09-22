@@ -1,0 +1,56 @@
+{
+  "name": "@vorash/openai-agents",
+  "version": "0.6.0",
+  "description": "Run OpenAI Agents code inside Vora sandboxes",
+  "license": "MIT",
+  "type": "module",
+  "homepage": "https://github.com/vorash/vora/tree/main/integrations/openai-agents",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vorash/vora.git",
+    "directory": "integrations/openai-agents"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "example": "node examples/agent.ts"
+  },
+  "keywords": [
+    "vora",
+    "openai",
+    "agents",
+    "sandbox"
+  ],
+  "dependencies": {
+    "@vorash/sdk": "^0.6.0"
+  },
+  "peerDependencies": {
+    "@openai/agents": "^0.18.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@openai/agents": "^0.18.0",
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8",
+    "zod": "^4.6.5"
+  }
+}

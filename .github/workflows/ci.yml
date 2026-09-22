@@ -60,7 +60,7 @@ jobs:
         run: go test ./...
 
   sdk:
-    name: sdk (typescript + mcp)
+    name: js packages (sdk, mcp, openai-agents)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

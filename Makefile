@@ -67,7 +67,7 @@ test: ## Run unit tests
 	$(GO) test ./...
 
 .PHONY: test-sdk
-test-sdk: ## Build and test the JavaScript packages (@vorash/sdk + @vorash/mcp); needs `npm install` at the repo root
+test-sdk: ## Build and test the JavaScript packages (sdk, mcp, openai-agents); needs `npm install` at the repo root
 	npm run build
 	npm run typecheck
 	npm test
