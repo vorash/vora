@@ -11,11 +11,13 @@ const (
 	ScopeSandbox = "sandbox"
 )
 
-// APIKey is a hashed caller credential.
+// APIKey is a hashed caller credential. An empty AgentID is a plain tenant
+// key; a bound key may only act as its agent.
 type APIKey struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
 	TenantID  string    `json:"tenant_id"`
+	AgentID   string    `json:"agent_id,omitempty"`
 	KeyHash   string    `json:"-"`
 	Scopes    []string  `json:"scopes"`
 	CreatedAt time.Time `json:"created_at"`
@@ -90,6 +92,7 @@ type SandboxRoute struct {
 	SandboxID   string `json:"sandbox_id"`
 	RunnerID    string `json:"runner_id"`
 	TenantID    string `json:"tenant_id"`
+	AgentID     string `json:"agent_id,omitempty"`
 	CPUMillis   int64  `json:"cpu_millis,omitempty"`
 	MemoryBytes int64  `json:"memory_bytes,omitempty"`
 }
@@ -100,6 +103,7 @@ type SnapshotRoute struct {
 	SnapshotID string `json:"snapshot_id"`
 	RunnerID   string `json:"runner_id"`
 	TenantID   string `json:"tenant_id"`
+	AgentID    string `json:"agent_id,omitempty"`
 	SandboxID  string `json:"sandbox_id"`
 }
 

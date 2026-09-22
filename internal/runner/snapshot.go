@@ -176,7 +176,7 @@ func (s *Server) ForkSnapshot(ctx context.Context, req *v1.ForkSnapshotRequest) 
 	}
 	// A fork that fails to start is left as a FAILED record, exactly like a
 	// create whose start fails: inspectable and destroyable, never hidden.
-	started, err := s.StartSandbox(ctx, &v1.StartSandboxRequest{SandboxId: rec.ID})
+	started, err := s.StartSandbox(ctx, &v1.StartSandboxRequest{SandboxId: rec.ID, Actor: req.GetActor()})
 	if err != nil {
 		return nil, err
 	}

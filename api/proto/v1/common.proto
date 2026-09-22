@@ -70,6 +70,14 @@ message BrokerCredential {
   string value = 5;
 }
 
+// Actor identifies the authenticated caller of a request-driven action, for
+// audit attribution. key_id is the API key that was used; the tenant and agent
+// identity on the resulting record are derived by the runner from the sandbox
+// spec, which is authoritative after create.
+message Actor {
+  string key_id = 1;
+}
+
 // SandboxSpec is the desired state for a sandbox.
 message SandboxSpec {
   string sandbox_id = 1;

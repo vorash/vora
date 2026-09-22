@@ -44,6 +44,7 @@ type fakeRunner struct {
 	deletedSnaps   []string
 	forked         []string
 	snapshotTenant string
+	actors         []*v1.Actor
 	closed         int
 }
 
@@ -62,7 +63,8 @@ func (f *fakeRunner) CreateSandboxWithCredentials(_ context.Context, spec *v1.Sa
 	return &v1.Sandbox{Id: "sbx_test", State: v1.SandboxState_RUNNING}, nil
 }
 
-func (f *fakeRunner) StartSandbox(_ context.Context, id string) (*v1.Sandbox, error) {
+func (f *fakeRunner) StartSandboxAs(_ context.Context, id string, actor *v1.Actor) (*v1.Sandbox, error) {
+	f.actors = append(f.actors, actor)
 	if f.startErr != nil {
 		return nil, f.startErr
 	}
@@ -80,8 +82,9 @@ func (f *fakeRunner) ListSandboxes(_ context.Context, _ bool) ([]*v1.Sandbox, er
 	return []*v1.Sandbox{{Id: "sbx_test"}}, nil
 }
 
-func (f *fakeRunner) DestroySandbox(ctx context.Context, id string) error {
+func (f *fakeRunner) DestroySandboxAs(ctx context.Context, id string, actor *v1.Actor) error {
 	f.destroyed = append(f.destroyed, id)
+	f.actors = append(f.actors, actor)
 	f.destroyCtxErr = ctx.Err()
 	return f.destroyErr
 }
@@ -118,7 +121,8 @@ func (f *fakeRunner) PutFile(_ context.Context, _, path string, content []byte, 
 	return int64(len(content)), nil
 }
 
-func (f *fakeRunner) Exec(_ context.Context, _ *v1.ExecSandboxRequest, _ ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ExecChunk], error) {
+func (f *fakeRunner) Exec(_ context.Context, req *v1.ExecSandboxRequest, _ ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ExecChunk], error) {
+	f.actors = append(f.actors, req.GetActor())
 	return &fakeStream{chunks: f.chunks}, nil
 }
 
@@ -154,8 +158,9 @@ func (f *fakeRunner) DeleteSnapshot(_ context.Context, id string) error {
 	return nil
 }
 
-func (f *fakeRunner) ForkSnapshotWithCredentials(_ context.Context, id string, _ []*v1.BrokerCredential) (*v1.Sandbox, error) {
+func (f *fakeRunner) ForkSnapshotWithCredentials(_ context.Context, id string, _ []*v1.BrokerCredential, actor *v1.Actor) (*v1.Sandbox, error) {
 	f.forked = append(f.forked, id)
+	f.actors = append(f.actors, actor)
 	return &v1.Sandbox{
 		Id:    "sbx_fork",
 		State: v1.SandboxState_RUNNING,

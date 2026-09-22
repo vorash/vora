@@ -57,11 +57,13 @@ message ListSandboxesResponse {
 
 message StartSandboxRequest {
   string sandbox_id = 1;
+  Actor actor = 2;
 }
 
 message ExecSandboxRequest {
   string sandbox_id = 1;
   ExecRequest exec = 2;
+  Actor actor = 3;
 }
 
 message SignalSandboxRequest {
@@ -167,6 +169,7 @@ message PutSandboxFileResponse {
 
 message DestroySandboxRequest {
   string sandbox_id = 1;
+  Actor actor = 2;
 }
 
 message DestroySandboxResponse {}
@@ -214,6 +217,7 @@ message ForkSnapshotRequest {
   // broker_secrets mirror CreateSandboxRequest: resolved credentials for the
   // inherited spec's broker_aliases, transient and never persisted.
   repeated BrokerCredential broker_secrets = 2;
+  Actor actor = 3;
 }
 
 message ForkSnapshotResponse {

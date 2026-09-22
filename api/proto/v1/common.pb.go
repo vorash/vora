@@ -429,6 +429,54 @@ func (x *BrokerCredential) GetValue() string {
 	return ""
 }
 
+// Actor identifies the authenticated caller of a request-driven action, for
+// audit attribution. key_id is the API key that was used; the tenant and agent
+// identity on the resulting record are derived by the runner from the sandbox
+// spec, which is authoritative after create.
+type Actor struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	KeyId         string                 `protobuf:"bytes,1,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Actor) Reset() {
+	*x = Actor{}
+	mi := &file_api_proto_v1_common_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Actor) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Actor) ProtoMessage() {}
+
+func (x *Actor) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_v1_common_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Actor.ProtoReflect.Descriptor instead.
+func (*Actor) Descriptor() ([]byte, []int) {
+	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *Actor) GetKeyId() string {
+	if x != nil {
+		return x.KeyId
+	}
+	return ""
+}
+
 // SandboxSpec is the desired state for a sandbox.
 type SandboxSpec struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -447,7 +495,7 @@ type SandboxSpec struct {
 
 func (x *SandboxSpec) Reset() {
 	*x = SandboxSpec{}
-	mi := &file_api_proto_v1_common_proto_msgTypes[3]
+	mi := &file_api_proto_v1_common_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -459,7 +507,7 @@ func (x *SandboxSpec) String() string {
 func (*SandboxSpec) ProtoMessage() {}
 
 func (x *SandboxSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_v1_common_proto_msgTypes[3]
+	mi := &file_api_proto_v1_common_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -472,7 +520,7 @@ func (x *SandboxSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SandboxSpec.ProtoReflect.Descriptor instead.
 func (*SandboxSpec) Descriptor() ([]byte, []int) {
-	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{3}
+	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *SandboxSpec) GetSandboxId() string {
@@ -555,7 +603,7 @@ type Sandbox struct {
 
 func (x *Sandbox) Reset() {
 	*x = Sandbox{}
-	mi := &file_api_proto_v1_common_proto_msgTypes[4]
+	mi := &file_api_proto_v1_common_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -567,7 +615,7 @@ func (x *Sandbox) String() string {
 func (*Sandbox) ProtoMessage() {}
 
 func (x *Sandbox) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_v1_common_proto_msgTypes[4]
+	mi := &file_api_proto_v1_common_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -580,7 +628,7 @@ func (x *Sandbox) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Sandbox.ProtoReflect.Descriptor instead.
 func (*Sandbox) Descriptor() ([]byte, []int) {
-	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{4}
+	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Sandbox) GetId() string {
@@ -655,7 +703,7 @@ type ExecRequest struct {
 
 func (x *ExecRequest) Reset() {
 	*x = ExecRequest{}
-	mi := &file_api_proto_v1_common_proto_msgTypes[5]
+	mi := &file_api_proto_v1_common_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -667,7 +715,7 @@ func (x *ExecRequest) String() string {
 func (*ExecRequest) ProtoMessage() {}
 
 func (x *ExecRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_v1_common_proto_msgTypes[5]
+	mi := &file_api_proto_v1_common_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -680,7 +728,7 @@ func (x *ExecRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecRequest.ProtoReflect.Descriptor instead.
 func (*ExecRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{5}
+	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ExecRequest) GetExecutionId() string {
@@ -743,7 +791,7 @@ type ExecExit struct {
 
 func (x *ExecExit) Reset() {
 	*x = ExecExit{}
-	mi := &file_api_proto_v1_common_proto_msgTypes[6]
+	mi := &file_api_proto_v1_common_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -755,7 +803,7 @@ func (x *ExecExit) String() string {
 func (*ExecExit) ProtoMessage() {}
 
 func (x *ExecExit) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_v1_common_proto_msgTypes[6]
+	mi := &file_api_proto_v1_common_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -768,7 +816,7 @@ func (x *ExecExit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecExit.ProtoReflect.Descriptor instead.
 func (*ExecExit) Descriptor() ([]byte, []int) {
-	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{6}
+	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ExecExit) GetExitCode() int32 {
@@ -800,7 +848,7 @@ type ExecChunk struct {
 
 func (x *ExecChunk) Reset() {
 	*x = ExecChunk{}
-	mi := &file_api_proto_v1_common_proto_msgTypes[7]
+	mi := &file_api_proto_v1_common_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -812,7 +860,7 @@ func (x *ExecChunk) String() string {
 func (*ExecChunk) ProtoMessage() {}
 
 func (x *ExecChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_v1_common_proto_msgTypes[7]
+	mi := &file_api_proto_v1_common_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -825,7 +873,7 @@ func (x *ExecChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecChunk.ProtoReflect.Descriptor instead.
 func (*ExecChunk) Descriptor() ([]byte, []int) {
-	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{7}
+	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ExecChunk) GetPayload() isExecChunk_Payload {
@@ -899,7 +947,7 @@ type Stats struct {
 
 func (x *Stats) Reset() {
 	*x = Stats{}
-	mi := &file_api_proto_v1_common_proto_msgTypes[8]
+	mi := &file_api_proto_v1_common_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -911,7 +959,7 @@ func (x *Stats) String() string {
 func (*Stats) ProtoMessage() {}
 
 func (x *Stats) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_v1_common_proto_msgTypes[8]
+	mi := &file_api_proto_v1_common_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -924,7 +972,7 @@ func (x *Stats) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Stats.ProtoReflect.Descriptor instead.
 func (*Stats) Descriptor() ([]byte, []int) {
-	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{8}
+	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Stats) GetMemoryBytes() int64 {
@@ -990,7 +1038,9 @@ const file_api_proto_v1_common_proto_rawDesc = "" +
 	"\x04host\x18\x02 \x01(\tR\x04host\x12\x16\n" +
 	"\x06scheme\x18\x03 \x01(\tR\x06scheme\x12\x16\n" +
 	"\x06header\x18\x04 \x01(\tR\x06header\x12\x14\n" +
-	"\x05value\x18\x05 \x01(\tR\x05value\"\xb0\x02\n" +
+	"\x05value\x18\x05 \x01(\tR\x05value\"\x1e\n" +
+	"\x05Actor\x12\x15\n" +
+	"\x06key_id\x18\x01 \x01(\tR\x05keyId\"\xb0\x02\n" +
 	"\vSandboxSpec\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12\x1b\n" +
@@ -1083,7 +1133,7 @@ func file_api_proto_v1_common_proto_rawDescGZIP() []byte {
 }
 
 var file_api_proto_v1_common_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_api_proto_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_api_proto_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_api_proto_v1_common_proto_goTypes = []any{
 	(SandboxState)(0),        // 0: vora.v1.SandboxState
 	(NetworkMode)(0),         // 1: vora.v1.NetworkMode
@@ -1091,27 +1141,28 @@ var file_api_proto_v1_common_proto_goTypes = []any{
 	(*ResourceLimits)(nil),   // 3: vora.v1.ResourceLimits
 	(*NetworkPolicy)(nil),    // 4: vora.v1.NetworkPolicy
 	(*BrokerCredential)(nil), // 5: vora.v1.BrokerCredential
-	(*SandboxSpec)(nil),      // 6: vora.v1.SandboxSpec
-	(*Sandbox)(nil),          // 7: vora.v1.Sandbox
-	(*ExecRequest)(nil),      // 8: vora.v1.ExecRequest
-	(*ExecExit)(nil),         // 9: vora.v1.ExecExit
-	(*ExecChunk)(nil),        // 10: vora.v1.ExecChunk
-	(*Stats)(nil),            // 11: vora.v1.Stats
+	(*Actor)(nil),            // 6: vora.v1.Actor
+	(*SandboxSpec)(nil),      // 7: vora.v1.SandboxSpec
+	(*Sandbox)(nil),          // 8: vora.v1.Sandbox
+	(*ExecRequest)(nil),      // 9: vora.v1.ExecRequest
+	(*ExecExit)(nil),         // 10: vora.v1.ExecExit
+	(*ExecChunk)(nil),        // 11: vora.v1.ExecChunk
+	(*Stats)(nil),            // 12: vora.v1.Stats
 }
 var file_api_proto_v1_common_proto_depIdxs = []int32{
-	1, // 0: vora.v1.NetworkPolicy.mode:type_name -> vora.v1.NetworkMode
-	3, // 1: vora.v1.SandboxSpec.resources:type_name -> vora.v1.ResourceLimits
-	4, // 2: vora.v1.SandboxSpec.network:type_name -> vora.v1.NetworkPolicy
-	6, // 3: vora.v1.Sandbox.spec:type_name -> vora.v1.SandboxSpec
-	0, // 4: vora.v1.Sandbox.state:type_name -> vora.v1.SandboxState
-	2, // 5: vora.v1.Sandbox.reason:type_name -> vora.v1.ExitReason
-	2, // 6: vora.v1.ExecExit.reason:type_name -> vora.v1.ExitReason
-	9, // 7: vora.v1.ExecChunk.exit:type_name -> vora.v1.ExecExit
-	8, // [8:8] is the sub-list for method output_type
-	8, // [8:8] is the sub-list for method input_type
-	8, // [8:8] is the sub-list for extension type_name
-	8, // [8:8] is the sub-list for extension extendee
-	0, // [0:8] is the sub-list for field type_name
+	1,  // 0: vora.v1.NetworkPolicy.mode:type_name -> vora.v1.NetworkMode
+	3,  // 1: vora.v1.SandboxSpec.resources:type_name -> vora.v1.ResourceLimits
+	4,  // 2: vora.v1.SandboxSpec.network:type_name -> vora.v1.NetworkPolicy
+	7,  // 3: vora.v1.Sandbox.spec:type_name -> vora.v1.SandboxSpec
+	0,  // 4: vora.v1.Sandbox.state:type_name -> vora.v1.SandboxState
+	2,  // 5: vora.v1.Sandbox.reason:type_name -> vora.v1.ExitReason
+	2,  // 6: vora.v1.ExecExit.reason:type_name -> vora.v1.ExitReason
+	10, // 7: vora.v1.ExecChunk.exit:type_name -> vora.v1.ExecExit
+	8,  // [8:8] is the sub-list for method output_type
+	8,  // [8:8] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_api_proto_v1_common_proto_init() }
@@ -1119,7 +1170,7 @@ func file_api_proto_v1_common_proto_init() {
 	if File_api_proto_v1_common_proto != nil {
 		return
 	}
-	file_api_proto_v1_common_proto_msgTypes[7].OneofWrappers = []any{
+	file_api_proto_v1_common_proto_msgTypes[8].OneofWrappers = []any{
 		(*ExecChunk_Stdout)(nil),
 		(*ExecChunk_Stderr)(nil),
 		(*ExecChunk_Exit)(nil),
@@ -1130,7 +1181,7 @@ func file_api_proto_v1_common_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_proto_v1_common_proto_rawDesc), len(file_api_proto_v1_common_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   9,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

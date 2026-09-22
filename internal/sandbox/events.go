@@ -15,6 +15,7 @@ const EventsFile = "events.jsonl"
 // Event is one lifecycle transition, persisted for audit.
 type Event struct {
 	SandboxID string    `json:"sandbox_id"`
+	Actor     Actor     `json:"actor"`
 	From      State     `json:"from"`
 	To        State     `json:"to"`
 	Reason    string    `json:"reason,omitempty"`

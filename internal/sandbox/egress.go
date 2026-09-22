@@ -17,6 +17,7 @@ const EgressFile = "egress.jsonl"
 // value.
 type EgressRecord struct {
 	SandboxID string    `json:"sandbox_id"`
+	Actor     Actor     `json:"actor"`
 	Host      string    `json:"host,omitempty"`
 	Remote    string    `json:"remote,omitempty"`
 	Alias     string    `json:"alias,omitempty"`

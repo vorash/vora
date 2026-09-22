@@ -51,5 +51,17 @@ CREATE TABLE IF NOT EXISTS sandbox_egress (
 -- secret value).
 ALTER TABLE sandbox_egress ADD COLUMN IF NOT EXISTS alias TEXT NOT NULL DEFAULT '';
 
+-- Records attribute actions to the caller: tenant and agent identity are
+-- derived from the sandbox spec, key_id marks request-driven actions (ADR 025).
+ALTER TABLE sandbox_events ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE sandbox_events ADD COLUMN IF NOT EXISTS agent_identity TEXT NOT NULL DEFAULT '';
+ALTER TABLE sandbox_events ADD COLUMN IF NOT EXISTS key_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE sandbox_execs ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE sandbox_execs ADD COLUMN IF NOT EXISTS agent_identity TEXT NOT NULL DEFAULT '';
+ALTER TABLE sandbox_execs ADD COLUMN IF NOT EXISTS key_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE sandbox_egress ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE sandbox_egress ADD COLUMN IF NOT EXISTS agent_identity TEXT NOT NULL DEFAULT '';
+ALTER TABLE sandbox_egress ADD COLUMN IF NOT EXISTS key_id TEXT NOT NULL DEFAULT '';
+
 CREATE INDEX IF NOT EXISTS sandbox_egress_sandbox_id_idx
     ON sandbox_egress (sandbox_id, occurred_at, id);

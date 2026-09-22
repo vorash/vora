@@ -15,6 +15,7 @@ create table if not exists api_keys (
   id           text primary key,
   name         text not null default '',
   tenant_id    text not null default '',
+  agent_id     text not null default '',
   key_hash     text not null unique,
   scopes       text[] not null default '{}',
   created_at   timestamptz not null default now(),
@@ -37,14 +38,17 @@ create table if not exists runners (
 );
 alter table runners add column if not exists network_modes text[] not null default '{}';
 alter table runners add column if not exists tunneled boolean not null default false;
+alter table api_keys add column if not exists agent_id text not null default '';
 
 create table if not exists sandbox_routes (
   sandbox_id text primary key,
   runner_id  text not null,
   tenant_id  text not null default '',
+  agent_id   text not null default '',
   created_at timestamptz not null default now()
 );
 alter table sandbox_routes add column if not exists tenant_id text not null default '';
+alter table sandbox_routes add column if not exists agent_id text not null default '';
 alter table sandbox_routes add column if not exists cpu_millis bigint not null default 0;
 alter table sandbox_routes add column if not exists memory_bytes bigint not null default 0;
 create index if not exists sandbox_routes_tenant_idx on sandbox_routes (tenant_id);
@@ -53,9 +57,11 @@ create table if not exists snapshot_routes (
   snapshot_id text primary key,
   runner_id   text not null,
   tenant_id   text not null default '',
+  agent_id    text not null default '',
   sandbox_id  text not null default '',
   created_at  timestamptz not null default now()
 );
+alter table snapshot_routes add column if not exists agent_id text not null default '';
 create index if not exists snapshot_routes_tenant_idx on snapshot_routes (tenant_id);
 `
 
@@ -86,15 +92,15 @@ func (s *PostgresStore) Close() error {
 
 func (s *PostgresStore) CreateKey(ctx context.Context, key APIKey) error {
 	_, err := s.pool.Exec(ctx,
-		`insert into api_keys (id, name, tenant_id, key_hash, scopes, created_at, revoked)
-		 values ($1,$2,$3,$4,$5,$6,$7)`,
-		key.ID, key.Name, key.TenantID, key.KeyHash, key.Scopes, key.CreatedAt, key.Revoked)
+		`insert into api_keys (id, name, tenant_id, agent_id, key_hash, scopes, created_at, revoked)
+		 values ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		key.ID, key.Name, key.TenantID, key.AgentID, key.KeyHash, key.Scopes, key.CreatedAt, key.Revoked)
 	return err
 }
 
 func (s *PostgresStore) ListKeys(ctx context.Context, tenant string) ([]APIKey, error) {
 	rows, err := s.pool.Query(ctx,
-		`select id, name, tenant_id, scopes, created_at, coalesce(last_used, 'epoch'::timestamptz), revoked
+		`select id, name, tenant_id, agent_id, scopes, created_at, coalesce(last_used, 'epoch'::timestamptz), revoked
 		   from api_keys
 		  where ($1 = '' or tenant_id = $1)
 		  order by created_at`, tenant)
@@ -105,7 +111,7 @@ func (s *PostgresStore) ListKeys(ctx context.Context, tenant string) ([]APIKey, 
 	var out []APIKey
 	for rows.Next() {
 		var k APIKey
-		if err := rows.Scan(&k.ID, &k.Name, &k.TenantID, &k.Scopes, &k.CreatedAt, &k.LastUsed, &k.Revoked); err != nil {
+		if err := rows.Scan(&k.ID, &k.Name, &k.TenantID, &k.AgentID, &k.Scopes, &k.CreatedAt, &k.LastUsed, &k.Revoked); err != nil {
 			return nil, err
 		}
 		k.KeyHash = ""
@@ -117,9 +123,9 @@ func (s *PostgresStore) ListKeys(ctx context.Context, tenant string) ([]APIKey, 
 func (s *PostgresStore) Key(ctx context.Context, id string) (APIKey, error) {
 	var k APIKey
 	err := s.pool.QueryRow(ctx,
-		`select id, name, tenant_id, scopes, created_at, coalesce(last_used, 'epoch'::timestamptz), revoked
+		`select id, name, tenant_id, agent_id, scopes, created_at, coalesce(last_used, 'epoch'::timestamptz), revoked
 		   from api_keys where id = $1`, id).
-		Scan(&k.ID, &k.Name, &k.TenantID, &k.Scopes, &k.CreatedAt, &k.LastUsed, &k.Revoked)
+		Scan(&k.ID, &k.Name, &k.TenantID, &k.AgentID, &k.Scopes, &k.CreatedAt, &k.LastUsed, &k.Revoked)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return APIKey{}, ErrNotFound
 	}
@@ -129,9 +135,9 @@ func (s *PostgresStore) Key(ctx context.Context, id string) (APIKey, error) {
 func (s *PostgresStore) KeyByHash(ctx context.Context, hash string) (APIKey, error) {
 	var k APIKey
 	err := s.pool.QueryRow(ctx,
-		`select id, name, tenant_id, key_hash, scopes, created_at, coalesce(last_used, 'epoch'::timestamptz), revoked
+		`select id, name, tenant_id, agent_id, key_hash, scopes, created_at, coalesce(last_used, 'epoch'::timestamptz), revoked
 		   from api_keys where key_hash = $1`, hash).
-		Scan(&k.ID, &k.Name, &k.TenantID, &k.KeyHash, &k.Scopes, &k.CreatedAt, &k.LastUsed, &k.Revoked)
+		Scan(&k.ID, &k.Name, &k.TenantID, &k.AgentID, &k.KeyHash, &k.Scopes, &k.CreatedAt, &k.LastUsed, &k.Revoked)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return APIKey{}, ErrNotFound
 	}
@@ -218,17 +224,17 @@ func (s *PostgresStore) Runner(ctx context.Context, id string) (Runner, error) {
 
 func (s *PostgresStore) SetRoute(ctx context.Context, route SandboxRoute) error {
 	_, err := s.pool.Exec(ctx,
-		`insert into sandbox_routes (sandbox_id, runner_id, tenant_id, cpu_millis, memory_bytes) values ($1,$2,$3,$4,$5)
+		`insert into sandbox_routes (sandbox_id, runner_id, tenant_id, agent_id, cpu_millis, memory_bytes) values ($1,$2,$3,$4,$5,$6)
 		 on conflict (sandbox_id) do update set runner_id = excluded.runner_id, tenant_id = excluded.tenant_id,
-		   cpu_millis = excluded.cpu_millis, memory_bytes = excluded.memory_bytes`,
-		route.SandboxID, route.RunnerID, route.TenantID, route.CPUMillis, route.MemoryBytes)
+		   agent_id = excluded.agent_id, cpu_millis = excluded.cpu_millis, memory_bytes = excluded.memory_bytes`,
+		route.SandboxID, route.RunnerID, route.TenantID, route.AgentID, route.CPUMillis, route.MemoryBytes)
 	return err
 }
 
 func (s *PostgresStore) Route(ctx context.Context, sandboxID string) (SandboxRoute, error) {
 	route := SandboxRoute{SandboxID: sandboxID}
-	err := s.pool.QueryRow(ctx, `select runner_id, tenant_id, cpu_millis, memory_bytes from sandbox_routes where sandbox_id = $1`, sandboxID).
-		Scan(&route.RunnerID, &route.TenantID, &route.CPUMillis, &route.MemoryBytes)
+	err := s.pool.QueryRow(ctx, `select runner_id, tenant_id, agent_id, cpu_millis, memory_bytes from sandbox_routes where sandbox_id = $1`, sandboxID).
+		Scan(&route.RunnerID, &route.TenantID, &route.AgentID, &route.CPUMillis, &route.MemoryBytes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SandboxRoute{}, ErrNotFound
 	}
@@ -236,7 +242,7 @@ func (s *PostgresStore) Route(ctx context.Context, sandboxID string) (SandboxRou
 }
 
 func (s *PostgresStore) ListRoutes(ctx context.Context) ([]SandboxRoute, error) {
-	rows, err := s.pool.Query(ctx, `select sandbox_id, runner_id, tenant_id, cpu_millis, memory_bytes from sandbox_routes`)
+	rows, err := s.pool.Query(ctx, `select sandbox_id, runner_id, tenant_id, agent_id, cpu_millis, memory_bytes from sandbox_routes`)
 	if err != nil {
 		return nil, err
 	}
@@ -244,7 +250,7 @@ func (s *PostgresStore) ListRoutes(ctx context.Context) ([]SandboxRoute, error) 
 	var out []SandboxRoute
 	for rows.Next() {
 		var r SandboxRoute
-		if err := rows.Scan(&r.SandboxID, &r.RunnerID, &r.TenantID, &r.CPUMillis, &r.MemoryBytes); err != nil {
+		if err := rows.Scan(&r.SandboxID, &r.RunnerID, &r.TenantID, &r.AgentID, &r.CPUMillis, &r.MemoryBytes); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -259,17 +265,17 @@ func (s *PostgresStore) DeleteRoute(ctx context.Context, sandboxID string) error
 
 func (s *PostgresStore) SetSnapshotRoute(ctx context.Context, route SnapshotRoute) error {
 	_, err := s.pool.Exec(ctx,
-		`insert into snapshot_routes (snapshot_id, runner_id, tenant_id, sandbox_id) values ($1,$2,$3,$4)
+		`insert into snapshot_routes (snapshot_id, runner_id, tenant_id, agent_id, sandbox_id) values ($1,$2,$3,$4,$5)
 		 on conflict (snapshot_id) do update set runner_id = excluded.runner_id, tenant_id = excluded.tenant_id,
-		   sandbox_id = excluded.sandbox_id`,
-		route.SnapshotID, route.RunnerID, route.TenantID, route.SandboxID)
+		   agent_id = excluded.agent_id, sandbox_id = excluded.sandbox_id`,
+		route.SnapshotID, route.RunnerID, route.TenantID, route.AgentID, route.SandboxID)
 	return err
 }
 
 func (s *PostgresStore) SnapshotRoute(ctx context.Context, snapshotID string) (SnapshotRoute, error) {
 	route := SnapshotRoute{SnapshotID: snapshotID}
-	err := s.pool.QueryRow(ctx, `select runner_id, tenant_id, sandbox_id from snapshot_routes where snapshot_id = $1`, snapshotID).
-		Scan(&route.RunnerID, &route.TenantID, &route.SandboxID)
+	err := s.pool.QueryRow(ctx, `select runner_id, tenant_id, agent_id, sandbox_id from snapshot_routes where snapshot_id = $1`, snapshotID).
+		Scan(&route.RunnerID, &route.TenantID, &route.AgentID, &route.SandboxID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SnapshotRoute{}, ErrNotFound
 	}

@@ -21,6 +21,7 @@ import (
 	"github.com/vorash/vora/internal/cgroup"
 	"github.com/vorash/vora/internal/config"
 	"github.com/vorash/vora/internal/egress"
+	"github.com/vorash/vora/internal/identity"
 	"github.com/vorash/vora/internal/images"
 	"github.com/vorash/vora/internal/quota"
 	"github.com/vorash/vora/internal/runtime"
@@ -130,6 +131,7 @@ func (s *Server) RecordEgress(event egress.Event) error {
 	s.metrics.NetworkDecisionsTotal.WithLabelValues(decision, reason).Inc()
 	record := sandbox.EgressRecord{
 		SandboxID: event.SandboxID,
+		Actor:     s.recordActor(event.SandboxID, ""),
 		Host:      event.Host,
 		Remote:    event.Remote,
 		Alias:     event.Alias,
@@ -277,6 +279,7 @@ func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) 
 	if rec.State != sandbox.StateRequested {
 		return nil, status.Errorf(codes.FailedPrecondition, "sandbox %s is in state %s", rec.ID, rec.State)
 	}
+	keyID := req.GetActor().GetKeyId()
 	backend, err := s.selectBackend(rec.Spec)
 	if err != nil {
 		return nil, err
@@ -298,21 +301,21 @@ func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) 
 	}
 	rootfs, err := s.images.Resolve(ctx, rec.Spec.Image)
 	if err != nil {
-		s.fail(rec, runtime.ReasonRuntimeFailure)
+		s.fail(rec, runtime.ReasonRuntimeFailure, keyID)
 		return nil, status.Error(codes.FailedPrecondition, err.Error())
 	}
 	if rootfs != rec.Spec.Workspace.RootfsDir {
 		rec.Spec.Workspace.RootfsDir = rootfs
 		if err := s.store.Save(rec); err != nil {
-			s.fail(rec, runtime.ReasonRuntimeFailure)
+			s.fail(rec, runtime.ReasonRuntimeFailure, keyID)
 			return nil, status.Error(codes.Internal, "failed to persist resolved rootfs")
 		}
 	}
 
-	if err := s.transition(rec, sandbox.StateScheduling, ""); err != nil {
+	if err := s.transition(rec, sandbox.StateScheduling, "", keyID); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	if err := s.transition(rec, sandbox.StateCreating, ""); err != nil {
+	if err := s.transition(rec, sandbox.StateCreating, "", keyID); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
@@ -323,10 +326,10 @@ func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) 
 	defer span.End()
 	h, err := backend.Create(ctx, rec.Spec)
 	if err != nil {
-		s.fail(rec, runtime.ReasonRuntimeFailure)
+		s.fail(rec, runtime.ReasonRuntimeFailure, keyID)
 		return nil, status.Errorf(codes.Internal, "create sandbox: %v", err)
 	}
-	if err := s.transition(rec, sandbox.StateStarting, ""); err != nil {
+	if err := s.transition(rec, sandbox.StateStarting, "", keyID); err != nil {
 		_ = backend.Destroy(ctx, h)
 		return nil, status.Error(codes.Internal, err.Error())
 	}
@@ -335,7 +338,7 @@ func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) 
 		ba, ok := backend.(runtime.BrokerAware)
 		if !ok {
 			_ = backend.Destroy(ctx, h)
-			s.fail(rec, runtime.ReasonRuntimeFailure)
+			s.fail(rec, runtime.ReasonRuntimeFailure, keyID)
 			return nil, status.Errorf(codes.InvalidArgument, "backend %s does not support credential brokering", backend.Name())
 		}
 		startErr = ba.StartWithCredentials(ctx, h, creds)
@@ -344,11 +347,11 @@ func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) 
 	}
 	if startErr != nil {
 		_ = backend.Destroy(ctx, h)
-		s.fail(rec, runtime.ReasonRuntimeFailure)
+		s.fail(rec, runtime.ReasonRuntimeFailure, keyID)
 		return nil, status.Errorf(codes.Internal, "start sandbox: %v", startErr)
 	}
 	s.putHandle(rec.ID, backend, h)
-	if err := s.transition(rec, sandbox.StateRunning, ""); err != nil {
+	if err := s.transition(rec, sandbox.StateRunning, "", keyID); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	s.metrics.SandboxRunning.Inc()
@@ -378,7 +381,7 @@ func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStrea
 	baseline := s.usageBaseline(execCtx, backend, h)
 	es, err := backend.Exec(execCtx, h, execReq)
 	if err != nil {
-		s.recordExec(req.GetSandboxId(), execReq, started, 0, 0, 0, runtime.ReasonRuntimeFailure, 0, 0)
+		s.recordExec(req.GetSandboxId(), execReq, started, 0, 0, 0, runtime.ReasonRuntimeFailure, 0, 0, req.GetActor().GetKeyId())
 		s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure)).Inc()
 		return status.Errorf(codes.Internal, "exec: %v", err)
 	}
@@ -394,7 +397,7 @@ func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStrea
 		if err != nil {
 			if !recorded {
 				cpu, peak := s.usageDelta(stream.Context(), backend, h, baseline)
-				s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure, cpu, peak)
+				s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure, cpu, peak, req.GetActor().GetKeyId())
 				s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure)).Inc()
 			}
 			return status.Errorf(codes.Internal, "exec stream: %v", err)
@@ -407,7 +410,7 @@ func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStrea
 			// after forwarding it), so the record must be on disk first. The exit
 			// chunk is final, so the byte totals are complete here.
 			cpu, peak := s.usageDelta(stream.Context(), backend, h, baseline)
-			s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, chunk.Exit.ExitCode, chunk.Exit.Reason, cpu, peak)
+			s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, chunk.Exit.ExitCode, chunk.Exit.Reason, cpu, peak, req.GetActor().GetKeyId())
 			s.metrics.ExecTotal.WithLabelValues("ok").Inc()
 			recorded = true
 		}
@@ -422,19 +425,20 @@ func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStrea
 	// EOF with no exit record is a killed run (watchdog, timeout, agent
 	// death) — never a silent success.
 	cpu, peak := s.usageDelta(stream.Context(), backend, h, baseline)
-	s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure, cpu, peak)
+	s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure, cpu, peak, req.GetActor().GetKeyId())
 	s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure)).Inc()
 	return status.Error(codes.Internal, "exec stream ended without an exit record (the run was killed)")
 }
 
 // recordExec persists an execution audit record. Failures are logged, not
 // fatal: losing an audit write must not fail the caller's command.
-func (s *Server) recordExec(sandboxID string, req runtime.ExecRequest, started time.Time, stdoutBytes, stderrBytes int64, code int, reason runtime.ExitReason, cpuMillis, memPeak int64) {
+func (s *Server) recordExec(sandboxID string, req runtime.ExecRequest, started time.Time, stdoutBytes, stderrBytes int64, code int, reason runtime.ExitReason, cpuMillis, memPeak int64, keyID string) {
 	finished := time.Now().UTC()
 	allowed, denied := s.egressInWindow(sandboxID, started, finished)
 	rec := sandbox.ExecRecord{
 		ExecutionID:     req.ExecutionID,
 		SandboxID:       sandboxID,
+		Actor:           s.recordActor(sandboxID, keyID),
 		Command:         req.Command,
 		Args:            req.Args,
 		Cwd:             req.Cwd,
@@ -548,14 +552,14 @@ func (s *Server) StatsSandbox(ctx context.Context, req *v1.StatsSandboxRequest) 
 // DestroySandbox stops a sandbox, releases its resources and records the
 // tombstone. It is idempotent.
 func (s *Server) DestroySandbox(ctx context.Context, req *v1.DestroySandboxRequest) (*v1.DestroySandboxResponse, error) {
-	if err := s.destroy(ctx, req.GetSandboxId()); err != nil {
+	if err := s.destroy(ctx, req.GetSandboxId(), req.GetActor().GetKeyId()); err != nil {
 		return nil, err
 	}
 	return &v1.DestroySandboxResponse{}, nil
 }
 
 // destroy releases a sandbox's runtime resources and marks it DESTROYED.
-func (s *Server) destroy(ctx context.Context, id string) error {
+func (s *Server) destroy(ctx context.Context, id, keyID string) error {
 	rec, err := s.store.Load(id)
 	if err != nil {
 		return s.loadError(err, id)
@@ -572,7 +576,7 @@ func (s *Server) destroy(ctx context.Context, id string) error {
 		s.metrics.RunnerSandboxes.Dec()
 	}
 	if rec.State != sandbox.StateDestroyed {
-		if err := s.transition(rec, sandbox.StateDestroyed, rec.Reason); err != nil {
+		if err := s.transition(rec, sandbox.StateDestroyed, rec.Reason, keyID); err != nil {
 			s.logger.Warn("state transition on destroy failed", "sandbox_id", rec.ID, "state", rec.State, "error", err)
 		}
 	}
@@ -638,8 +642,8 @@ func (s *Server) EnforceDiskQuota(ctx context.Context) error {
 		}
 		s.logger.Warn("sandbox exceeded disk quota",
 			"sandbox_id", rec.ID, "used_bytes", used, "limit_bytes", limit)
-		s.fail(rec, runtime.ReasonDiskQuota)
-		if err := s.destroy(ctx, rec.ID); err != nil {
+		s.fail(rec, runtime.ReasonDiskQuota, "")
+		if err := s.destroy(ctx, rec.ID, ""); err != nil {
 			s.logger.Warn("destroy over-quota sandbox failed", "sandbox_id", rec.ID, "error", err)
 		}
 	}
@@ -661,11 +665,11 @@ func (s *Server) ReapExpired(ctx context.Context) error {
 			continue
 		}
 		s.logger.Info("sandbox TTL expired", "sandbox_id", rec.ID, "ttl", rec.Spec.TTL.String())
-		if err := s.transition(rec, sandbox.StateExpired, runtime.ReasonTimeout); err != nil {
+		if err := s.transition(rec, sandbox.StateExpired, runtime.ReasonTimeout, ""); err != nil {
 			s.logger.Warn("expire transition failed", "sandbox_id", rec.ID, "error", err)
 			continue
 		}
-		if err := s.destroy(ctx, rec.ID); err != nil {
+		if err := s.destroy(ctx, rec.ID, ""); err != nil {
 			s.logger.Warn("destroy expired sandbox failed", "sandbox_id", rec.ID, "error", err)
 		}
 	}
@@ -698,7 +702,7 @@ func (s *Server) Reconcile(ctx context.Context) error {
 			s.metrics.SandboxRunning.Dec()
 			s.metrics.RunnerSandboxes.Dec()
 		}
-		if err := s.transition(rec, sandbox.StateFailed, runtime.ReasonRuntimeFailure); err != nil {
+		if err := s.transition(rec, sandbox.StateFailed, runtime.ReasonRuntimeFailure, ""); err != nil {
 			s.logger.Warn("reconcile: transition failed", "sandbox_id", rec.ID, "error", err)
 		}
 		s.releaseDiskQuota(ctx, rec)
@@ -912,7 +916,29 @@ func (s *Server) selectBackend(spec runtime.SandboxSpec) (runtime.Backend, error
 	return nil, status.Error(codes.Unavailable, "no runtime backend is registered")
 }
 
-func (s *Server) transition(rec *sandbox.Record, to sandbox.State, reason runtime.ExitReason) error {
+// actorFor attributes an audit record to the sandbox's owner. Tenant and agent
+// identity are derived from the persisted spec, which is authoritative after
+// create; keyID marks request-driven actions and is empty for machinery
+// transitions.
+func actorFor(spec runtime.SandboxSpec, keyID string) sandbox.Actor {
+	actor := sandbox.Actor{TenantID: spec.TenantID, KeyID: keyID}
+	if spec.AgentID != "" {
+		actor.AgentIdentity = identity.Agent{Tenant: spec.TenantID, Name: spec.AgentID}.URI()
+	}
+	return actor
+}
+
+// recordActor attributes a record for a sandbox whose record may not load;
+// losing attribution must never lose the record itself.
+func (s *Server) recordActor(sandboxID, keyID string) sandbox.Actor {
+	rec, err := s.store.Load(sandboxID)
+	if err != nil {
+		return sandbox.Actor{KeyID: keyID}
+	}
+	return actorFor(rec.Spec, keyID)
+}
+
+func (s *Server) transition(rec *sandbox.Record, to sandbox.State, reason runtime.ExitReason, keyID string) error {
 	if rec.State == to {
 		return nil
 	}
@@ -925,6 +951,7 @@ func (s *Server) transition(rec *sandbox.Record, to sandbox.State, reason runtim
 	}
 	event := sandbox.Event{
 		SandboxID: rec.ID,
+		Actor:     actorFor(rec.Spec, keyID),
 		From:      from,
 		To:        to,
 		Reason:    string(reason),
@@ -936,9 +963,9 @@ func (s *Server) transition(rec *sandbox.Record, to sandbox.State, reason runtim
 	return nil
 }
 
-func (s *Server) fail(rec *sandbox.Record, reason runtime.ExitReason) {
+func (s *Server) fail(rec *sandbox.Record, reason runtime.ExitReason, keyID string) {
 	s.metrics.SandboxFailedTotal.WithLabelValues(string(reason)).Inc()
-	if err := s.transition(rec, sandbox.StateFailed, reason); err != nil {
+	if err := s.transition(rec, sandbox.StateFailed, reason, keyID); err != nil {
 		s.logger.Warn("failed to record FAILED state", "sandbox_id", rec.ID, "state", rec.State, "error", err)
 	}
 }

@@ -96,8 +96,15 @@ func (c *Client) CreateSandboxWithCredentials(ctx context.Context, spec *v1.Sand
 }
 
 // StartSandbox starts a requested sandbox.
+// StartSandbox starts a created sandbox.
 func (c *Client) StartSandbox(ctx context.Context, id string) (*v1.Sandbox, error) {
-	return c.stub.StartSandbox(ctx, &v1.StartSandboxRequest{SandboxId: id})
+	return c.StartSandboxAs(ctx, id, nil)
+}
+
+// StartSandboxAs starts a created sandbox, attributing the transition to the
+// caller's actor for audit.
+func (c *Client) StartSandboxAs(ctx context.Context, id string, actor *v1.Actor) (*v1.Sandbox, error) {
+	return c.stub.StartSandbox(ctx, &v1.StartSandboxRequest{SandboxId: id, Actor: actor})
 }
 
 // GetSandbox returns a sandbox by id.
@@ -115,8 +122,15 @@ func (c *Client) ListSandboxes(ctx context.Context, includeDestroyed bool) ([]*v
 }
 
 // DestroySandbox destroys a sandbox.
+// DestroySandbox destroys a sandbox.
 func (c *Client) DestroySandbox(ctx context.Context, id string) error {
-	_, err := c.stub.DestroySandbox(ctx, &v1.DestroySandboxRequest{SandboxId: id})
+	return c.DestroySandboxAs(ctx, id, nil)
+}
+
+// DestroySandboxAs destroys a sandbox, attributing the transition to the
+// caller's actor for audit.
+func (c *Client) DestroySandboxAs(ctx context.Context, id string, actor *v1.Actor) error {
+	_, err := c.stub.DestroySandbox(ctx, &v1.DestroySandboxRequest{SandboxId: id, Actor: actor})
 	return err
 }
 
@@ -217,14 +231,14 @@ func (c *Client) DeleteSnapshot(ctx context.Context, id string) error {
 
 // ForkSnapshot creates and starts a sandbox from a snapshot.
 func (c *Client) ForkSnapshot(ctx context.Context, id string) (*v1.Sandbox, error) {
-	return c.ForkSnapshotWithCredentials(ctx, id, nil)
+	return c.ForkSnapshotWithCredentials(ctx, id, nil, nil)
 }
 
 // ForkSnapshotWithCredentials forks a snapshot and carries the resolved broker
 // credentials for the inherited spec's aliases. The credentials are used only
 // to build the fork's broker; they are never persisted.
-func (c *Client) ForkSnapshotWithCredentials(ctx context.Context, id string, creds []*v1.BrokerCredential) (*v1.Sandbox, error) {
-	resp, err := c.stub.ForkSnapshot(ctx, &v1.ForkSnapshotRequest{SnapshotId: id, BrokerSecrets: creds})
+func (c *Client) ForkSnapshotWithCredentials(ctx context.Context, id string, creds []*v1.BrokerCredential, actor *v1.Actor) (*v1.Sandbox, error) {
+	resp, err := c.stub.ForkSnapshot(ctx, &v1.ForkSnapshotRequest{SnapshotId: id, BrokerSecrets: creds, Actor: actor})
 	if err != nil {
 		return nil, err
 	}
