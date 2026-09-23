@@ -63,6 +63,21 @@ create table if not exists snapshot_routes (
 );
 alter table snapshot_routes add column if not exists agent_id text not null default '';
 create index if not exists snapshot_routes_tenant_idx on snapshot_routes (tenant_id);
+
+-- The API connects as the table owner, which bypasses RLS; enabling it keeps
+-- api_keys (key hashes), runners and routing state out of Supabase's PostgREST
+-- API and away from the anon key.
+alter table api_keys        enable row level security;
+alter table runners         enable row level security;
+alter table sandbox_routes  enable row level security;
+alter table snapshot_routes enable row level security;
+
+do $$
+begin
+  if exists (select 1 from pg_roles where rolname = 'anon') then
+    execute 'revoke all on api_keys, runners, sandbox_routes, snapshot_routes from anon, authenticated';
+  end if;
+end $$;
 `
 
 // PostgresStore is a persistent Store backed by PostgreSQL/Supabase.
