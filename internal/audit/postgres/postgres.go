@@ -19,7 +19,7 @@ import (
 var schemaSQL string
 
 // schemaVersion identifies the embedded schema. Bump when schema.sql changes.
-const schemaVersion = "0003_agent_identity"
+const schemaVersion = "0004_rls"
 
 // Store is a PostgreSQL-backed audit store.
 type Store struct {

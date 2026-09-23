@@ -65,3 +65,21 @@ ALTER TABLE sandbox_egress ADD COLUMN IF NOT EXISTS key_id TEXT NOT NULL DEFAULT
 
 CREATE INDEX IF NOT EXISTS sandbox_egress_sandbox_id_idx
     ON sandbox_egress (sandbox_id, occurred_at, id);
+
+-- Vora connects as the table owner over the direct DSN, so it bypasses RLS
+-- (no FORCE here on purpose). This closes the Supabase PostgREST/anon-key
+-- exposure of the audit trail, which otherwise defaults to world-readable in
+-- the public schema.
+ALTER TABLE schema_migrations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sandbox_events    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sandbox_execs     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sandbox_egress    ENABLE ROW LEVEL SECURITY;
+
+-- `anon`/`authenticated` only exist on Supabase; keep this portable for
+-- self-hosted Postgres and testcontainers.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    EXECUTE 'REVOKE ALL ON schema_migrations, sandbox_events, sandbox_execs, sandbox_egress FROM anon, authenticated';
+  END IF;
+END $$;

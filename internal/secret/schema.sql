@@ -16,3 +16,15 @@ CREATE TABLE IF NOT EXISTS vora_secrets (
 );
 
 CREATE INDEX IF NOT EXISTS vora_secrets_tenant_idx ON vora_secrets (tenant_id, alias);
+
+-- Brokered credential blobs must never be reachable through Supabase's
+-- PostgREST API. The owner role (Vora's DSN) bypasses RLS, so this only
+-- affects the anon/authenticated roles.
+ALTER TABLE vora_secrets ENABLE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    EXECUTE 'REVOKE ALL ON vora_secrets FROM anon, authenticated';
+  END IF;
+END $$;
