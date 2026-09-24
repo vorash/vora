@@ -21,9 +21,28 @@ func (s *Server) SnapshotSandbox(_ context.Context, req *v1.SnapshotSandboxReque
 	if req.GetSandboxId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "sandbox_id is required")
 	}
+	s.snapshotMu.Lock()
+	defer s.snapshotMu.Unlock()
 	rec, err := s.store.Load(req.GetSandboxId())
 	if err != nil {
 		return nil, s.loadError(err, req.GetSandboxId())
+	}
+	existing, err := s.snapshots.List()
+	if err != nil {
+		return nil, status.Error(codes.Internal, "failed to check snapshot capacity")
+	}
+	maxTenant := s.cfg.MaxSnapshotsPerTenant
+	if maxTenant <= 0 {
+		maxTenant = 32
+	}
+	count := 0
+	for _, snap := range existing {
+		if snap.TenantID == rec.Spec.TenantID {
+			count++
+		}
+	}
+	if count >= int(maxTenant) {
+		return nil, status.Error(codes.ResourceExhausted, "snapshot capacity reached")
 	}
 	ws := rec.Spec.Workspace
 	if _, err := os.Stat(ws.WorkspaceDir); err != nil {
@@ -49,10 +68,14 @@ func (s *Server) SnapshotSandbox(_ context.Context, req *v1.SnapshotSandboxReque
 		}
 	}()
 
+	maxBytes := s.cfg.MaxSnapshotBytes
+	if maxBytes <= 0 {
+		maxBytes = 1 << 30
+	}
 	n, err := writeArchive(s.snapshots.DataPath(snap.ID), snapshot.Folders{
 		snapshot.WorkspaceDir: ws.WorkspaceDir,
 		snapshot.HomeDir:      ws.HomeDir,
-	})
+	}, maxBytes)
 	if err != nil {
 		s.logger.Error("snapshot archive failed", "snapshot_id", snap.ID, "error", err)
 		return nil, status.Error(codes.Internal, "failed to archive sandbox state")
@@ -131,24 +154,18 @@ func (s *Server) ForkSnapshot(ctx context.Context, req *v1.ForkSnapshotRequest) 
 	}
 
 	spec := snap.Spec
+	if err := s.enforceResourceLimits(&spec); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	s.createMu.Lock()
+	defer s.createMu.Unlock()
+	if err := s.checkSandboxCapacity(spec.TenantID); err != nil {
+		return nil, err
+	}
 	spec.ID = ulid.NewSandbox()
 	ws := s.workspaces.Paths(spec.ID)
 	ws.RootfsDir = s.images.Rootfs(spec.Image)
 	spec.Workspace = ws
-	if _, err := s.workspaces.Create(ws); err != nil {
-		s.logger.Error("fork workspace failed", "snapshot_id", snap.ID, "error", err)
-		return nil, status.Error(codes.Internal, "failed to prepare workspace")
-	}
-
-	if err := restoreArchive(s.snapshots.DataPath(snap.ID), snapshot.Folders{
-		snapshot.WorkspaceDir: ws.WorkspaceDir,
-		snapshot.HomeDir:      ws.HomeDir,
-	}); err != nil {
-		_ = s.workspaces.Destroy(spec.ID)
-		s.logger.Error("fork restore failed", "snapshot_id", snap.ID, "sandbox_id", spec.ID, "error", err)
-		return nil, status.Errorf(codes.Internal, "failed to restore snapshot %s", snap.ID)
-	}
-
 	rec := &sandbox.Record{
 		ID:       spec.ID,
 		Spec:     spec,
@@ -156,14 +173,26 @@ func (s *Server) ForkSnapshot(ctx context.Context, req *v1.ForkSnapshotRequest) 
 		RunnerID: s.runnerID,
 	}
 	if err := s.store.Create(rec); err != nil {
-		_ = s.workspaces.Destroy(spec.ID)
 		if _, loadErr := s.store.Load(spec.ID); loadErr == nil {
 			return nil, status.Errorf(codes.AlreadyExists, "sandbox %s already exists", spec.ID)
 		}
 		s.logger.Error("fork persist failed", "snapshot_id", snap.ID, "error", err)
 		return nil, status.Error(codes.Internal, "failed to persist sandbox")
 	}
+	if _, err := s.workspaces.Create(ws); err != nil {
+		_ = s.workspaces.Destroy(spec.ID)
+		s.logger.Error("fork workspace failed", "snapshot_id", snap.ID, "error", err)
+		return nil, status.Error(codes.Internal, "failed to prepare workspace")
+	}
 	s.applyDiskQuota(ctx, rec)
+	if err := restoreArchive(s.snapshots.DataPath(snap.ID), snapshot.Folders{
+		snapshot.WorkspaceDir: ws.WorkspaceDir,
+		snapshot.HomeDir:      ws.HomeDir,
+	}, spec.Resources.DiskBytes); err != nil {
+		_ = s.workspaces.Destroy(spec.ID)
+		s.logger.Error("fork restore failed", "snapshot_id", snap.ID, "sandbox_id", spec.ID, "error", err)
+		return nil, status.Errorf(codes.Internal, "failed to restore snapshot %s", snap.ID)
+	}
 
 	s.logger.Info("sandbox forked",
 		"snapshot_id", snap.ID,

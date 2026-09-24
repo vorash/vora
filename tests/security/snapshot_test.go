@@ -110,6 +110,26 @@ func TestSnapshotRestoreCannotEscape(t *testing.T) {
 		if _, err := snapshot.Archive(&buf, snapshotFolders(srcWS)); err != nil {
 			t.Fatalf("archive: %v", err)
 		}
+		entries := tar.NewReader(bytes.NewReader(buf.Bytes()))
+		foundLink := false
+		for {
+			hdr, err := entries.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.HasPrefix(hdr.Name, "workspace/evil/") {
+				t.Fatal("archive followed the sandbox symlink onto the host")
+			}
+			if hdr.Name == "workspace/evil" && hdr.Typeflag == tar.TypeSymlink {
+				foundLink = true
+			}
+		}
+		if !foundLink {
+			t.Fatal("archive dropped the sandbox symlink entry")
+		}
 
 		// A tampered snapshot adds one entry that writes *through* the link.
 		// Lexically inside the workspace, resolved on the host it is the

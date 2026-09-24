@@ -49,6 +49,9 @@ func specFromProto(p *v1.SandboxSpec, defaultTTL time.Duration) (runtime.Sandbox
 			}
 		}
 	}
+	if p.GetTtlSeconds() > int64((1<<63-1)/int64(time.Second)) {
+		return runtime.SandboxSpec{}, fmt.Errorf("ttl_seconds is too large")
+	}
 	spec.TTL = time.Duration(p.GetTtlSeconds()) * time.Second
 	if spec.TTL <= 0 {
 		spec.TTL = defaultTTL

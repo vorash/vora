@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // Logical directory names inside a snapshot archive and a restored sandbox
@@ -31,65 +32,40 @@ type Folders map[string]string
 // be missed. A file that shrinks mid-copy is zero-padded to keep the archive
 // structurally valid.
 func Archive(w io.Writer, dirs Folders) (int64, error) {
-	cw := &countingWriter{w: w}
-	tw := tar.NewWriter(cw)
+	return archive(w, dirs, nil, 0)
+}
 
+// ArchiveLimited aborts before an archive can consume more than maxBytes.
+func ArchiveLimited(w io.Writer, dirs Folders, maxBytes int64) (int64, error) {
+	if maxBytes <= 0 {
+		return 0, fmt.Errorf("snapshot: archive limit must be positive")
+	}
+	return archive(w, dirs, nil, maxBytes)
+}
+
+func archiveWithHook(w io.Writer, dirs Folders, beforeOpen func(bucket, rel string)) (int64, error) {
+	return archive(w, dirs, beforeOpen, 0)
+}
+
+func archive(w io.Writer, dirs Folders, beforeOpen func(bucket, rel string), maxBytes int64) (int64, error) {
+	cw := &countingWriter{w: w}
+	var output io.Writer = cw
+	if maxBytes > 0 {
+		output = &boundedWriter{w: cw, max: maxBytes}
+	}
+	tw := tar.NewWriter(output)
 	names := make([]string, 0, len(dirs))
 	for name := range dirs {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-
 	for _, name := range names {
-		root := dirs[name]
-		err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return skipVanished(err)
-			}
-			rel, err := filepath.Rel(root, p)
-			if err != nil {
-				return err
-			}
-			if rel == "." {
-				return nil
-			}
-			info, err := d.Info()
-			if err != nil {
-				return skipVanished(err)
-			}
-			link := ""
-			if info.Mode()&os.ModeSymlink != 0 {
-				if link, err = os.Readlink(p); err != nil {
-					return skipVanished(err)
-				}
-			}
-			hdr, err := tar.FileInfoHeader(info, link)
-			if err != nil {
-				return err
-			}
-			hdr.Name = path.Join(name, filepath.ToSlash(rel))
-			if err := tw.WriteHeader(hdr); err != nil {
-				return err
-			}
-			if !info.Mode().IsRegular() {
-				return nil
-			}
-			f, err := os.Open(p)
-			if err != nil {
-				return skipVanished(err)
-			}
-			defer f.Close()
-			n, err := io.Copy(tw, io.LimitReader(f, hdr.Size))
-			if err != nil {
-				return err
-			}
-			for pad := hdr.Size - n; pad > 0; pad-- {
-				if _, err := tw.Write([]byte{0}); err != nil {
-					return err
-				}
-			}
-			return nil
-		})
+		root, err := os.OpenRoot(dirs[name])
+		if err != nil {
+			return 0, err
+		}
+		err = archiveDir(tw, root, name, ".", beforeOpen)
+		root.Close()
 		if err != nil {
 			return 0, err
 		}
@@ -98,6 +74,104 @@ func Archive(w io.Writer, dirs Folders) (int64, error) {
 		return 0, err
 	}
 	return cw.n, nil
+}
+
+func archiveDir(tw *tar.Writer, root *os.Root, bucket, dir string, beforeOpen func(bucket, rel string)) error {
+	f, err := root.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return skipVanished(err)
+	}
+	entries, err := f.ReadDir(-1)
+	f.Close()
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		rel := filepath.Join(dir, entry.Name())
+		if beforeOpen != nil {
+			beforeOpen(bucket, rel)
+		}
+		info, err := root.Lstat(rel)
+		if err != nil {
+			if err := skipVanished(err); err != nil {
+				return err
+			}
+			continue
+		}
+		if info.Mode().Type() != entry.Type().Type() {
+			continue
+		}
+		var link string
+		if info.Mode()&os.ModeSymlink != 0 {
+			link, err = root.Readlink(rel)
+			if err != nil {
+				if err := skipVanished(err); err != nil {
+					return err
+				}
+				continue
+			}
+		}
+		var opened *os.File
+		if info.IsDir() || info.Mode().IsRegular() {
+			flags := os.O_RDONLY | syscall.O_NONBLOCK | syscall.O_NOFOLLOW
+			if info.IsDir() {
+				flags |= syscall.O_DIRECTORY
+			}
+			opened, err = root.OpenFile(rel, flags, 0)
+			if err != nil {
+				if errors.Is(err, syscall.ELOOP) || errors.Is(err, fs.ErrNotExist) {
+					continue
+				}
+				return err
+			}
+			actual, statErr := opened.Stat()
+			if statErr != nil || actual.Mode().Type() != info.Mode().Type() {
+				opened.Close()
+				if statErr != nil {
+					return statErr
+				}
+				continue
+			}
+			info = actual
+		}
+		hdr, err := tar.FileInfoHeader(info, link)
+		if err == nil {
+			hdr.Name = path.Join(bucket, filepath.ToSlash(rel))
+			err = tw.WriteHeader(hdr)
+		}
+		if err == nil && info.IsDir() {
+			err = archiveDir(tw, root, bucket, rel, beforeOpen)
+		}
+		if err == nil && info.Mode().IsRegular() {
+			var n int64
+			n, err = io.Copy(tw, io.LimitReader(opened, hdr.Size))
+			for pad := hdr.Size - n; err == nil && pad > 0; pad-- {
+				_, err = tw.Write([]byte{0})
+			}
+		}
+		if opened != nil {
+			opened.Close()
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type boundedWriter struct {
+	w   io.Writer
+	max int64
+	n   int64
+}
+
+func (b *boundedWriter) Write(p []byte) (int, error) {
+	if int64(len(p)) > b.max-b.n {
+		return 0, fmt.Errorf("snapshot: archive exceeds %d bytes", b.max)
+	}
+	n, err := b.w.Write(p)
+	b.n += int64(n)
+	return n, err
 }
 
 // skipVanished lets Archive be crash-consistent: an entry that disappears
@@ -121,7 +195,20 @@ func skipVanished(err error) error {
 // restored — ownership and setuid bits are not (the runner is unprivileged and
 // setuid in a snapshot is a footgun).
 func Restore(r io.Reader, dirs Folders) error {
+	return restore(r, dirs, 0)
+}
+
+// RestoreLimited refuses archives whose regular-file content exceeds maxBytes.
+func RestoreLimited(r io.Reader, dirs Folders, maxBytes int64) error {
+	if maxBytes <= 0 {
+		return fmt.Errorf("snapshot: restore limit must be positive")
+	}
+	return restore(r, dirs, maxBytes)
+}
+
+func restore(r io.Reader, dirs Folders, maxBytes int64) error {
 	tr := tar.NewReader(r)
+	var restored int64
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -155,6 +242,10 @@ func Restore(r io.Reader, dirs Folders) error {
 				return err
 			}
 		case tar.TypeReg:
+			if maxBytes > 0 && (hdr.Size < 0 || hdr.Size > maxBytes-restored) {
+				return fmt.Errorf("snapshot: restored files exceed %d bytes", maxBytes)
+			}
+			restored += hdr.Size
 			if err := replaceLeaf(target, func() error {
 				f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, hdr.FileInfo().Mode().Perm()&0o777)
 				if err != nil {

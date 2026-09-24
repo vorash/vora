@@ -23,6 +23,13 @@ removed mid-walk may be missed. A file that shrinks mid-copy is zero-padded to
 keep the tar valid. No agent protocol, no quiescing — callers snapshot between
 writes if they need more.
 
+**Capture is confined to its source roots.** The live workload can replace an
+entry between listing and opening it. The runner opens each source directory
+through `os.Root` and each regular file with no-follow semantics, rechecking
+the opened file type. Raced symlinks are skipped rather than read through in
+the host namespace. This prevents host-file disclosure without freezing the
+workload; the crash-consistency limits above still apply.
+
 **Fork inherits the spec verbatim.** New sandbox ID; image, resources, network,
 env and TTL are the source's (TTL re-armed at fork start). No overrides in this
 iteration; the `WorkspaceSpec` stored in the record still points at the source
@@ -53,8 +60,10 @@ its source is gone is valid; `snapshot rm` reclaims the space.
 
 - Fan-out is cheap (writable dirs only) but a fork reproduces file state, not
   memory or process state.
-- Snapshot storage is bounded only by the state disk; there is no quota on
-  snapshot bytes yet (same as logs). Size is recorded per snapshot.
+- Each archive is capped at `VORA_MAX_SNAPSHOT_BYTES` (default 1 GiB), including
+  sparse-file expansion. Fork restores reject total file content beyond the
+  inherited disk budget. There is still no per-tenant snapshot count or total
+  snapshot-storage quota. Size is recorded per snapshot.
 - A fork whose image is no longer resolvable fails at create time with the
   usual loud error, exactly like a normal create.
 - SDK/MCP surfaces are not part of this change and follow separately.

@@ -30,7 +30,18 @@ type Config struct {
 	// SystemdMode selects user or system scopes.
 	SystemdMode SystemdMode
 	// DefaultTTL is applied when a sandbox spec does not set one.
-	DefaultTTL time.Duration
+	DefaultTTL            time.Duration
+	MaxMemoryBytes        int64
+	MaxCPUMillis          int64
+	MaxPids               int64
+	MaxSandboxes          int32
+	MaxSandboxesPerTenant int32
+	MaxSnapshotsPerTenant int32
+	MaxTTL                time.Duration
+	DefaultDiskBytes      int64
+	MaxDiskBytes          int64
+	// MaxSnapshotBytes caps one on-disk snapshot archive.
+	MaxSnapshotBytes int64
 	// MetricsAddr is the listen address for the Prometheus /metrics endpoint.
 	MetricsAddr string
 	// GvisorPlatform selects the gVisor platform ("kvm" or "systrap").
@@ -103,6 +114,16 @@ func Default() (Config, error) {
 	c := Config{
 		SystemdMode:           SystemdUser,
 		DefaultTTL:            30 * time.Minute,
+		MaxSnapshotBytes:      1 << 30,
+		MaxMemoryBytes:        8 << 30,
+		MaxCPUMillis:          8000,
+		MaxPids:               512,
+		MaxSandboxes:          64,
+		MaxSandboxesPerTenant: 16,
+		MaxSnapshotsPerTenant: 32,
+		MaxTTL:                24 * time.Hour,
+		DefaultDiskBytes:      1 << 30,
+		MaxDiskBytes:          8 << 30,
 		MetricsAddr:           "127.0.0.1:9101",
 		GvisorPlatform:        "kvm",
 		ContainerdNamespace:   "vora",
@@ -138,6 +159,54 @@ func Default() (Config, error) {
 		}
 	}
 
+	for _, field := range []struct {
+		name   string
+		target *int64
+	}{
+		{"VORA_MAX_MEMORY", &c.MaxMemoryBytes},
+		{"VORA_MAX_CPU", &c.MaxCPUMillis},
+		{"VORA_MAX_PIDS", &c.MaxPids},
+		{"VORA_DEFAULT_DISK", &c.DefaultDiskBytes},
+		{"VORA_MAX_DISK", &c.MaxDiskBytes},
+	} {
+		if v := os.Getenv(field.name); v != "" {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || n <= 0 {
+				return Config{}, fmt.Errorf("invalid %s %q (want positive integer)", field.name, v)
+			}
+			*field.target = n
+		}
+	}
+	for _, field := range []struct {
+		name   string
+		target *int32
+	}{
+		{"VORA_MAX_SANDBOXES", &c.MaxSandboxes},
+		{"VORA_MAX_SANDBOXES_PER_TENANT", &c.MaxSandboxesPerTenant},
+		{"VORA_MAX_SNAPSHOTS_PER_TENANT", &c.MaxSnapshotsPerTenant},
+	} {
+		if v := os.Getenv(field.name); v != "" {
+			n, err := strconv.ParseInt(v, 10, 32)
+			if err != nil || n <= 0 {
+				return Config{}, fmt.Errorf("invalid %s %q (want positive integer)", field.name, v)
+			}
+			*field.target = int32(n)
+		}
+	}
+	if v := os.Getenv("VORA_MAX_TTL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return Config{}, fmt.Errorf("invalid VORA_MAX_TTL %q (want positive duration)", v)
+		}
+		c.MaxTTL = d
+	}
+	if v := os.Getenv("VORA_MAX_SNAPSHOT_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n <= 0 {
+			return Config{}, fmt.Errorf("invalid VORA_MAX_SNAPSHOT_BYTES %q (want positive byte count)", v)
+		}
+		c.MaxSnapshotBytes = n
+	}
 	if v := os.Getenv("VORA_METRICS_ADDR"); v != "" {
 		c.MetricsAddr = v
 	}

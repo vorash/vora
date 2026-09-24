@@ -3,6 +3,7 @@ package snapshot
 import (
 	"archive/tar"
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,6 +48,89 @@ func setupDirs(t *testing.T) (Folders, string) {
 		}
 	}
 	return dirs, base
+}
+
+func TestRestoreLimitedRejectsOversizedFork(t *testing.T) {
+	var tarData bytes.Buffer
+	tw := tar.NewWriter(&tarData)
+	if err := tw.WriteHeader(&tar.Header{Name: WorkspaceDir + "/big", Mode: 0o644, Size: 2048}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(make([]byte, 2048)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dirs, _ := setupDirs(t)
+	if err := RestoreLimited(&tarData, dirs, 1024); err == nil {
+		t.Fatal("fork restored files beyond sandbox disk budget")
+	}
+}
+
+func TestArchiveLimitedRefusesSparseFileAmplification(t *testing.T) {
+	dirs, _ := setupDirs(t)
+	f, err := os.Create(filepath.Join(dirs[WorkspaceDir], "sparse"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(64 << 20); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	var output bytes.Buffer
+	const limit = 1 << 20
+	if _, err := ArchiveLimited(&output, dirs, limit); err == nil {
+		t.Fatal("sparse file expanded into an unbounded runner snapshot")
+	}
+	if output.Len() > limit {
+		t.Fatalf("archive wrote %d bytes beyond %d byte limit", output.Len(), limit)
+	}
+}
+
+func TestArchiveCannotFollowRacedSymlinks(t *testing.T) {
+	for _, isDir := range []bool{false, true} {
+		t.Run(map[bool]string{false: "file", true: "directory"}[isDir], func(t *testing.T) {
+			dirs, base := setupDirs(t)
+			outside := filepath.Join(base, "outside")
+			if isDir {
+				if err := os.Mkdir(outside, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("host-secret"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(outside, []byte("host-secret"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			victim := filepath.Join(dirs[WorkspaceDir], "victim")
+			if isDir {
+				if err := os.Mkdir(victim, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(victim, []byte("sandbox-data"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var buf bytes.Buffer
+			_, err := archiveWithHook(&buf, dirs, func(bucket, rel string) {
+				if bucket != WorkspaceDir || rel != "victim" {
+					return
+				}
+				if err := os.RemoveAll(victim); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, victim); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(buf.Bytes(), []byte("host-secret")) {
+				t.Fatal("runner archived content outside the sandbox")
+			}
+		})
+	}
 }
 
 func TestArchiveRestoreRoundTrip(t *testing.T) {
@@ -156,6 +240,52 @@ func TestRestoreRefusesEscape(t *testing.T) {
 // TestRestoreSymlinksAreInert proves the two halves of the symlink contract:
 // an escaping link is restored verbatim (it is inert data — the workload can
 // create it at runtime anyway), but nothing is ever written *through* one.
+func TestArchiveSkipsEntriesSwappedForHostSymlinks(t *testing.T) {
+	for _, isDir := range []bool{false, true} {
+		t.Run(fmt.Sprintf("directory=%t", isDir), func(t *testing.T) {
+			root, external := t.TempDir(), t.TempDir()
+			name := "entry"
+			outside := filepath.Join(external, name)
+			if isDir {
+				if err := os.Mkdir(outside, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("host-only-secret"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(filepath.Join(root, name), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.WriteFile(outside, []byte("host-only-secret"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, name), []byte("sandbox-data"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var out bytes.Buffer
+			_, err := archiveWithHook(&out, Folders{WorkspaceDir: root}, func(_ string, rel string) {
+				if rel != name {
+					return
+				}
+				if err := os.Remove(filepath.Join(root, name)); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, filepath.Join(root, name)); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(out.Bytes(), []byte("host-only-secret")) {
+				t.Fatal("archive followed a symlink into the host")
+			}
+		})
+	}
+}
+
 func TestRestoreSymlinksAreInert(t *testing.T) {
 	dst, _ := setupDirs(t)
 	if err := os.WriteFile(filepath.Join(dst[HomeDir], "victim"), []byte("safe"), 0o644); err != nil {

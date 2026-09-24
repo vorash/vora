@@ -64,7 +64,7 @@ infallible; the design minimises the trusted surface.
 | Fork bomb | `pids.max` via cgroup | cgroup |
 | Memory bomb / OOM | `memory.max`, `memory.swap.max=0` | cgroup |
 | CPU monopolisation | `cpu.max` quota | cgroup |
-| Disk exhaustion | `DiskBytes` filesystem project quota, falling back to a periodic usage scan ([ADR 015](../adr/015-disk-quota.md)) | storage |
+| Disk exhaustion | runner resource ceilings and a default `DiskBytes` budget, filesystem project quota with periodic-scan fallback; sparse-aware snapshot archiving and a bounded fork restore ([ADR 015](../adr/015-disk-quota.md), [ADR 023](../adr/023-snapshot-fork.md)) | storage |
 | Metadata service access | unrestricted network is never granted; `--unshare-net`, or `NetworkRestricted` filter+DNAT to the egress proxy that denies non-TLS and private IPs | network |
 | Private-network probing | no network namespace route exists, or non-proxy traffic is dropped and private/link-local/CGNAT destinations are blocked; `NetworkFull`/`NetworkPrivate` also drop host-local input (services on the runner's own addresses) and `NetworkFull` drops IPv6 | network |
 | DNS exfiltration / rebinding | the only resolver is the gateway's: it answers allowlisted names only, refuses loopback/private/link-local/CGNAT answers (so a rebinding name cannot reach the metadata service), refuses non-address query types, and audits every query | network |
@@ -81,7 +81,7 @@ infallible; the design minimises the trusted surface.
 | Runner-ID takeover / spoofing | public registry and tunnel require mTLS and a join token; the declared `runner_id` must match the client certificate's DNS SAN, and a new tunnel session cannot supersede a live runner under a different identity | control plane |
 | Sandbox survives runner death | in-sandbox agent exits when the runner disappears; reconciler reaps orphans | lifecycle |
 | Malicious image | image rootfs is data only, read-only, no execution at build time | supply chain |
-| Hostile snapshot archive | restore refuses traversal and special-file entries, never follows a symlink, and fails loudly: a fork's workload-authored state cannot write outside its own writable roots (ADR 023) | storage |
+| Hostile snapshot archive | capture opens workload entries through confined `os.Root` handles and skips raced symlinks; restore refuses traversal and special-file entries, never follows a symlink, and fails loudly: a fork's workload-authored state cannot write outside its own writable roots (ADR 023) | storage |
 | Malicious CLI plugin on `$PATH` | `vora <name>` dispatches only to a strictly named `vora-<name>` resolved with `exec.LookPath`: no shell, no config-supplied command line, built-ins and Vora's own companion binaries always win, and `VORA_DISABLE_PLUGINS=1` opts out. Same trust model as `git`/`kubectl` — a writable early `$PATH` already implies code execution. | CLI |
 
 Credential brokering is delivered for bwrap (ADR 013) and its decisions appear in

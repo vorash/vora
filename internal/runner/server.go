@@ -4,6 +4,7 @@ package runner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -51,6 +52,9 @@ type Server struct {
 
 	handlesMu sync.Mutex
 	handles   map[string]sandboxHandle
+
+	createMu   sync.Mutex
+	snapshotMu sync.Mutex
 
 	// brokerMu guards credentials resolved by the control plane for a sandbox
 	// that has been created but not yet started. They are transient by design:
@@ -178,6 +182,9 @@ func (s *Server) CreateSandbox(ctx context.Context, req *v1.CreateSandboxRequest
 		return nil, status.Error(codes.InvalidArgument, "sandbox_id is assigned by the runner")
 	}
 	spec.ID = ulid.NewSandbox()
+	if err := s.enforceResourceLimits(&spec); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 	if err := spec.Validate(); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -187,6 +194,12 @@ func (s *Server) CreateSandbox(ctx context.Context, req *v1.CreateSandboxRequest
 	}
 	if err := validateBrokerGrants(spec, creds); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	s.createMu.Lock()
+	defer s.createMu.Unlock()
+	if err := s.checkSandboxCapacity(spec.TenantID); err != nil {
+		return nil, err
 	}
 
 	// Prepare the per-sandbox directories and record the rootfs path. The
@@ -228,6 +241,63 @@ func (s *Server) CreateSandbox(ctx context.Context, req *v1.CreateSandboxRequest
 		s.stageBrokerCredentials(rec.ID, creds)
 	}
 	return &v1.CreateSandboxResponse{Sandbox: toProtoSandbox(rec)}, nil
+}
+
+func (s *Server) checkSandboxCapacity(tenant string) error {
+	records, err := s.store.List()
+	if err != nil {
+		return status.Error(codes.Internal, "failed to check sandbox capacity")
+	}
+	global, forTenant := 0, 0
+	for _, rec := range records {
+		if rec.State == sandbox.StateDestroyed || rec.State == sandbox.StateFailed {
+			continue
+		}
+		global++
+		if rec.Spec.TenantID == tenant {
+			forTenant++
+		}
+	}
+	maxGlobal, maxTenant := s.cfg.MaxSandboxes, s.cfg.MaxSandboxesPerTenant
+	if maxGlobal <= 0 {
+		maxGlobal = 64
+	}
+	if maxTenant <= 0 {
+		maxTenant = 16
+	}
+	if global >= int(maxGlobal) || forTenant >= int(maxTenant) {
+		return status.Error(codes.ResourceExhausted, "sandbox capacity reached")
+	}
+	return nil
+}
+
+func (s *Server) enforceResourceLimits(spec *runtime.SandboxSpec) error {
+	if spec.Resources.DiskBytes == 0 {
+		spec.Resources.DiskBytes = s.cfg.DefaultDiskBytes
+		if spec.Resources.DiskBytes <= 0 {
+			spec.Resources.DiskBytes = 1 << 30
+		}
+	}
+	maxMemory, maxCPU, maxPids, maxTTL, maxDisk := s.cfg.MaxMemoryBytes, s.cfg.MaxCPUMillis, s.cfg.MaxPids, s.cfg.MaxTTL, s.cfg.MaxDiskBytes
+	if maxMemory <= 0 {
+		maxMemory = 8 << 30
+	}
+	if maxCPU <= 0 {
+		maxCPU = 8000
+	}
+	if maxPids <= 0 {
+		maxPids = 512
+	}
+	if maxTTL <= 0 {
+		maxTTL = 24 * time.Hour
+	}
+	if maxDisk <= 0 {
+		maxDisk = 8 << 30
+	}
+	if spec.Resources.MemoryBytes > maxMemory || spec.Resources.CPUMillis > maxCPU || spec.Resources.Pids > maxPids || spec.Resources.DiskBytes > maxDisk || spec.TTL > maxTTL {
+		return fmt.Errorf("sandbox resources or TTL exceed runner limits")
+	}
+	return nil
 }
 
 // GetSandbox returns a single sandbox.
