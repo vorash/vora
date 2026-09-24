@@ -85,7 +85,7 @@ func zeroCredentials(creds []egress.Credential) {
 // the path can read. Operators who accept that risk set
 // VORA_ALLOW_INSECURE_BROKER=1 and do not install this interceptor.
 func RejectBrokerSecrets(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-	if create, ok := req.(*v1.CreateSandboxRequest); ok && len(create.GetBrokerSecrets()) > 0 {
+	if carrier, ok := req.(interface{ GetBrokerSecrets() []*v1.BrokerCredential }); ok && len(carrier.GetBrokerSecrets()) > 0 {
 		return nil, status.Error(codes.FailedPrecondition,
 			"refusing brokered credentials over a plaintext runner channel: enable VORA_RUNNER_TLS_* or set VORA_ALLOW_INSECURE_BROKER=1")
 	}

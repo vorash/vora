@@ -15,7 +15,7 @@ import (
 // absent, the channel to the runner is unencrypted, the alias is unknown to the
 // tenant, or the credential's bound host is not on the sandbox allowlist — so a
 // grant can never silently become a no-op.
-func (s *Server) resolveBrokerSecrets(ctx context.Context, spec *v1.SandboxSpec) ([]*v1.BrokerCredential, error) {
+func (s *Server) resolveBrokerSecrets(ctx context.Context, spec *v1.SandboxSpec, runner Runner) ([]*v1.BrokerCredential, error) {
 	aliases := spec.GetNetwork().GetBrokerAliases()
 	if len(aliases) == 0 {
 		return nil, nil
@@ -23,8 +23,8 @@ func (s *Server) resolveBrokerSecrets(ctx context.Context, spec *v1.SandboxSpec)
 	if s.secrets() == nil {
 		return nil, errSecretsNotConfigured
 	}
-	if !s.opts.RunnerTLS.Enabled() && !s.opts.AllowInsecureBroker {
-		return nil, errors.New("credential brokering requires TLS on the API-to-runner channel; configure VORA_RUNNER_TLS_* or set VORA_ALLOW_INSECURE_BROKER=1")
+	if ((runner.Tunneled && !s.opts.TunnelTLS) || (!runner.Tunneled && !s.opts.RunnerTLS.Enabled())) && !s.opts.AllowInsecureBroker {
+		return nil, errors.New("credential brokering requires TLS on the selected API-to-runner channel; configure direct runner TLS or set VORA_ALLOW_INSECURE_BROKER=1")
 	}
 	tenant := spec.GetTenantId()
 	if tenant == "" {

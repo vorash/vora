@@ -15,7 +15,9 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -70,7 +72,8 @@ type Options struct {
 	// JoinToken, when set, must be presented by runners when registering.
 	JoinToken string
 	// RunnerTLS enables TLS (mTLS when a CA is set) when dialing runners.
-	RunnerTLS tlsutil.Config
+	RunnerTLS             tlsutil.Config
+	RequireRunnerIdentity bool
 	// Secrets holds brokered credentials. When nil, the secret endpoints
 	// report that credential brokering is not configured.
 	Secrets secret.Store
@@ -79,7 +82,8 @@ type Options struct {
 	AllowInsecureBroker bool
 	// Tunnel, when set, lets the API reach runners it cannot dial (NAT) over a
 	// runner-initiated reverse tunnel.
-	Tunnel *tunnel.Server
+	Tunnel    *tunnel.Server
+	TunnelTLS bool
 	// BootstrapKey, when set, is accepted as an admin API key.
 	BootstrapKey string
 	Now          func() time.Time
@@ -140,6 +144,9 @@ func (s *Server) Register(ctx context.Context, req *v1.RegisterRunnerRequest) (*
 	if err := s.checkJoinToken(ctx); err != nil {
 		return nil, err
 	}
+	if err := s.checkRunnerIdentity(ctx, req.GetRunnerId()); err != nil {
+		return nil, err
+	}
 	if req.GetRunnerId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "runner_id is required")
 	}
@@ -173,6 +180,9 @@ func (s *Server) Heartbeat(ctx context.Context, req *v1.HeartbeatRequest) (*v1.H
 	if err := s.checkJoinToken(ctx); err != nil {
 		return nil, err
 	}
+	if err := s.checkRunnerIdentity(ctx, req.GetRunnerId()); err != nil {
+		return nil, err
+	}
 	existing, err := s.store.Runner(ctx, req.GetRunnerId())
 	if err != nil {
 		return nil, status.Error(codes.NotFound, "runner is not registered")
@@ -190,13 +200,33 @@ func (s *Server) Heartbeat(ctx context.Context, req *v1.HeartbeatRequest) (*v1.H
 	return &v1.HeartbeatResponse{}, nil
 }
 
+func (s *Server) checkRunnerIdentity(ctx context.Context, id string) error {
+	if !s.opts.RequireRunnerIdentity {
+		return nil
+	}
+	p, ok := peer.FromContext(ctx)
+	if !ok {
+		return status.Error(codes.Unauthenticated, "runner client certificate required")
+	}
+	info, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok || len(info.State.PeerCertificates) == 0 {
+		return status.Error(codes.Unauthenticated, "runner client certificate required")
+	}
+	for _, name := range info.State.PeerCertificates[0].DNSNames {
+		if name == id {
+			return nil
+		}
+	}
+	return status.Error(codes.Unauthenticated, "runner id does not match client certificate")
+}
+
 func (s *Server) checkJoinToken(ctx context.Context) error {
 	if s.opts.JoinToken == "" {
 		return nil
 	}
 	md, _ := metadata.FromIncomingContext(ctx)
 	auth := md.Get("authorization")
-	if len(auth) == 0 || strings.TrimSpace(auth[0]) != "Bearer "+s.opts.JoinToken {
+	if len(auth) == 0 || subtle.ConstantTimeCompare([]byte(strings.TrimSpace(auth[0])), []byte("Bearer "+s.opts.JoinToken)) != 1 {
 		return status.Error(codes.Unauthenticated, "invalid runner join token")
 	}
 	return nil
@@ -331,7 +361,7 @@ func (s *Server) createSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 	runner, rc := pl.runner, pl.client
 	defer rc.Close()
-	creds, err := s.resolveBrokerSecrets(r.Context(), spec)
+	creds, err := s.resolveBrokerSecrets(r.Context(), spec, runner)
 	if err != nil {
 		if errors.Is(err, errSecretsNotConfigured) {
 			writeError(w, http.StatusServiceUnavailable, err.Error())

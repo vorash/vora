@@ -160,7 +160,12 @@ func (s *Server) forkSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 	// The fork inherits the snapshot's spec, so its broker aliases need their
 	// credentials resolved exactly like a create.
-	creds, err := s.resolveBrokerSecrets(r.Context(), snap.GetSpec())
+	runner, err := s.store.Runner(r.Context(), route.RunnerID)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "snapshot runner unavailable")
+		return
+	}
+	creds, err := s.resolveBrokerSecrets(r.Context(), snap.GetSpec(), runner)
 	if err != nil {
 		if errors.Is(err, errSecretsNotConfigured) {
 			writeError(w, http.StatusServiceUnavailable, err.Error())

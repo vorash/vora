@@ -29,6 +29,51 @@ import (
 	"github.com/vorash/vora/internal/version"
 )
 
+func requireRegistryTLS(addr string, cfg tlsutil.Config) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	if cfg.CAFile == "" || cfg.CertFile == "" || cfg.KeyFile == "" {
+		return fmt.Errorf("public runner registry requires VORA_API_REGISTRY_TLS_{CERT,KEY,CA}")
+	}
+	return nil
+}
+
+func requireTunnelTLS(addr string, cfg tlsutil.Config, insecure bool) error {
+	if cfg.CAFile != "" && cfg.CertFile != "" && cfg.KeyFile != "" {
+		return nil
+	}
+	if !insecure || cfg.Enabled() {
+		return fmt.Errorf("public tunnel requires VORA_API_TUNNEL_TLS_{CERT,KEY,CA}")
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("plaintext tunnel must bind to a loopback IP")
+	}
+	return nil
+}
+
+func requireJoinToken(addr, token string) error {
+	if token != "" {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("runner registry address: %w", err)
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("a public runner registry or tunnel requires VORA_API_JOIN_TOKEN")
+	}
+	return nil
+}
+
 func main() {
 	if err := run(); err != nil {
 		slog.Error("vora-api exited with error", "error", err)
@@ -108,19 +153,44 @@ func run() error {
 	}
 
 	joinToken := os.Getenv("VORA_API_JOIN_TOKEN")
+	registryTLS := tlsutil.Config{CertFile: os.Getenv("VORA_API_REGISTRY_TLS_CERT"), KeyFile: os.Getenv("VORA_API_REGISTRY_TLS_KEY"), CAFile: os.Getenv("VORA_API_REGISTRY_TLS_CA")}
+	if err := requireRegistryTLS(*grpcFlag, registryTLS); err != nil {
+		return err
+	}
+	if err := requireJoinToken(*grpcFlag, joinToken); err != nil {
+		return err
+	}
+	if tunnelAddr := os.Getenv("VORA_API_TUNNEL_ADDR"); tunnelAddr != "" {
+		if err := requireJoinToken(tunnelAddr, joinToken); err != nil {
+			return err
+		}
+	}
 
 	// Optional reverse tunnel: lets runners the API cannot dial (NAT) still be
 	// driven. The runner connects out; the API multiplexes RunnerService over it.
 	var tunnelSrv *tunnel.Server
+	tunnelTLS := tlsutil.Config{CertFile: os.Getenv("VORA_API_TUNNEL_TLS_CERT"), KeyFile: os.Getenv("VORA_API_TUNNEL_TLS_KEY"), CAFile: os.Getenv("VORA_API_TUNNEL_TLS_CA")}
 	if addr := os.Getenv("VORA_API_TUNNEL_ADDR"); addr != "" {
+		if err := requireTunnelTLS(addr, tunnelTLS, os.Getenv("VORA_TUNNEL_INSECURE") == "1"); err != nil {
+			return err
+		}
 		ln, err := net.Listen("tcp", addr)
 		if err != nil {
 			return fmt.Errorf("listen tunnel %s: %w", addr, err)
 		}
 		defer ln.Close()
 		tunnelSrv = tunnel.NewServer(joinToken, logger)
+		serveLn := net.Listener(ln)
+		if tunnelTLS.Enabled() {
+			cfg, err := tunnelTLS.Server()
+			if err != nil {
+				return fmt.Errorf("tunnel tls: %w", err)
+			}
+			serveLn = tls.NewListener(ln, cfg)
+			tunnelSrv.RequireTLS()
+		}
 		go func() {
-			if err := tunnelSrv.Serve(ctx, ln); err != nil {
+			if err := tunnelSrv.Serve(ctx, serveLn); err != nil {
 				logger.Warn("tunnel server stopped", "error", err)
 			}
 		}()
@@ -128,14 +198,16 @@ func run() error {
 	}
 
 	server := api.New(api.Options{
-		Store:               store,
-		Logger:              logger,
-		JoinToken:           joinToken,
-		BootstrapKey:        os.Getenv("VORA_API_BOOTSTRAP_KEY"),
-		Secrets:             secrets,
-		AllowInsecureBroker: allowInsecureBroker,
-		RunnerTLS:           runnerTLS,
-		Tunnel:              tunnelSrv,
+		Store:                 store,
+		Logger:                logger,
+		JoinToken:             joinToken,
+		BootstrapKey:          os.Getenv("VORA_API_BOOTSTRAP_KEY"),
+		Secrets:               secrets,
+		AllowInsecureBroker:   allowInsecureBroker,
+		RunnerTLS:             runnerTLS,
+		RequireRunnerIdentity: registryTLS.CAFile != "",
+		Tunnel:                tunnelSrv,
+		TunnelTLS:             tunnelTLS.Enabled(),
 	})
 	defer server.Close()
 
@@ -156,11 +228,6 @@ func run() error {
 		CertFile: os.Getenv("VORA_API_HTTP_TLS_CERT"),
 		KeyFile:  os.Getenv("VORA_API_HTTP_TLS_KEY"),
 		CAFile:   os.Getenv("VORA_API_HTTP_TLS_CA"),
-	}
-	registryTLS := tlsutil.Config{
-		CertFile: os.Getenv("VORA_API_REGISTRY_TLS_CERT"),
-		KeyFile:  os.Getenv("VORA_API_REGISTRY_TLS_KEY"),
-		CAFile:   os.Getenv("VORA_API_REGISTRY_TLS_CA"),
 	}
 	httpServeLn := net.Listener(httpLn)
 	if httpTLS.Enabled() {

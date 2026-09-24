@@ -9,6 +9,7 @@ import (
 
 	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/secret"
+	"github.com/vorash/vora/internal/tlsutil"
 )
 
 // brokerServer builds a control plane with a secret store, a registered fake
@@ -104,6 +105,33 @@ func TestCreateSandboxResolvesBrokerSecrets(t *testing.T) {
 // TestCreateSandboxBrokerFailsClosed asserts every way a brokered create can be
 // ill-formed fails before a sandbox is created, and never leaks the value into
 // the error.
+func TestBrokerSecretsRefusePlaintextTunnelEvenWithDirectTLS(t *testing.T) {
+	sealer, err := secret.NewSealer(testMasterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(Options{Secrets: secret.NewMemStore(sealer), RunnerTLS: tlsutil.Config{CAFile: "configured"}})
+	if _, err := s.resolveBrokerSecrets(context.Background(), brokeredSpec("github"), Runner{Tunneled: true}); err == nil || !strings.Contains(err.Error(), "TLS") {
+		t.Fatalf("brokered tunnel accepted despite plaintext transport: %v", err)
+	}
+}
+
+func TestBrokerSecretsAllowedOnAuthenticatedTunnel(t *testing.T) {
+	sealer, err := secret.NewSealer(testMasterKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := secret.NewMemStore(sealer)
+	if err := store.Put(context.Background(), secret.Record{TenantID: "t1", Alias: "github", Host: "api.example.com", Scheme: secret.SchemeBearer}, "secret"); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Options{Secrets: store, TunnelTLS: true})
+	creds, err := s.resolveBrokerSecrets(context.Background(), brokeredSpec("github"), Runner{Tunneled: true})
+	if err != nil || len(creds) != 1 {
+		t.Fatalf("TLS tunnel rejected brokered create: %v %v", creds, err)
+	}
+}
+
 func TestCreateSandboxBrokerFailsClosed(t *testing.T) {
 	tests := []struct {
 		name          string

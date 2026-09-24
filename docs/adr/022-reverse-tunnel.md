@@ -16,7 +16,10 @@ all. This is part B of issue #25; ADR 021 covers placement.
 The runner opens one long-lived TCP connection to the API's tunnel endpoint
 (`VORA_API_TUNNEL_ADDR`) and authenticates with a one-line JSON hello
 (`runner_id` + `join_token`, constant-time compared against the API's join
-token; mTLS applies where the registry already uses it). The API terminates it
+token). Public tunnel listeners require `VORA_API_TUNNEL_TLS_{CERT,KEY,CA}`:
+TLS handshakes complete before the hello, the runner validates the API server
+certificate, and the API binds `runner_id` to the runner certificate's DNS SAN.
+Plaintext needs `VORA_TUNNEL_INSECURE=1` and a loopback bind. The API terminates it
 and multiplexes with **yamux**: the API is the yamux client and the runner is
 the yamux server, one stream per API→runner gRPC connection.
 
@@ -30,7 +33,9 @@ real gRPC connection (HTTP/2) over the multiplexed link.
 When `VORA_API_TUNNEL_ADDR` is set the runner registers `address=""` and the
 API marks it `tunneled`. Registration with an empty address is refused unless a
 tunnel is configured, so an unroutable runner is never registered. One live
-session per runner; a new session supersedes the old.
+session per runner; a new session with the same certificate identity supersedes
+the old. Registry registration still uses a shared token and must be bound to
+that identity separately.
 
 **4. Only the RunnerService is tunnelled.**
 The registry (`Register`/`Heartbeat`) and metrics already flow runner→API and
@@ -46,9 +51,8 @@ need no tunnel. The tunnel carries the API→runner direction only.
 - The tunnel connection is not yet re-established automatically if it drops:
   the runner serves the streams of its one session, and a drop ends that
   session. Reconnection is a follow-up.
-- The tunnel is plaintext unless TLS is added at the listener; the join token
-  authenticates but does not encrypt. A future change should wrap the listener
-  in TLS/mTLS.
+- The reverse tunnel is mTLS-protected by default on a public listener; the
+  local development plaintext override must never be exposed on a public bind.
 
 ## Refs
 

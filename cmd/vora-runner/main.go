@@ -225,16 +225,34 @@ func run() error {
 	// Reverse tunnel: serve RunnerService to vora-api over a connection the
 	// runner opens, for the NAT'd case.
 	if tunnelAddr != "" {
+		tunnelTLS := tlsutil.Config{CertFile: os.Getenv("VORA_API_TUNNEL_TLS_CERT"), KeyFile: os.Getenv("VORA_API_TUNNEL_TLS_KEY"), CAFile: os.Getenv("VORA_API_TUNNEL_TLS_CA")}
+		if err := validateRunnerTCP(tunnelAddr, tunnelTLS, os.Getenv("VORA_TUNNEL_INSECURE") == "1"); err != nil {
+			return fmt.Errorf("runner tunnel: %w", err)
+		}
 		tc := &tunnel.Client{
 			Addr:      tunnelAddr,
 			RunnerID:  runnerID,
 			JoinToken: os.Getenv("VORA_API_JOIN_TOKEN"),
 			Logger:    logger,
 		}
+		if tunnelTLS.Enabled() {
+			host, _, err := net.SplitHostPort(tunnelAddr)
+			if err != nil {
+				return fmt.Errorf("runner tunnel address: %w", err)
+			}
+			tc.TLS, err = tunnelTLS.ClientFor(host)
+			if err != nil {
+				return fmt.Errorf("runner tunnel TLS: %w", err)
+			}
+		}
 		if tunnelLn, err := tc.Listen(ctx); err != nil {
 			logger.Warn("tunnel connect failed", "addr", tunnelAddr, "error", err)
 		} else {
-			tunnelServer := grpc.NewServer(grpc.StatsHandler(otelgrpc.NewServerHandler()))
+			tunnelOpts := []grpc.ServerOption{grpc.StatsHandler(otelgrpc.NewServerHandler())}
+			if !tunnelTLS.Enabled() && os.Getenv("VORA_ALLOW_INSECURE_BROKER") != "1" {
+				tunnelOpts = append(tunnelOpts, grpc.UnaryInterceptor(runner.RejectBrokerSecrets))
+			}
+			tunnelServer := grpc.NewServer(tunnelOpts...)
 			v1.RegisterRunnerServiceServer(tunnelServer, server)
 			go func() {
 				if err := tunnelServer.Serve(tunnelLn); err != nil && !errors.Is(err, grpc.ErrServerStopped) {

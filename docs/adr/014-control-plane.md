@@ -18,8 +18,10 @@ Add a separate **`vora-api`** process (`cmd/vora-api`):
 - **External surface: HTTP/JSON.** Sandbox lifecycle, exec (streamed NDJSON),
   stats, logs (events/execs), plus `/v1/runners` and `/v1/keys`.
 - **Internal surface: gRPC `RunnerRegistry`.** Runners **dial out** to the API
-  (`Register`, `Heartbeat`), so they can sit behind NAT. Registration is
-  authenticated with a **join token** (bearer); the API records the runner's
+  (`Register`, `Heartbeat`), so they can sit behind NAT. A public registry
+  requires mTLS and a join token; the runner ID must match the client
+  certificate's DNS SAN on register and heartbeat, so a token holder cannot
+  re-register or tunnel under another runner's ID. The API records the runner's
   advertised gRPC address, backends, and capacity.
 - **Caller auth: static API keys.** `Authorization: Bearer vora_…`; keys are
   stored **SHA-256-hashed** with a tenant and scopes (`admin`, `sandbox`). The
