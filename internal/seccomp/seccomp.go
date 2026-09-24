@@ -44,6 +44,9 @@ func deniedSyscalls() []uint32 {
 		unix.SYS_ACCT,
 		// Kernel introspection and keyring.
 		unix.SYS_BPF, unix.SYS_PERF_EVENT_OPEN,
+		unix.SYS_IO_URING_SETUP, unix.SYS_IO_URING_ENTER, unix.SYS_IO_URING_REGISTER,
+		unix.SYS_USERFAULTFD, unix.SYS_FANOTIFY_INIT, unix.SYS_SYSLOG,
+		unix.SYS_LOOKUP_DCOOKIE, unix.SYS_USELIB,
 		unix.SYS_ADD_KEY, unix.SYS_REQUEST_KEY, unix.SYS_KEYCTL,
 		// I/O privilege and file-handle bypasses.
 		unix.SYS_IOPL, unix.SYS_IOPERM,
@@ -66,6 +69,26 @@ func Filter() []unix.SockFilter {
 		{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 0},
 	}
 	deny := unix.SECCOMP_RET_ERRNO | (uint32(unix.EPERM) & unix.SECCOMP_RET_DATA)
+	if runtime.GOARCH == "amd64" {
+		filter = append(filter,
+			unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JGE | unix.BPF_K, Jt: 0, Jf: 1, K: 0x40000000},
+			unix.SockFilter{Code: unix.BPF_RET | unix.BPF_K, K: deny},
+		)
+	}
+	filter = append(filter,
+		unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 0, Jf: 4, K: unix.SYS_PERSONALITY},
+		unix.SockFilter{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 16},
+		unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 1, Jf: 0, K: 0xffffffff},
+		unix.SockFilter{Code: unix.BPF_RET | unix.BPF_K, K: deny},
+		unix.SockFilter{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 0},
+		unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 0, Jf: 1, K: unix.SYS_CLONE3},
+		unix.SockFilter{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ERRNO | uint32(unix.ENOSYS)},
+		unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 0, Jf: 4, K: unix.SYS_CLONE},
+		unix.SockFilter{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 16},
+		unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JSET | unix.BPF_K, Jt: 0, Jf: 1, K: unix.CLONE_NEWUSER | unix.CLONE_NEWNS | unix.CLONE_NEWNET | unix.CLONE_NEWPID | unix.CLONE_NEWIPC | unix.CLONE_NEWUTS | unix.CLONE_NEWCGROUP | unix.CLONE_NEWTIME},
+		unix.SockFilter{Code: unix.BPF_RET | unix.BPF_K, K: deny},
+		unix.SockFilter{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 0},
+	)
 	for _, nr := range deniedSyscalls() {
 		filter = append(filter,
 			// If nr == denied, fall to the EPERM return; otherwise skip it.

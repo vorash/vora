@@ -4,11 +4,28 @@ package security
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestCloneCannotCreateUserNamespace(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, f *fixture) {
+		h := f.create("sbx_clone_userns", limits(128, 64))
+		helper := filepath.Join(f.ws.Paths(h.ID()).WorkspaceDir, "clone-newuser")
+		cmd := exec.Command("go", "build", "-o", helper, "./testdata/clone-newuser")
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("build clone helper: %v: %s", err, out)
+		}
+		if _, _, code := f.exec(h, "/workspace/clone-newuser"); code != 0 {
+			t.Fatalf("clone(CLONE_NEWUSER) was not refused: exit %d", code)
+		}
+	})
+}
 
 // TestFilesystemIsolation asserts that the sandbox sees only the image root
 // fs and cannot read host paths or write outside its workspace.

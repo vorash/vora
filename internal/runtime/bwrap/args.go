@@ -66,6 +66,8 @@ func Args(opts BuildOptions) ([]string, error) {
 	argv := []string{
 		"bwrap",
 		"--unshare-all",
+		"--unshare-user",
+		"--disable-userns",
 		"--die-with-parent",
 		"--new-session",
 		"--hostname", hostname,

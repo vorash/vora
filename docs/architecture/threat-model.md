@@ -60,7 +60,7 @@ infallible; the design minimises the trusted surface.
 | Process inspection / signalling | PID namespace; only own processes visible | PID |
 | SysV/POSIX IPC abuse | IPC namespace | IPC |
 | Hostname / domain leakage | UTS namespace | UTS |
-| Privilege escalation | unprivileged user namespace; no capabilities from the host | user |
+| Privilege escalation | unprivileged user namespace; no capabilities from the host; bwrap runs with `--unshare-user --disable-userns`, and the seccomp filter rejects `clone`/`clone3` namespace flags, the x32 ABI and `io_uring`/`userfaultfd`/`fanotify`/`lookup_dcookie`/`uselib`/`syslog` | user |
 | Fork bomb | `pids.max` via cgroup | cgroup |
 | Memory bomb / OOM | `memory.max`, `memory.swap.max=0` | cgroup |
 | CPU monopolisation | `cpu.max` quota | cgroup |
