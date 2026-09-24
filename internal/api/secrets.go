@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/vorash/vora/internal/identity"
 	"github.com/vorash/vora/internal/secret"
 )
 
@@ -34,6 +35,9 @@ func secretTenant(caller APIKey, requested string) (string, error) {
 		if requested == "" {
 			return "", errTenantRequired
 		}
+		if err := identity.ValidateName(requested); err != nil {
+			return "", err
+		}
 		return requested, nil
 	}
 	if caller.TenantID == "" {
@@ -41,6 +45,9 @@ func secretTenant(caller APIKey, requested string) (string, error) {
 	}
 	if requested != "" && requested != caller.TenantID {
 		return "", errTenantForbidden
+	}
+	if err := identity.ValidateName(caller.TenantID); err != nil {
+		return "", err
 	}
 	return caller.TenantID, nil
 }

@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from ._http import Transport
+from ._http import Transport, path_segment
 from ._sandbox import Sandbox
 from ._snapshots import Snapshots
 from ._types import decode_sandbox_info, encode_sandbox_spec
@@ -72,7 +72,7 @@ class Sandboxes:
         return Sandbox(self._transport, decode_sandbox_info(raw))
 
     async def get(self, id: str) -> Sandbox:
-        raw = await self._transport.json(f"/v1/sandboxes/{id}")
+        raw = await self._transport.json(f"/v1/sandboxes/{path_segment(id)}")
         return Sandbox(self._transport, decode_sandbox_info(raw))
 
     async def list(self, *, include_destroyed: bool = False) -> list[Sandbox]:
@@ -82,4 +82,4 @@ class Sandboxes:
 
     async def destroy(self, id: str) -> None:
         """Destroy a sandbox by id, without constructing a handle first."""
-        await self._transport.request(f"/v1/sandboxes/{id}", method="DELETE")
+        await self._transport.request(f"/v1/sandboxes/{path_segment(id)}", method="DELETE")

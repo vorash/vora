@@ -132,6 +132,7 @@ func newBrokerFixture(t *testing.T) (*fixture, *network.Manager) {
 // serves creds.
 func (f *fixture) createRestricted(t *testing.T, id string, allowed, aliases []string, creds []egress.Credential) runtime.Handle {
 	t.Helper()
+	id = fixtureID(id)
 	ws := f.ws.Paths(id)
 	ws.RootfsDir = imageRootfs(t, "base")
 	if _, err := f.ws.Create(ws); err != nil {

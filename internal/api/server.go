@@ -296,7 +296,7 @@ func (s *Server) auth(scope string, next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, "API key lacks scope "+scope)
 			return
 		}
-		if key.ID != "" {
+		if key.ID != "" && s.now().Sub(key.LastUsed) >= time.Minute {
 			_ = s.store.TouchKey(r.Context(), key.ID, s.now())
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, principal{key: key})))
@@ -340,6 +340,10 @@ func (s *Server) createSandbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if spec.GetSandboxId() != "" {
+		writeError(w, http.StatusBadRequest, "sandbox_id is assigned by the runner")
+		return
+	}
 	key := principalFrom(r.Context()).key
 	if !isGlobalAdmin(key) {
 		if spec.GetTenantId() != "" && spec.GetTenantId() != key.TenantID {
@@ -353,6 +357,18 @@ func (s *Server) createSandbox(w http.ResponseWriter, r *http.Request) {
 		// above, the identity is forced from the key, never trusted from the
 		// request.
 		spec.AgentId = key.AgentID
+	}
+	if spec.GetTenantId() != "" {
+		if err := identity.ValidateName(spec.GetTenantId()); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if spec.GetAgentId() != "" {
+		if err := identity.ValidateName(spec.GetAgentId()); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	pl, err := s.placeRunner(r.Context(), spec)
 	if err != nil {
@@ -368,10 +384,6 @@ func (s *Server) createSandbox(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if spec.GetSandboxId() != "" {
-		writeError(w, http.StatusBadRequest, "sandbox_id is assigned by the runner")
 		return
 	}
 	defer zeroBrokerSecrets(creds)
@@ -406,6 +418,7 @@ func (s *Server) createSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logger.Info("sandbox placed", "sandbox_id", started.GetId(), "runner_id", runner.ID, "reason", pl.reason)
+	hideRunnerID(principalFrom(r.Context()).key, started)
 	writeProto(w, http.StatusCreated, started)
 }
 
@@ -433,6 +446,7 @@ func (s *Server) listSandboxes(w http.ResponseWriter, r *http.Request) {
 		key := principalFrom(r.Context()).key
 		for _, sb := range items {
 			if canAccessTenant(key, sb.GetSpec().GetTenantId()) && canAccessAgent(key, sb.GetSpec().GetAgentId()) {
+				hideRunnerID(key, sb)
 				all.Sandboxes = append(all.Sandboxes, sb)
 			}
 		}
@@ -452,7 +466,14 @@ func (s *Server) getSandbox(w http.ResponseWriter, r *http.Request) {
 		writeGRPCError(w, err)
 		return
 	}
+	hideRunnerID(principalFrom(r.Context()).key, sb)
 	writeProto(w, http.StatusOK, sb)
+}
+
+func hideRunnerID(key APIKey, sb *v1.Sandbox) {
+	if key.TenantID != "" && sb != nil {
+		sb.RunnerId = ""
+	}
 }
 
 func (s *Server) destroySandbox(w http.ResponseWriter, r *http.Request) {
@@ -613,6 +634,10 @@ func (s *Server) execSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		s.logger.Warn("exec stream cannot disable response write deadline", "error", err)
+		return
+	}
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
@@ -707,6 +732,12 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		body.TenantID = caller.TenantID
+	}
+	if body.TenantID != "" {
+		if err := identity.ValidateName(body.TenantID); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	if body.TenantID == "" && !hasScope(body.Scopes, ScopeAdmin) {
 		writeError(w, http.StatusBadRequest, "non-admin keys require a tenant_id")
@@ -1073,6 +1104,10 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 func writeError(w http.ResponseWriter, code int, msg string) {
+	if code == http.StatusInternalServerError {
+		slog.Error("internal API request failed", "error", msg, "trace_id", w.Header().Get("X-Trace-Id"))
+		msg = "internal server error"
+	}
 	writeJSON(w, code, map[string]string{"error": msg})
 }
 
@@ -1096,6 +1131,10 @@ func writeGRPCError(w http.ResponseWriter, err error) {
 		code = http.StatusUnauthorized
 	case codes.PermissionDenied:
 		code = http.StatusForbidden
+	}
+	if code == http.StatusInternalServerError {
+		writeError(w, code, st.Message())
+		return
 	}
 	writeError(w, code, st.Message())
 }

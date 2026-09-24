@@ -36,7 +36,7 @@ explicitly granted to it.
    `NetworkFull`/`NetworkPrivate` are bwrap-only
    ([ADR 016](../adr/016-network-modes.md)).
 6. **Caller ↔ control plane** — API keys authenticate; tenant identity authorizes sandbox and key access, and an agent-bound key is confined to its own agent ([ADR 025](../adr/025-agent-identity.md)).
-7. **Control plane ↔ runner** — join token plus optional mTLS; runners are trusted execution hosts. Brokered credentials are refused on this channel without transport encryption.
+7. **Control plane ↔ runner** — runner TCP requires mTLS and the API client's DNS SAN (or an explicit loopback-only development override). Public registry and tunnel listeners require mTLS, binding the declared runner ID to the runner certificate's DNS SAN. A join token is separate and does not authenticate runner RPCs. Plaintext tunnel use requires an explicit loopback-only override and refuses brokered credentials by default.
 
 ## Adversary model
 
@@ -60,28 +60,27 @@ infallible; the design minimises the trusted surface.
 | Process inspection / signalling | PID namespace; only own processes visible | PID |
 | SysV/POSIX IPC abuse | IPC namespace | IPC |
 | Hostname / domain leakage | UTS namespace | UTS |
-| Privilege escalation | unprivileged user namespace; no capabilities from the host; bwrap runs with `--unshare-user --disable-userns`, and the seccomp filter rejects `clone`/`clone3` namespace flags, the x32 ABI and `io_uring`/`userfaultfd`/`fanotify`/`lookup_dcookie`/`uselib`/`syslog` | user |
+| Privilege escalation | unprivileged user namespace; no capabilities from the host; bwrap disables nested user namespaces and seccomp rejects namespace clone flags, clone3, and x32 ABI calls | user |
 | Fork bomb | `pids.max` via cgroup | cgroup |
 | Memory bomb / OOM | `memory.max`, `memory.swap.max=0` | cgroup |
 | CPU monopolisation | `cpu.max` quota | cgroup |
-| Disk exhaustion | runner resource ceilings and a default `DiskBytes` budget, filesystem project quota with periodic-scan fallback; sparse-aware snapshot archiving and a bounded fork restore ([ADR 015](../adr/015-disk-quota.md), [ADR 023](../adr/023-snapshot-fork.md)) | storage |
+| Disk exhaustion | runner resource ceilings and default `DiskBytes` budget, filesystem project quota with periodic-scan fallback; per-snapshot archive cap and fork restore size bound ([ADR 015](../adr/015-disk-quota.md), [ADR 023](../adr/023-snapshot-fork.md)) | storage |
 | Metadata service access | unrestricted network is never granted; `--unshare-net`, or `NetworkRestricted` filter+DNAT to the egress proxy that denies non-TLS and private IPs | network |
-| Private-network probing | no network namespace route exists, or non-proxy traffic is dropped and private/link-local/CGNAT destinations are blocked; `NetworkFull`/`NetworkPrivate` also drop host-local input (services on the runner's own addresses) and `NetworkFull` drops IPv6 | network |
+| Private-network probing | no network namespace route exists, or non-proxy traffic is dropped and private/link-local/CGNAT destinations are blocked; full/private modes also drop host-local input and full mode drops IPv6 | network |
 | DNS exfiltration / rebinding | the only resolver is the gateway's: it answers allowlisted names only, refuses loopback/private/link-local/CGNAT answers (so a rebinding name cannot reach the metadata service), refuses non-address query types, and audits every query | network |
 | Reverse shell / exfiltration | no network egress, or egress restricted to an allowlisted TLS SNI set with durable audit | network |
 | Gateway / UDP bypass | nftables output filter default-drop; only loopback, TCP to the proxy/broker ports, and DNS to the resolver are accepted | network |
 | Proxy resource exhaustion | per-sandbox connection cap (default 128), idle timeout (default 5m), and a bounded, cached DNS resolver | network |
-| Cross-tenant API access | tenant-scoped keys can only see their own sandboxes and keys; unknown IDs return 404 | control plane |
-| Sandbox-ID collision or injection | the caller cannot choose a sandbox ID: the API rejects it and the runner assigns a canonical prefixed ULID; stores, backends and the network manager validate IDs before deriving paths, unit/cgroup/table names or command arguments, and a duplicate create can never remove an existing sandbox's workspace or record | control plane |
-| Missing audit of allowed egress | allow decisions are persisted before bytes are forwarded; persistence failure denies the connection (proxy, broker, and DNS) | audit |
+| Cross-tenant API access | tenant-scoped keys can only see their own sandboxes and keys; unknown IDs return 404; callers cannot choose sandbox IDs and the runner validates canonical IDs before persisting records | control plane |
+| Missing audit of allowed egress | allow decisions are persisted before bytes are forwarded; persistence failure or a full JSONL audit log denies the connection (proxy, broker, and DNS). Denial floods are rate-limited and the JSONL log is capped with an `audit_truncated` marker | audit |
 | Credential theft from env/disk | runner secrets never injected into sandbox | credentials |
 | Third-party credential exfiltration | credentials are stored encrypted by `vora-api`, resolved per create, and attached by the gateway broker; the value never reaches the sandbox environment, filesystem, `/proc`, the persisted record, or the audit trail (alias only) | credentials |
 | Credential replay across hosts | the broker re-originates only to the alias's bound, allowlisted host and never follows a redirect | credentials |
-| Credential exposure on the control-plane channel | brokered create **and** fork are refused when the *selected* runner channel is plaintext (`Tunneled && !TunnelTLS`, or a direct channel without runner TLS), unless `VORA_ALLOW_INSECURE_BROKER=1`; the runner refuses create and fork credentials over plaintext direct and reverse-tunnel endpoints | credentials |
-| Runner-ID takeover / spoofing | public registry and tunnel require mTLS and a join token; the declared `runner_id` must match the client certificate's DNS SAN, and a new tunnel session cannot supersede a live runner under a different identity | control plane |
+| Credential exposure on the control-plane channel | brokered create/fork is refused when the selected runner channel is plaintext, unless `VORA_ALLOW_INSECURE_BROKER=1`; the runner refuses both create and fork credentials over plaintext direct and reverse-tunnel endpoints | credentials |
 | Sandbox survives runner death | in-sandbox agent exits when the runner disappears; reconciler reaps orphans | lifecycle |
-| Malicious image | references are parsed before constructing cache paths or pulling (no cache traversal); the rootfs is mounted read-only. In enforce mode the runner resolves to a digest, verifies and pulls that same digest-pinned reference, and refuses cache fallback | supply chain |
-| Hostile snapshot archive | capture opens workload entries through confined `os.Root` handles and skips raced symlinks; restore refuses traversal and special-file entries, never follows a symlink, and fails loudly: a fork's workload-authored state cannot write outside its own writable roots (ADR 023) | storage |
+| Malicious image | references are parsed before constructing cache paths or pulling; the rootfs is mounted read-only. In enforce mode the runner verifies and pulls the same digest-pinned reference and refuses cache fallback | supply chain |
+| Workload-created special files in files API | reads and writes open with `O_NONBLOCK` and reject non-regular files so a FIFO cannot hold runner workers indefinitely | filesystem |
+| Hostile snapshot archive | capture opens workload entries through confined `os.Root` handles and refuses raced symlinks; restore refuses traversal and special-file entries and never follows symlinks (ADR 023) | storage |
 | Malicious CLI plugin on `$PATH` | `vora <name>` dispatches only to a strictly named `vora-<name>` resolved with `exec.LookPath`: no shell, no config-supplied command line, built-ins and Vora's own companion binaries always win, and `VORA_DISABLE_PLUGINS=1` opts out. Same trust model as `git`/`kubectl` — a writable early `$PATH` already implies code execution. | CLI |
 
 Credential brokering is delivered for bwrap (ADR 013) and its decisions appear in

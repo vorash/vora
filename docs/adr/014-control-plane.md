@@ -20,8 +20,7 @@ Add a separate **`vora-api`** process (`cmd/vora-api`):
 - **Internal surface: gRPC `RunnerRegistry`.** Runners **dial out** to the API
   (`Register`, `Heartbeat`), so they can sit behind NAT. A public registry
   requires mTLS and a join token; the runner ID must match the client
-  certificate's DNS SAN on register and heartbeat, so a token holder cannot
-  re-register or tunnel under another runner's ID. The API records the runner's
+  certificate's DNS SAN on register and heartbeat. The API records the runner's
   advertised gRPC address, backends, and capacity.
 - **Caller auth: static API keys.** `Authorization: Bearer vora_…`; keys are
   stored **SHA-256-hashed** with a tenant and scopes (`admin`, `sandbox`). The
@@ -43,12 +42,11 @@ Add a separate **`vora-api`** process (`cmd/vora-api`):
   - `VORA_API_HTTP_TLS_{CERT,KEY,CA}` — external HTTP API and CLI client;
   - `VORA_API_REGISTRY_TLS_{CERT,KEY,CA}` — registry gRPC server and runner client;
   - `VORA_RUNNER_TLS_{CERT,KEY,CA}` — runner TCP gRPC server and API client.
-  When a CA is set on the server side, client certificates are required and
-  verified. The runner TCP endpoint requires all three files (mTLS) and the API
-  client certificate must carry DNS SAN `vora-api` (override with
-  `VORA_RUNNER_CLIENT_IDENTITY`); plaintext requires `VORA_RUNNER_INSECURE=1`
-  and a loopback IP bind. Other channels keep their own TLS policy, and the
-  Unix socket is unaffected.
+  The runner TCP endpoint requires all three files (mTLS), including a client
+  certificate with DNS SAN `vora-api` (override with
+  `VORA_RUNNER_CLIENT_IDENTITY`). Plaintext requires `VORA_RUNNER_INSECURE=1`
+  and a loopback IP bind; the Unix socket is unaffected. Other channels keep
+  their own TLS policy.
 - **Tenancy:** tenant-scoped keys may only access sandboxes and keys in their
   own tenant. Routes store `sandbox_id`, `runner_id`, and `tenant_id`; empty
   tenant IDs are global-admin-only. Non-admin keys cannot be created without a
@@ -61,10 +59,14 @@ Add a separate **`vora-api`** process (`cmd/vora-api`):
   runner Unix socket.
 - One `runtime.RunnerService` implementation is reused for both transports; the
   CLI shares one `client.API` interface across the gRPC and HTTP clients.
-- **HTTP, registry, and API → runner channels support TLS/mTLS** from the
-  channel-specific files above. TLS is **off by default** (plaintext), so run
-  the API and runners on a private network unless configured. The join token
-  still gates registration. `VORA_API_TLS_*` is a breaking removal.
+- **Runner TCP and public runner registry are root-of-trust interfaces.**
+  Registry credentials bind the declared runner ID to its certificate;
+  a shared join token alone does not authorize a runner-ID takeover.
+  Runner TCP without mTLS is disabled
+  except for an explicitly opted-in loopback development endpoint; its client
+  certificate must identify the API. Registry and HTTP TLS remain separately
+  configurable. The join token still gates registration, not runner RPCs.
+  `VORA_API_TLS_*` is a breaking removal.
 - Sandbox create is compensating: start or route-persistence failure destroys
   the runner sandbox on a detached timeout so request cancellation cannot leave
   an unrouteable workload.

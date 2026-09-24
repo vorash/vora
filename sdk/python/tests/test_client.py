@@ -67,6 +67,18 @@ async def test_get_list_and_destroy(boot) -> None:
     assert api.last.method == "DELETE"
 
 
+async def test_ids_cannot_redirect_requests_to_other_api_routes(boot) -> None:
+    client, api = boot()
+    with pytest.raises(ValueError):
+        await client.sandboxes.destroy("../keys/key_victim")
+    with pytest.raises(ValueError):
+        await client.sandboxes.get("..")
+    await client.sandboxes.get("a/b")
+    assert api.last.url.endswith("/v1/sandboxes/a%2Fb")
+    await client.snapshots.get("x?y")
+    assert api.last.url.endswith("/v1/snapshots/x%3Fy")
+
+
 async def test_non_2xx_raises_vora_error_with_status_and_body(boot) -> None:
     handler: Handler = lambda r: FakeResponse(status=404, json_body={"error": "sandbox not found"})
     client, _ = boot(handler)

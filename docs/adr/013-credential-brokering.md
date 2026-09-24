@@ -51,9 +51,12 @@ where the allowlist applies. This satisfies the master-plan criterion
 
 **4. `vora-api` owns secrets; the runner never does.**
 Secrets live in Postgres (`vora_secrets`,
-`id, tenant_id, alias, host, scheme, nonce, ciphertext, created_at, updated_at`)
-encrypted with AES-256-GCM under `VORA_MASTER_KEY`, which only `vora-api`
-holds. Storage and CRUD mirror the API-key pattern in
+`id, tenant_id, alias, host, scheme, header, nonce, ciphertext, key_version,
+created_at, updated_at`) encrypted with AES-256-GCM under `VORA_MASTER_KEY`,
+which only `vora-api` holds. Version 2 authenticates a length-prefixed encoding
+of tenant, alias, host, scheme, and header as GCM associated data, so editing
+metadata in the database invalidates the ciphertext. Legacy rows are re-sealed
+on first reveal and persisted before returning the value. Storage and CRUD mirror the API-key pattern in
 `internal/api`: writes are tenant-scoped, values are write-only, and
 `vora secrets list` returns metadata only.
 

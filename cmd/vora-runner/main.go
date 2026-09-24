@@ -97,7 +97,7 @@ func run() error {
 	shutdownTracing, err := telemetry.SetupTracing(context.Background(), telemetry.TracingConfig{
 		Endpoint:    os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 		ServiceName: "vora-runner",
-		Insecure:    true,
+		Insecure:    os.Getenv("OTEL_EXPORTER_OTLP_INSECURE") == "true",
 	})
 	if err != nil {
 		return fmt.Errorf("tracing: %w", err)

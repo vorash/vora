@@ -16,6 +16,29 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+func TestCreateEnforcesRunnerResourceCeilings(t *testing.T) {
+	s := testServer(t, testRegistry(t))
+	for _, limits := range []*v1.ResourceLimits{
+		{CpuMillis: 9000, MemoryBytes: 512 << 20, Pids: 64},
+		{CpuMillis: 1000, MemoryBytes: 9 << 30, Pids: 64},
+		{CpuMillis: 1000, MemoryBytes: 512 << 20, Pids: 1000},
+	} {
+		_, err := s.CreateSandbox(context.Background(), &v1.CreateSandboxRequest{Spec: &v1.SandboxSpec{
+			Image: "base", Resources: limits, Network: &v1.NetworkPolicy{Mode: v1.NetworkMode_NETWORK_NONE},
+		}})
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("unbounded resources accepted: %v, %v", limits, err)
+		}
+	}
+	_, err := s.CreateSandbox(context.Background(), &v1.CreateSandboxRequest{Spec: &v1.SandboxSpec{
+		Image: "base", Resources: &v1.ResourceLimits{CpuMillis: 1000, MemoryBytes: 512 << 20, Pids: 64},
+		Network: &v1.NetworkPolicy{Mode: v1.NetworkMode_NETWORK_NONE}, TtlSeconds: 25 * 60 * 60,
+	}})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("excessive TTL accepted: %v", err)
+	}
+}
+
 func TestCreateRejectsCallerIDsWithoutTouchingExistingWorkspace(t *testing.T) {
 	s := testServer(t, testRegistry(t))
 	id := ulid.NewSandbox()

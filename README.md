@@ -562,17 +562,13 @@ requirement (`/etc/resolv.conf` must exist in the image layers for
   and `/vora`; custom images must create them.
 - **Sandboxes survive runner death briefly**, then exit via the agent watchdog /
   runsc teardown; orphaned units and containers are cleaned on the next start.
-- **Registry and tunnel transports are authentication boundaries.** A public
-  runner registry or tunnel listener requires the join token *and* mTLS
-  (`VORA_API_REGISTRY_TLS_*` / `VORA_API_TUNNEL_TLS_*`), and the runner ID must
-  match the client certificate's DNS SAN; loopback development binds may opt
-  into plaintext with `VORA_TUNNEL_INSECURE=1`, and brokered credentials are
-  then refused. The HTTP channel is separately configured with
-  `VORA_API_HTTP_TLS_*`. A runner behind NAT can still be driven by setting
+- **Registry and HTTP channels can be plaintext by default.** Registration is
+  gated by a join token; runner TCP requires mTLS or an explicitly opted-in
+  loopback development bind. A public reverse tunnel requires mTLS using
+  `VORA_API_TUNNEL_TLS_{CERT,KEY,CA}` on both ends; its runner certificate DNS
+  SAN must match the runner ID. A runner behind NAT can still be driven by setting
   `VORA_API_TUNNEL_ADDR` on both sides, so the runner connects out and the API
   multiplexes over a reverse tunnel ([ADR 022](docs/adr/022-reverse-tunnel.md));
-  `VORA_ALLOW_INSECURE_BROKER=1` is required to knowingly broker over a plaintext
-  channel;
   capacity-aware placement is in [ADR 021](docs/adr/021-capacity-placement.md),
   and the default API store is in-memory
   ([ADR 014](docs/adr/014-control-plane.md)).

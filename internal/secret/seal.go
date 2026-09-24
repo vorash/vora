@@ -13,6 +13,7 @@ import (
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 )
@@ -56,6 +57,36 @@ func NewSealer(masterKey string) (*Sealer, error) {
 		return nil, fmt.Errorf("secret: gcm: %w", err)
 	}
 	return &Sealer{aead: aead}, nil
+}
+
+const boundKeyVersion = 2
+
+func recordAAD(rec Record) []byte {
+	data := []byte("vora/secrets/v2")
+	for _, field := range []string{rec.TenantID, rec.Alias, rec.Host, rec.Scheme, rec.Header} {
+		data = binary.BigEndian.AppendUint32(data, uint32(len(field)))
+		data = append(data, field...)
+	}
+	return data
+}
+
+func (s *Sealer) SealBound(value string, rec Record) (nonce, ciphertext []byte, err error) {
+	nonce = make([]byte, s.aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, nil, fmt.Errorf("secret: nonce: %w", err)
+	}
+	return nonce, s.aead.Seal(nil, nonce, []byte(value), recordAAD(rec)), nil
+}
+
+func (s *Sealer) OpenBound(nonce, ciphertext []byte, rec Record) (string, error) {
+	if len(nonce) != s.aead.NonceSize() {
+		return "", fmt.Errorf("secret: decrypt: invalid nonce length %d", len(nonce))
+	}
+	plaintext, err := s.aead.Open(nil, nonce, ciphertext, recordAAD(rec))
+	if err != nil {
+		return "", fmt.Errorf("secret: decrypt: %w", err)
+	}
+	return string(plaintext), nil
 }
 
 // Seal encrypts a value, returning the per-record nonce and its ciphertext.

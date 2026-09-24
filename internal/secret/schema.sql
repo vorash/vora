@@ -10,10 +10,13 @@ CREATE TABLE IF NOT EXISTS vora_secrets (
     header     text NOT NULL DEFAULT '',
     nonce      bytea NOT NULL,
     ciphertext bytea NOT NULL,
+    key_version integer NOT NULL DEFAULT 1,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (tenant_id, alias)
 );
+
+ALTER TABLE vora_secrets ADD COLUMN IF NOT EXISTS key_version integer NOT NULL DEFAULT 1;
 
 CREATE INDEX IF NOT EXISTS vora_secrets_tenant_idx ON vora_secrets (tenant_id, alias);
 

@@ -31,12 +31,23 @@ npm run build          # builds @vorash/sdk, then @vorash/mcp
 
 Then register the server with your host, pointing at `sdk/mcp/dist/index.js`.
 
-The server reads two environment variables:
+The server reads these environment variables:
 
 | Variable | Meaning |
 | --- | --- |
 | `VORA_API_URL` | Base URL of `vora-api`, e.g. `http://127.0.0.1:9300` (defaults to that) |
-| `VORA_API_KEY` | Bearer API key. Required — `vora-api` authenticates every request |
+| `VORA_API_KEY` | Bearer API key. Use an agent-bound sandbox-scope key, never an admin key |
+
+Sandbox creation is restricted **before** contacting the API. By default it
+allows only `network: none`, images `vora/base,vora/python,vora/node`, and caps
+memory at 1Gi, CPU at 2 cores, PIDs at 128, disk at 2Gi, and TTL at 1h.
+Unspecified resources get bounded defaults (512Mi, 1 core, 64 PIDs, 1Gi disk,
+1h TTL). Operators can override the comma-separated
+`VORA_MCP_ALLOWED_NETWORKS`, `VORA_MCP_ALLOWED_IMAGES`, and limits
+`VORA_MCP_MAX_MEMORY`, `VORA_MCP_MAX_CPU`, `VORA_MCP_MAX_PIDS`,
+`VORA_MCP_MAX_DISK`, `VORA_MCP_MAX_TTL`. Granting `full` networking lets a
+prompt-injected agent send data to arbitrary public hosts; do not enable it for
+untrusted inputs.
 
 ### Claude Code
 

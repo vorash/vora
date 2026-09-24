@@ -51,17 +51,18 @@ func (s *PostgresStore) Put(ctx context.Context, rec Record, value string) error
 		return err
 	}
 	_, err = s.pool.Exec(ctx,
-		`INSERT INTO vora_secrets (id, tenant_id, alias, host, scheme, header, nonce, ciphertext, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		`INSERT INTO vora_secrets (id, tenant_id, alias, host, scheme, header, nonce, ciphertext, key_version, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		 ON CONFLICT (tenant_id, alias) DO UPDATE SET
 		   host       = EXCLUDED.host,
 		   scheme     = EXCLUDED.scheme,
 		   header     = EXCLUDED.header,
 		   nonce      = EXCLUDED.nonce,
 		   ciphertext = EXCLUDED.ciphertext,
+		   key_version = EXCLUDED.key_version,
 		   updated_at = EXCLUDED.updated_at`,
 		stored.rec.ID, stored.rec.TenantID, stored.rec.Alias, stored.rec.Host, stored.rec.Scheme,
-		stored.rec.Header, stored.nonce, stored.ct, stored.rec.CreatedAt, stored.rec.UpdatedAt)
+		stored.rec.Header, stored.nonce, stored.ct, stored.version, stored.rec.CreatedAt, stored.rec.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("secret: put: %w", err)
 	}
@@ -81,15 +82,16 @@ func (s *PostgresStore) Reveal(ctx context.Context, tenant, alias string) (Recor
 
 func (s *PostgresStore) load(ctx context.Context, tenant, alias string, reveal bool) (Record, string, error) {
 	var (
-		rec   Record
-		nonce []byte
-		ct    []byte
+		rec     Record
+		nonce   []byte
+		ct      []byte
+		version int
 	)
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, tenant_id, alias, host, scheme, header, nonce, ciphertext, created_at, updated_at
+		`SELECT id, tenant_id, alias, host, scheme, header, nonce, ciphertext, key_version, created_at, updated_at
 		   FROM vora_secrets WHERE tenant_id = $1 AND alias = $2`, tenant, alias).
 		Scan(&rec.ID, &rec.TenantID, &rec.Alias, &rec.Host, &rec.Scheme, &rec.Header,
-			&nonce, &ct, &rec.CreatedAt, &rec.UpdatedAt)
+			&nonce, &ct, &version, &rec.CreatedAt, &rec.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Record{}, "", ErrNotFound
 	}
@@ -99,9 +101,32 @@ func (s *PostgresStore) load(ctx context.Context, tenant, alias string, reveal b
 	if !reveal {
 		return rec, "", nil
 	}
+	if version == boundKeyVersion {
+		value, err := s.sealer.OpenBound(nonce, ct, rec)
+		if err != nil {
+			return Record{}, "", err
+		}
+		return rec, value, nil
+	}
+	if version != 1 {
+		return Record{}, "", fmt.Errorf("secret: unsupported key version %d", version)
+	}
 	value, err := s.sealer.Open(nonce, ct)
 	if err != nil {
 		return Record{}, "", err
+	}
+	newNonce, newCT, err := s.sealer.SealBound(value, rec)
+	if err != nil {
+		return Record{}, "", err
+	}
+	tag, err := s.pool.Exec(ctx, `UPDATE vora_secrets SET nonce=$1, ciphertext=$2, key_version=$3, updated_at=now()
+		WHERE id=$4 AND nonce=$5 AND ciphertext=$6 AND key_version=1 AND tenant_id=$7 AND alias=$8 AND host=$9 AND scheme=$10 AND header=$11`,
+		newNonce, newCT, boundKeyVersion, rec.ID, nonce, ct, rec.TenantID, rec.Alias, rec.Host, rec.Scheme, rec.Header)
+	if err != nil {
+		return Record{}, "", fmt.Errorf("secret: migrate legacy seal: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return Record{}, "", fmt.Errorf("secret: legacy seal changed during migration")
 	}
 	return rec, value, nil
 }

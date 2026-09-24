@@ -66,6 +66,49 @@ func TestMemStoreRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLegacySealMigratesOnReveal(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemStore(newSealer(t))
+	r := rec("t1", "github", "api.github.com")
+	nonce, ct, err := s.sealer.Seal("legacy-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.m[keyOf(r.TenantID, r.Alias)] = entry{rec: r, nonce: nonce, ct: ct, version: 1}
+	_, value, err := s.Reveal(ctx, r.TenantID, r.Alias)
+	if err != nil || value != "legacy-secret" {
+		t.Fatalf("legacy reveal: value=%q error=%v", value, err)
+	}
+	if s.m[keyOf(r.TenantID, r.Alias)].version != boundKeyVersion {
+		t.Fatal("legacy ciphertext was returned without being migrated")
+	}
+}
+
+func TestSealedValueBindsTenantAliasAndHost(t *testing.T) {
+	for _, mutate := range []struct {
+		name   string
+		change func(*Record)
+	}{
+		{"host", func(r *Record) { r.Host = "attacker.example.com" }},
+		{"tenant", func(r *Record) { r.TenantID = "other" }},
+		{"alias", func(r *Record) { r.Alias = "other" }},
+	} {
+		t.Run(mutate.name, func(t *testing.T) {
+			s := NewMemStore(newSealer(t))
+			ctx := context.Background()
+			if err := s.Put(ctx, rec("t1", "github", "api.github.com"), "sensitive"); err != nil {
+				t.Fatal(err)
+			}
+			e := s.m[keyOf("t1", "github")]
+			mutate.change(&e.rec)
+			s.m[keyOf(e.rec.TenantID, e.rec.Alias)] = e
+			if _, _, err := s.Reveal(ctx, e.rec.TenantID, e.rec.Alias); err == nil {
+				t.Fatal("database metadata was changed without invalidating the sealed credential")
+			}
+		})
+	}
+}
+
 // TestMemStoreTenantIsolation asserts aliases are namespaced per tenant: a
 // foreign tenant can neither see nor overwrite another tenant's credential.
 func TestMemStoreTenantIsolation(t *testing.T) {

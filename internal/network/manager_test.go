@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/vorash/vora/internal/runtime"
+	"github.com/vorash/vora/internal/ulid"
 )
 
 func TestManagerRejectsNonCanonicalIDs(t *testing.T) {
@@ -14,6 +15,26 @@ func TestManagerRejectsNonCanonicalIDs(t *testing.T) {
 		if _, err := m.Create(context.Background(), id, Policy{Mode: runtime.NetworkFull}); err == nil {
 			t.Errorf("manager accepted unsafe id %q", id)
 		}
+	}
+}
+
+func TestAllocatorFailsBeforeSubnetWrap(t *testing.T) {
+	m := NewManager(t.TempDir(), ManagerConfig{}, nil)
+	m.next = 16384
+	if _, err := m.Create(context.Background(), ulid.NewSandbox(), Policy{Mode: runtime.NetworkFull}); err == nil {
+		t.Fatal("wrapped subnet index can reuse a live sandbox address")
+	}
+}
+
+func TestPrivateHostSlotIsReusable(t *testing.T) {
+	m := NewManager(t.TempDir(), ManagerConfig{}, nil)
+	m.tenantHosts["tenant"] = maxPrivateHostsPerTenant
+	m.releaseTenantHost(&Net{Mode: runtime.NetworkPrivate, TenantID: "tenant", hostSlot: 7})
+	m.mu.Lock()
+	slot, ok := m.allocateTenantHost("tenant")
+	m.mu.Unlock()
+	if !ok || slot != 7 {
+		t.Fatalf("freed slot unavailable: slot=%d ok=%v", slot, ok)
 	}
 }
 

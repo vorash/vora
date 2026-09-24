@@ -14,6 +14,7 @@ proves it. If the mechanism is removed, the test must fail.
 | Resource | A cannot reach B because… | Mechanism | Test |
 | -------- | ------------------------- | --------- | ---- |
 | Files | A's mount namespace has no path to B's workspace or rootfs; root rootfs is shared read-only and holds no tenant data | mount namespace, `--ro-bind` / OCI readonly root, per-sandbox workspace bind | `TestFilesystemIsolation` |
+| Sandbox identity | A cannot choose B's ID to collide with its workspace or route; only the runner assigns canonical sandbox IDs | API/runner create rejection and store validation | `TestCreateSandboxRejectsCallerID`, `TestCreateRejectsCallerIDsWithoutTouchingExistingWorkspace` |
 | Processes | A's PID namespace contains only its own processes; B's PIDs are not namespaced into A | PID namespace | `TestPIDNamespaceIsolation` |
 | Signals | A cannot `kill` a PID it cannot see | PID namespace | `TestCannotSignalHost` |
 | IPC | A has a private SysV/POSIX IPC namespace; B's shared memory is invisible | IPC namespace | `TestIPCNamespaceIsolation` |
@@ -23,18 +24,16 @@ proves it. If the mechanism is removed, the test must fail.
 | Egress (bwrap, `NetworkRestricted`) | A's only route is the gateway; every TCP connection is DNAT'd to the SNI proxy, which allows listed domains and denies the rest | per-sandbox netns + veth + nft DNAT + SNI proxy (ADR 012) | `TestNetworkRestrictedDNAT` + `egress` unit tests |
 | Name resolution (bwrap) | A can only resolve allowlisted names, through the gateway resolver; private/CGNAT answers and non-address types are refused | allowlist-only resolver on the gateway + nft accept (ADR 012) | `TestDNSThroughNetns` + `egress` DNS unit tests |
 | Brokered credentials (bwrap) | A reaches an allowlisted API through the broker route without ever holding the credential; the broker binds each alias to one host and never follows a redirect | gateway broker + host/allowlist binding (ADR 013) | `TestNoSecretsLeakBroker` + `egress` broker unit tests |
-| Egress (bwrap, `NetworkFull`) | A reaches public hosts through the runner, but private/CGNAT/IPv6 ranges, host-local services on the runner's own addresses and every other sandbox stay blocked | per-sandbox netns + veth + nft output drop (IPv6 included) + runner forward/NAT + input drop for the sandbox veth (ADR 016) | `TestNetworkFullBlocksPrivateRanges`, `TestFullAndPrivateRunnerRulesDropHostInput` |
-| Peer network (bwrap, `NetworkPrivate`) | A reaches the other sandboxes of its tenant and nothing else; public egress, other tenants, host-local services and host private ranges are denied | per-sandbox netns + veth + per-tenant routing + nft default-deny + input drop for the sandbox veth (ADR 016) | `TestNetworkPrivateIsolatesTenants`, `TestFullAndPrivateRunnerRulesDropHostInput` |
+| Egress (bwrap, `NetworkFull`) | A reaches public hosts through the runner, but private/CGNAT ranges, IPv6, host-local services and every other sandbox stay blocked | per-sandbox netns + veth + nft output filter + runner input/forward/NAT (ADR 016) | `TestNetworkFullBlocksPrivateRanges` + `TestFullAndPrivateRunnerRulesDropHostInput` |
+| Peer network (bwrap, `NetworkPrivate`) | A reaches the other sandboxes of its tenant and nothing else; public egress, other tenants and host-local services are denied | per-sandbox netns + veth + per-tenant routing + nft input drop/default-deny (ADR 016) | `TestNetworkPrivateIsolatesTenants` + `TestFullAndPrivateRunnerRulesDropHostInput` |
 | Memory | A's allocations are capped; exceeding the cap kills A, not B | `memory.max`, `memory.swap.max=0` | `TestMemoryBombKilled` |
 | PIDs | A's fork attempts hit its own `pids.max`; B's process budget is untouched | `pids.max` | `TestForkBombContained` |
-| Control socket | A's control socket lives in its own `ipc/` directory bound only into A | per-sandbox bind mount | `TestControlSocketIsolation` |
+| Control socket | A's control socket lives in its own `ipc/` directory bound only into A; reconnects pin the socket inode and peer credentials and refuse symlink/replacement | per-sandbox bind mount + peer check | `TestControlSocketIsolation`, `TestReplacedControlSocketFailsClosed` |
 | Metadata / secrets | A has no network and no runner credentials in env, files or `/proc/self/environ`; brokered credentials are attached outside the sandbox | no network; broker route (ADR 013) | `TestNoSecretsLeak` (+ broker case) |
 
-Sandbox and snapshot IDs are canonical prefixed ULIDs. The API refuses a
-caller-selected sandbox ID, the runner generates it and persists the record
-before preparing a workspace, and stores/backends/network manager validate IDs
-before deriving paths or command arguments. A duplicate cannot remove the
-existing sandbox's workspace or record (`TestCreateRejectsCallerIDsWithoutTouchingExistingWorkspace`).
+Runner admission also caps sandbox memory/CPU/PIDs/disk/TTL, total sandboxes,
+and per-tenant sandbox and snapshot counts before allocation. Tenant counts
+are per runner, not cluster-wide.
 
 CPU quota is set (`cpu.max` / systemd `CPUQuota`) and asserted by
 `TestSystemdUnitLimitsAndTeardown` / the gVisor subtree writer. There is no
@@ -42,24 +41,16 @@ live-throttle security test (too flaky). Disk is bounded by `DiskBytes`: a
 filesystem project quota when the host supports it, otherwise a periodic usage
 scan (ADR 015); `TestDiskQuotaBoundsHostWrites` covers the hard path.
 
-Admission is bounded before allocation: the runner enforces operator ceilings on
-memory, CPU, PIDs, disk and TTL, a global sandbox cap and per-tenant sandbox and
-snapshot counts (`TestSandboxCapacityEnforcesTenantAndRunnerLimits`,
-`TestSnapshotCountIsLimitedPerTenantBeforeArchiving`). A snapshot archive aborts
-past `VORA_MAX_SNAPSHOT_BYTES`, and a fork restores into a quota-applied
-directory so sparse-file expansion cannot exceed the inherited disk budget.
-
 ## Host protection
 
 | Host resource | Protection |
 | ------------- | ---------- |
-| Filesystem | rootfs mounted read-only; host paths never bind-mounted; no host `/` exposure; snapshot restore never writes outside a sandbox's writable roots and never follows a symlink ([ADR 023](../adr/023-snapshot-fork.md)) |
-| Kernel | bwrap: unprivileged user namespace + a seccomp deny-list installed by `vora-init` (ADR 018). gVisor: user-space kernel (KVM) |
+| Filesystem | rootfs mounted read-only; host paths never bind-mounted; no host `/` exposure; the files API opens nonblocking and refuses special files; snapshot capture uses confined root handles and refuses raced symlinks; restore never writes outside a sandbox's writable roots and never follows a symlink ([ADR 023](../adr/023-snapshot-fork.md)) |
+| Kernel | bwrap: unprivileged user namespace with nested userns disabled + a seccomp deny-list (including namespace clone flags and x32 ABI) installed by `vora-init` (ADR 018). gVisor: user-space kernel (KVM) |
 | PID 1 / init | sandbox has its own PID namespace |
 | Devices | minimal `/dev` from Bubblewrap / gVisor OCI spec |
 | cgroup hierarchy | bwrap: transient systemd units. gVisor: delegated subtree under `vora-runner.service` (`Delegate=yes`) |
 | Availability | memory/PID caps prevent host exhaustion; CPU quota bounds utilisation |
-| Runner privilege | the system runner runs as a dedicated `vora` user with only `CAP_SYS_ADMIN`/`CAP_NET_ADMIN`, `ProtectSystem=strict`, `ProtectHome=yes`, `ProtectKernelModules=yes`, `RestrictSUIDSGID=yes`, `LockPersonality=yes`, `SystemCallArchitectures=native` and a `ReadWritePaths` allowlist; the API uses `DynamicUser=yes`. CI fails if the `systemd-analyze security` score regresses (`scripts/check-systemd-security.sh`) |
 
 ## Residual risks (accepted)
 
@@ -78,6 +69,9 @@ directory so sparse-file expansion cannot exceed the inherited disk budget.
 - **The brokered hop inside the netns is plaintext HTTP.** The credential is
   attached by the gateway, so it still never enters the sandbox, but a workload
   that logs its own broker responses sees what the API returned.
+- **Agent-bound keys share tenant credential aliases.** Agent binding isolates
+  sandbox ownership but does not grant aliases individually: a leaked agent key
+  can request any alias its tenant has stored if it also grants the bound host.
 - **The gateway resolver sees query names.** Only allowlisted names are
   answered, but the runner learns which of them the sandbox asked for.
 - **gVisor restricted egress is enforced in the runner netns (ADR 017).**

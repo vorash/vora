@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"syscall"
 
 	"github.com/vorash/vora/internal/runtime"
 )
@@ -62,11 +63,18 @@ func ReadFile(spec runtime.WorkspaceSpec, sandboxPath string) ([]byte, error) {
 	}
 	defer root.Close()
 
-	f, err := root.Open(rel)
+	f, err := root.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("sandbox: not a regular file: %s", sandboxPath)
+	}
 
 	data, err := io.ReadAll(io.LimitReader(f, MaxTransferBytes+1))
 	if err != nil {
@@ -101,8 +109,21 @@ func WriteFile(spec runtime.WorkspaceSpec, sandboxPath string, content []byte, c
 			}
 		}
 	}
-	f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|syscall.O_NONBLOCK, 0o644)
 	if err != nil {
+		return 0, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return 0, err
+	}
+	if !info.Mode().IsRegular() {
+		f.Close()
+		return 0, fmt.Errorf("sandbox: not a regular file: %s", sandboxPath)
+	}
+	if err := f.Truncate(0); err != nil {
+		f.Close()
 		return 0, err
 	}
 	n, err := f.Write(content)
