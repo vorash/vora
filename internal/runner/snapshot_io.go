@@ -10,14 +10,14 @@ import (
 
 // writeArchive archives dirs into the file at path, writing via a temp file
 // and rename so a crash never leaves a half-written archive in place.
-func writeArchive(path string, dirs snapshot.Folders) (int64, error) {
+func writeArchive(path string, dirs snapshot.Folders, maxBytes int64) (int64, error) {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".data.tar.tmp-*")
 	if err != nil {
 		return 0, fmt.Errorf("snapshot: temp file: %w", err)
 	}
 	defer os.Remove(tmp.Name())
 
-	n, err := snapshot.Archive(tmp, dirs)
+	n, err := snapshot.ArchiveLimited(tmp, dirs, maxBytes)
 	if err != nil {
 		tmp.Close()
 		return 0, err
@@ -36,11 +36,11 @@ func writeArchive(path string, dirs snapshot.Folders) (int64, error) {
 }
 
 // restoreArchive extracts the snapshot archive at path into dirs.
-func restoreArchive(path string, dirs snapshot.Folders) error {
+func restoreArchive(path string, dirs snapshot.Folders, maxBytes int64) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("snapshot: open archive: %w", err)
 	}
 	defer f.Close()
-	return snapshot.Restore(f, dirs)
+	return snapshot.RestoreLimited(f, dirs, maxBytes)
 }

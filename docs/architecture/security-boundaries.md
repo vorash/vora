@@ -42,6 +42,13 @@ live-throttle security test (too flaky). Disk is bounded by `DiskBytes`: a
 filesystem project quota when the host supports it, otherwise a periodic usage
 scan (ADR 015); `TestDiskQuotaBoundsHostWrites` covers the hard path.
 
+Admission is bounded before allocation: the runner enforces operator ceilings on
+memory, CPU, PIDs, disk and TTL, a global sandbox cap and per-tenant sandbox and
+snapshot counts (`TestSandboxCapacityEnforcesTenantAndRunnerLimits`,
+`TestSnapshotCountIsLimitedPerTenantBeforeArchiving`). A snapshot archive aborts
+past `VORA_MAX_SNAPSHOT_BYTES`, and a fork restores into a quota-applied
+directory so sparse-file expansion cannot exceed the inherited disk budget.
+
 ## Host protection
 
 | Host resource | Protection |

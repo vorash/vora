@@ -13,11 +13,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	goruntime "runtime"
 	"sort"
 	"syscall"
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
@@ -291,6 +293,10 @@ func run() error {
 			if tunnelAddr != "" {
 				advertise = "" // reached through the tunnel, not a dialable address
 			}
+			var hostInfo unix.Sysinfo_t
+			if err := unix.Sysinfo(&hostInfo); err != nil {
+				logger.Warn("cannot detect runner memory capacity", "error", err)
+			}
 			reporter := &runregistry.Reporter{
 				Client:       rc,
 				RunnerID:     runnerID,
@@ -299,6 +305,9 @@ func run() error {
 				Backends:     registry.Names(),
 				NetworkModes: advertisedNetworkModes(registry),
 				Running:      func() int32 { return int32(server.RunningCount()) },
+				CPUMillis:    int64(goruntime.NumCPU()) * 1000,
+				MemoryBytes:  int64(hostInfo.Totalram) * int64(hostInfo.Unit),
+				MaxSandboxes: cfg.MaxSandboxes,
 				Logger:       logger,
 			}
 			go reporter.Run(ctx)
