@@ -91,17 +91,27 @@ func (r *Resolver) Rootfs(ref string) string { return r.cache.Rootfs(ref) }
 // Resolve returns a read-only rootfs directory for ref, pulling and unpacking
 // the image through containerd if necessary.
 func (r *Resolver) Resolve(ctx context.Context, ref string) (string, error) {
-	if strings.TrimSpace(ref) == "" || Name(ref) == "" {
-		return "", fmt.Errorf("images: empty image reference")
+	if Name(ref) == "" {
+		return "", fmt.Errorf("images: invalid image reference %q", ref)
 	}
 	// A misconfigured policy (enforce without a key/cosign) refuses every
 	// image rather than silently trusting them.
 	if r.policyErr != nil {
 		return "", r.policyErr
 	}
-	// Verify before any source is used (containerd pull/unpack or the local
-	// cache), so an unverified image is refused regardless of where it would
-	// have come from.
+	if r.policy.Enabled() {
+		named, err := reference.ParseNormalizedNamed(ref)
+		if err != nil {
+			return "", fmt.Errorf("images: invalid image reference: %w", err)
+		}
+		if _, ok := named.(reference.Digested); !ok {
+			return "", fmt.Errorf("images: signature enforcement requires a digest-pinned image reference")
+		}
+		if r.cli == nil {
+			return "", fmt.Errorf("images: signature enforcement requires containerd; the local cache is not verified")
+		}
+	}
+	// Verify the immutable digest before pulling or unpacking its content.
 	if err := r.policy.Verify(ctx, ref); err != nil {
 		return "", err
 	}
@@ -120,7 +130,7 @@ func (r *Resolver) Resolve(ctx context.Context, ref string) (string, error) {
 			r.mu.Unlock()
 			return path, nil
 		}
-		if r.mode == config.ImagesContainerd {
+		if r.mode == config.ImagesContainerd || r.policy.Enabled() {
 			return "", err
 		}
 		r.logger.Debug("containerd resolve failed; falling back to the image cache", "image", ref, "error", err)

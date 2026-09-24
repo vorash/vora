@@ -3,6 +3,8 @@ package images
 import (
 	"context"
 	"errors"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/vorash/vora/internal/config"
@@ -55,6 +57,20 @@ func TestResolverRefusesWhenPolicyMisconfigured(t *testing.T) {
 	}
 }
 
+func TestEnforceNeverUsesCacheOrMutableTag(t *testing.T) {
+	r := NewResolver(config.Config{ImagesMode: config.ImagesCache}, nil)
+	defer r.Close()
+	r.policy = &Policy{mode: config.ImagePolicyEnforce, verifier: fakeVerifier{}}
+	for _, ref := range []string{"ghcr.io/example/image:tag", "ghcr.io/example/image@sha256:" + strings.Repeat("a", 64)} {
+		if err := os.MkdirAll(r.cache.Rootfs(ref), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := r.Resolve(context.Background(), ref); err == nil {
+			t.Fatalf("enforce accepted %q without an authenticated digest pull", ref)
+		}
+	}
+}
+
 func TestCosignVerifierCommand(t *testing.T) {
 	var gotName string
 	var gotArgs []string
@@ -66,13 +82,13 @@ func TestCosignVerifierCommand(t *testing.T) {
 			return nil
 		},
 	}
-	if err := v.Verify(context.Background(), "ghcr.io/example/image:tag"); err != nil {
+	if err := v.Verify(context.Background(), "ghcr.io/example/image@sha256:"+strings.Repeat("a", 64)); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
 	if gotName != "/usr/bin/cosign" {
 		t.Fatalf("binary = %q", gotName)
 	}
-	want := []string{"verify", "--key", "/keys/cosign.pub", "ghcr.io/example/image:tag"}
+	want := []string{"verify", "--key", "/keys/cosign.pub", "--", "ghcr.io/example/image@sha256:" + strings.Repeat("a", 64)}
 	if len(gotArgs) != len(want) {
 		t.Fatalf("args = %v", gotArgs)
 	}

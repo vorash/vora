@@ -35,16 +35,17 @@ Shelling out to cosign (rather than linking the sigstore libraries) keeps the
 dependency and the trust material explicit: the operator installs cosign and
 pins a public key, the same way they already provide runsc/containerd.
 
-**3. Enforced in `images.Resolver.Resolve`, before any source.**
-The check runs before the containerd pull and before the local cache is
-consulted, so an unverified image is refused no matter where it would have come
-from. A misconfigured policy (enforce without a key) refuses every image rather
-than failing open.
+**3. Digest-pinned enforcement in `images.Resolver.Resolve`.**
+A mutable tag cannot be verified and then pulled safely: the tag may move
+between those operations. Enforce mode therefore requires `repo@sha256:<digest>`
+and containerd, verifies that exact digest before pulling, and never falls
+back to the unauthenticated local cache. Operators resolve tags to digests
+before submitting them. A misconfigured policy refuses every image.
 
 ## Consequences
 
-- With enforcement on, an unsigned or tampered image fails `vora sandbox
-  create`/start with a signature error and is never unpacked.
+- With enforcement on, mutable tags and local-cache-only deployments fail
+  closed; unsigned or tampered digest-pinned images fail at start.
 - Enforcement needs a registry round-trip and the cosign binary on the runner;
   it is off by default so this is opt-in.
 - Keyless (Fulcio/Rekor) verification and notation are not implemented; the
