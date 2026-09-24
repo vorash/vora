@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/distribution/reference"
 )
 
 // ErrNotFound means the image has not been built into the cache.
@@ -51,7 +53,10 @@ func Key(ref string) string {
 
 func split(ref string) (name, tag string) {
 	s := strings.TrimSpace(ref)
-	if s == "" {
+	if s == "" || s != ref {
+		return "", ""
+	}
+	if _, err := reference.ParseNormalizedNamed(s); err != nil {
 		return "", ""
 	}
 	if i := strings.IndexByte(s, '@'); i >= 0 {
@@ -87,14 +92,18 @@ func stripTag(s string) string {
 // Rootfs returns the rootfs path for an image reference. It does not check
 // existence; use Has or Resolve for that.
 func (c *Cache) Rootfs(ref string) string {
-	return filepath.Join(c.root, Key(ref), "rootfs")
+	key := Key(ref)
+	if key == "" {
+		return ""
+	}
+	return filepath.Join(c.root, key, "rootfs")
 }
 
 // Resolve returns the rootfs path for an image reference, or ErrNotFound.
 // The tag must match exactly; python:3.13 does not fall back to python/latest.
 func (c *Cache) Resolve(ref string) (string, error) {
 	if Name(ref) == "" {
-		return "", fmt.Errorf("images: empty image reference")
+		return "", fmt.Errorf("images: invalid image reference %q", ref)
 	}
 	path := c.Rootfs(ref)
 	info, err := os.Stat(path)

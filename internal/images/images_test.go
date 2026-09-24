@@ -4,21 +4,22 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 func TestKey(t *testing.T) {
 	cases := map[string]string{
-		"vora/base":          "base/latest",
-		"python:3.13-slim":   "python/3.13-slim",
-		"python:3.13":        "python/3.13",
-		"python":             "python/latest",
-		"node:22":            "node/22",
-		"ghcr.io/x/y:tag":    "y/tag",
-		"alpine":             "alpine/latest",
-		"img@sha256:abc":     "img/sha256-abc",
-		"vora/python:latest": "python/latest",
-		"":                   "",
+		"vora/base":                             "base/latest",
+		"python:3.13-slim":                      "python/3.13-slim",
+		"python:3.13":                           "python/3.13",
+		"python":                                "python/latest",
+		"node:22":                               "node/22",
+		"ghcr.io/x/y:tag":                       "y/tag",
+		"alpine":                                "alpine/latest",
+		"img@sha256:" + strings.Repeat("a", 64): "img/sha256-" + strings.Repeat("a", 64),
+		"vora/python:latest":                    "python/latest",
+		"":                                      "",
 	}
 	for in, want := range cases {
 		if got := Key(in); got != want {
@@ -29,18 +30,32 @@ func TestKey(t *testing.T) {
 
 func TestName(t *testing.T) {
 	cases := map[string]string{
-		"vora/base":        "base",
-		"python:3.13-slim": "python",
-		"node:22":          "node",
-		"ghcr.io/x/y:tag":  "y",
-		"alpine":           "alpine",
-		"img@sha256:abc":   "img",
-		"":                 "",
+		"vora/base":                             "base",
+		"python:3.13-slim":                      "python",
+		"node:22":                               "node",
+		"ghcr.io/x/y:tag":                       "y",
+		"alpine":                                "alpine",
+		"img@sha256:" + strings.Repeat("a", 64): "img",
+		"":                                      "",
 	}
 	for in, want := range cases {
 		if got := Name(in); got != want {
 			t.Errorf("Name(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestCacheRejectsHostileReferences(t *testing.T) {
+	c := NewCache(t.TempDir())
+	for _, ref := range []string{"..:..", "x@sha256:a/../../../outside", "-flag", "x:../../escape", "x@sha256:invalid"} {
+		t.Run(ref, func(t *testing.T) {
+			if got := c.Rootfs(ref); got != "" {
+				t.Fatalf("unsafe reference %q maps to host path %q", ref, got)
+			}
+			if _, err := c.Resolve(ref); err == nil {
+				t.Fatalf("unsafe reference %q accepted", ref)
+			}
+		})
 	}
 }
 

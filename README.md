@@ -554,8 +554,9 @@ requirement (`/etc/resolv.conf` must exist in the image layers for
   The "host unaffected" guarantee holds only when the probe passes.
 - **Images are trusted unless a signature policy is set.** `VORA_IMAGE_POLICY=off`
   (the default) trusts every image and logs a warning at startup;
-  `VORA_IMAGE_POLICY=enforce` verifies with `cosign verify --key` before any
-  pull and refuses unsigned/unverifiable images
+  `VORA_IMAGE_POLICY=enforce` requires a digest-pinned reference and containerd,
+  verifies that digest with `cosign verify --key` before pull, and refuses
+  unsigned images and unauthenticated cache fallback
   ([ADR 020](docs/adr/020-image-signing.md)).
 - **The image must provide mount points.** Rootfs images include `/workspace`
   and `/vora`; custom images must create them.

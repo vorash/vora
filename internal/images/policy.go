@@ -86,7 +86,7 @@ func newCosignVerifier(cfg config.Config) (*cosignVerifier, error) {
 }
 
 func (v *cosignVerifier) Verify(ctx context.Context, ref string) error {
-	return v.run(ctx, v.path, "verify", "--key", v.key, ref)
+	return v.run(ctx, v.path, "verify", "--key", v.key, "--", ref)
 }
 
 func runCommand(ctx context.Context, name string, args ...string) error {
