@@ -81,6 +81,11 @@ func TestRejectBrokerSecrets(t *testing.T) {
 	if called {
 		t.Fatal("the handler ran despite brokered credentials")
 	}
+	called = false
+	fork := &v1.ForkSnapshotRequest{BrokerSecrets: []*v1.BrokerCredential{{Alias: "github", Value: "secret"}}}
+	if _, err := RejectBrokerSecrets(context.Background(), fork, &grpc.UnaryServerInfo{}, handler); status.Code(err) != codes.FailedPrecondition || called {
+		t.Fatalf("fork leaked credentials over plaintext: error=%v handler_called=%v", err, called)
+	}
 
 	for _, req := range []any{
 		&v1.CreateSandboxRequest{Spec: &v1.SandboxSpec{}},

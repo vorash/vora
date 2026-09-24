@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"context"
+	"crypto/x509"
 	"io"
 	"net"
 	"testing"
@@ -18,6 +19,13 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("condition not met within timeout")
+}
+
+func TestTunnelCertificateBindsRunnerID(t *testing.T) {
+	cert := &x509.Certificate{DNSNames: []string{"run_owner"}}
+	if !certificateIsRunner(cert, "run_owner") || certificateIsRunner(cert, "run_victim") {
+		t.Fatal("a tunnel can be replaced under a different runner id")
+	}
 }
 
 func TestTunnelRoundTrip(t *testing.T) {

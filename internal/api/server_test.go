@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,7 +17,11 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
@@ -232,6 +238,22 @@ func do(t *testing.T, method, url, key string, body any) *http.Response {
 		t.Fatalf("do: %v", err)
 	}
 	return resp
+}
+
+func TestRunnerRegistryBindsIDToClientCertificate(t *testing.T) {
+	s := New(Options{RequireRunnerIdentity: true})
+	ctx := peer.NewContext(context.Background(), &peer.Peer{AuthInfo: credentials.TLSInfo{State: tls.ConnectionState{
+		PeerCertificates: []*x509.Certificate{{DNSNames: []string{"run_owner"}}},
+	}}})
+	if _, err := s.Register(ctx, &v1.RegisterRunnerRequest{RunnerId: "run_owner", Address: "127.0.0.1:9200"}); err != nil {
+		t.Fatalf("owner registration failed: %v", err)
+	}
+	if _, err := s.Register(ctx, &v1.RegisterRunnerRequest{RunnerId: "run_victim", Address: "attacker:9200"}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("runner ID takeover accepted: %v", err)
+	}
+	if _, err := s.Heartbeat(ctx, &v1.HeartbeatRequest{RunnerId: "run_victim"}); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("foreign runner heartbeat accepted: %v", err)
+	}
 }
 
 func TestAuthRejectsBadKey(t *testing.T) {

@@ -77,7 +77,8 @@ infallible; the design minimises the trusted surface.
 | Credential theft from env/disk | runner secrets never injected into sandbox | credentials |
 | Third-party credential exfiltration | credentials are stored encrypted by `vora-api`, resolved per create, and attached by the gateway broker; the value never reaches the sandbox environment, filesystem, `/proc`, the persisted record, or the audit trail (alias only) | credentials |
 | Credential replay across hosts | the broker re-originates only to the alias's bound, allowlisted host and never follows a redirect | credentials |
-| Credential exposure on the control-plane channel | a brokered create is refused when the API-to-runner channel has no transport encryption, unless `VORA_ALLOW_INSECURE_BROKER=1`; the runner refuses the same request over a plaintext endpoint | credentials |
+| Credential exposure on the control-plane channel | brokered create **and** fork are refused when the *selected* runner channel is plaintext (`Tunneled && !TunnelTLS`, or a direct channel without runner TLS), unless `VORA_ALLOW_INSECURE_BROKER=1`; the runner refuses create and fork credentials over plaintext direct and reverse-tunnel endpoints | credentials |
+| Runner-ID takeover / spoofing | public registry and tunnel require mTLS and a join token; the declared `runner_id` must match the client certificate's DNS SAN, and a new tunnel session cannot supersede a live runner under a different identity | control plane |
 | Sandbox survives runner death | in-sandbox agent exits when the runner disappears; reconciler reaps orphans | lifecycle |
 | Malicious image | image rootfs is data only, read-only, no execution at build time | supply chain |
 | Hostile snapshot archive | restore refuses traversal and special-file entries, never follows a symlink, and fails loudly: a fork's workload-authored state cannot write outside its own writable roots (ADR 023) | storage |

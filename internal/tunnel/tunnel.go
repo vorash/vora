@@ -9,6 +9,8 @@ package tunnel
 import (
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -29,8 +31,9 @@ type Hello struct {
 
 // Server accepts runner tunnels and opens streams to them. It lives in vora-api.
 type Server struct {
-	joinToken string
-	logger    *slog.Logger
+	joinToken  string
+	logger     *slog.Logger
+	requireTLS bool
 
 	mu       sync.Mutex
 	sessions map[string]*yamux.Session
@@ -44,6 +47,9 @@ func NewServer(joinToken string, logger *slog.Logger) *Server {
 	}
 	return &Server{joinToken: joinToken, logger: logger, sessions: map[string]*yamux.Session{}}
 }
+
+// RequireTLS binds each runner id to the client certificate's DNS SAN.
+func (s *Server) RequireTLS() { s.requireTLS = true }
 
 // Serve accepts tunnel connections until the listener closes or ctx is done.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
@@ -60,13 +66,19 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 }
 
 func (s *Server) handle(conn net.Conn) {
+	if s.requireTLS {
+		if _, ok := conn.(*tls.Conn); !ok {
+			_ = conn.Close()
+			return
+		}
+	}
 	hello, err := readHello(conn)
 	if err != nil {
 		s.logger.Warn("tunnel handshake failed", "error", err)
 		_ = conn.Close()
 		return
 	}
-	if hello.RunnerID == "" || !s.authorized(hello.JoinToken) {
+	if hello.RunnerID == "" || !s.authorized(hello.JoinToken) || (s.requireTLS && !peerIsRunner(conn.(*tls.Conn), hello.RunnerID)) {
 		s.logger.Warn("tunnel rejected", "runner_id", hello.RunnerID)
 		_ = conn.Close()
 		return
@@ -91,6 +103,20 @@ func (s *Server) handle(conn net.Conn) {
 	}
 	s.mu.Unlock()
 	s.logger.Info("tunnel closed", "runner_id", hello.RunnerID)
+}
+
+func peerIsRunner(conn *tls.Conn, id string) bool {
+	certs := conn.ConnectionState().PeerCertificates
+	return len(certs) > 0 && certificateIsRunner(certs[0], id)
+}
+
+func certificateIsRunner(cert *x509.Certificate, id string) bool {
+	for _, name := range cert.DNSNames {
+		if name == id {
+			return true
+		}
+	}
+	return false
 }
 
 // Dial opens a stream to a tunnelled runner.
@@ -125,6 +151,7 @@ type Client struct {
 	RunnerID  string
 	JoinToken string
 	Logger    *slog.Logger
+	TLS       *tls.Config
 }
 
 // Listen dials the API, authenticates, and returns a listener whose Accept
@@ -135,7 +162,13 @@ func (c *Client) Listen(ctx context.Context) (net.Listener, error) {
 		logger = slog.Default()
 	}
 	d := net.Dialer{Timeout: handshakeTimeout}
-	conn, err := d.DialContext(ctx, "tcp", c.Addr)
+	var conn net.Conn
+	var err error
+	if c.TLS != nil {
+		conn, err = (&tls.Dialer{NetDialer: &d, Config: c.TLS}).DialContext(ctx, "tcp", c.Addr)
+	} else {
+		conn, err = d.DialContext(ctx, "tcp", c.Addr)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("tunnel: dial %s: %w", c.Addr, err)
 	}
