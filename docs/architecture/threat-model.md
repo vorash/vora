@@ -66,7 +66,7 @@ infallible; the design minimises the trusted surface.
 | CPU monopolisation | `cpu.max` quota | cgroup |
 | Disk exhaustion | `DiskBytes` filesystem project quota, falling back to a periodic usage scan ([ADR 015](../adr/015-disk-quota.md)) | storage |
 | Metadata service access | unrestricted network is never granted; `--unshare-net`, or `NetworkRestricted` filter+DNAT to the egress proxy that denies non-TLS and private IPs | network |
-| Private-network probing | no network namespace route exists, or non-proxy traffic is dropped and private/link-local/CGNAT destinations are blocked | network |
+| Private-network probing | no network namespace route exists, or non-proxy traffic is dropped and private/link-local/CGNAT destinations are blocked; `NetworkFull`/`NetworkPrivate` also drop host-local input (services on the runner's own addresses) and `NetworkFull` drops IPv6 | network |
 | DNS exfiltration / rebinding | the only resolver is the gateway's: it answers allowlisted names only, refuses loopback/private/link-local/CGNAT answers (so a rebinding name cannot reach the metadata service), refuses non-address query types, and audits every query | network |
 | Reverse shell / exfiltration | no network egress, or egress restricted to an allowlisted TLS SNI set with durable audit | network |
 | Gateway / UDP bypass | nftables output filter default-drop; only loopback, TCP to the proxy/broker ports, and DNS to the resolver are accepted | network |

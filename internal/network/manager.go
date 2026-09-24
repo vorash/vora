@@ -63,7 +63,7 @@ const (
 
 // privateDestinations are the ranges a sandbox must never reach unless its mode
 // explicitly permits a peer, per ADR 004.
-const privateDestinations = "{ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 127.0.0.0/8 }"
+const privateDestinations = "{ 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 }"
 
 // Enforcement selects where a NetworkRestricted sandbox's egress policy is
 // applied. Bubblewrap uses the sandbox netns output hook; gVisor's userspace
@@ -495,6 +495,7 @@ func sandboxRules(n *Net, ports servicePorts) string {
 	chain out {
 		type filter hook output priority 0; policy accept;
 		oifname "lo" accept
+		meta nfproto ipv6 drop
 		ip daddr %s drop
 	}
 }
@@ -521,6 +522,11 @@ func runnerRules(n *Net) string {
 	switch n.Mode {
 	case runtime.NetworkFull:
 		return fmt.Sprintf(`table ip %s {
+	chain input {
+		type filter hook input priority 0; policy accept;
+		iifname %q ct state established,related accept
+		iifname %q drop
+	}
 	chain forward {
 		type filter hook forward priority 0; policy accept;
 		ct state established,related accept
@@ -533,9 +539,14 @@ table ip %s {
 		ip saddr %s masquerade
 	}
 }
-`, fwdTable(n.ID), n.SandboxIP, privateDestinations, natTable(n.ID), n.SandboxIP)
+`, fwdTable(n.ID), n.iface, n.iface, n.SandboxIP, privateDestinations, natTable(n.ID), n.SandboxIP)
 	case runtime.NetworkPrivate:
 		return fmt.Sprintf(`table ip %s {
+	chain input {
+		type filter hook input priority 0; policy accept;
+		iifname %q ct state established,related accept
+		iifname %q drop
+	}
 	chain forward {
 		type filter hook forward priority 0; policy accept;
 		ct state established,related accept
@@ -543,7 +554,7 @@ table ip %s {
 		ip saddr %s drop
 	}
 }
-`, fwdTable(n.ID), n.SandboxIP, n.SandboxCIDR, n.SandboxIP)
+`, fwdTable(n.ID), n.iface, n.iface, n.SandboxIP, n.SandboxCIDR, n.SandboxIP)
 	default:
 		return ""
 	}

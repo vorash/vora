@@ -56,6 +56,19 @@ overwriting existing ones) and enables the services. The units **require**
 those env files, so a host that is not configured fails to start rather than
 running with defaults.
 
+Before installation, provision the `vora` system user and a lingering
+`systemd --user` manager, then run rootless containerd as `vora` at
+`/run/user/<vora-uid>/containerd-rootless/containerd.sock`. The installer
+refuses a missing rootless socket rather than granting `vora` access to the
+host-root containerd daemon. For an existing root deployment, stop the runner,
+migrate `/var/lib/vora` to `vora:vora` and the images to the rootless daemon,
+and update any preserved `/etc/vora/runner.env`; the installer does not copy
+existing secrets or state automatically. Runner TLS keys must be readable by
+`vora` (mode 0600); API TLS keys must be group-readable by `vora-api-tls`
+(mode 0640). Keep `/etc/vora/*.env` root-only (systemd reads them before
+switching users). The directories `/etc/vora` and `/etc/vora/tls` must be
+traversable, but the key files must remain private.
+
 `vora-init` is installed next to `vora-runner` because `resolveInit()` looks
 beside the executable before falling back to `PATH`.
 
@@ -89,7 +102,9 @@ Two things to know:
   namespace the runner uses and it never has to:
 
   ```bash
-  sudo ctr --namespace vora images pull \
+  # Run as vora, against its rootless socket (not /run/containerd/containerd.sock):
+  ctr --address /run/user/<vora-uid>/containerd-rootless/containerd.sock \
+    --namespace vora images pull \
     --user <github-user>:<PAT with read:packages> \
     ghcr.io/vorash/vora-python@sha256:<digest from the release>
   ```
@@ -116,12 +131,15 @@ Two things to know:
 
 ## Pitfalls
 
-- **The state directory must stay `root:root`.** The units use
-  `StateDirectory=vora`, which systemd refuses to use for a service whose
-  directory is owned by someone else; if `/var/lib/vora` is chowned to a `vora`
-  user, the service fails with status `238/STATE_DIRECTORY` (`EPERM`) and
-  crash-loops. `scripts/install-system.sh` creates it `root:root` and warns if it
-  finds it otherwise.
+- **The runner state directory must belong to `vora:vora`.** The system
+  runner uses `User=vora`, delegated user cgroups and only CAP_SYS_ADMIN and
+  CAP_NET_ADMIN for namespace/network setup. These host capabilities are still
+  powerful; this is not a fully rootless runner. The unit confines filesystem
+  writes to its state and runtime directories. Never give `vora` access to the
+  host-root containerd socket: it would restore host-root authority.
+  `NetworkFull`/`NetworkPrivate` also require the host administrator to set
+  `net.ipv4.ip_forward=1` before starting Vora; the hardened runner cannot
+  change protected kernel tunables itself.
 - **`vora-api` waits for its store, and the network can take a while after a
   reboot.** The unit retries indefinitely with a 5-second backoff, because a
   Supabase DSN can need ~a minute of IPv6 route convergence after boot and the

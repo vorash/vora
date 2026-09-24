@@ -42,7 +42,11 @@ Add a separate **`vora-api`** process (`cmd/vora-api`):
   - `VORA_API_REGISTRY_TLS_{CERT,KEY,CA}` — registry gRPC server and runner client;
   - `VORA_RUNNER_TLS_{CERT,KEY,CA}` — runner TCP gRPC server and API client.
   When a CA is set on the server side, client certificates are required and
-  verified. An empty config keeps plaintext for local development.
+  verified. The runner TCP endpoint requires all three files (mTLS) and the API
+  client certificate must carry DNS SAN `vora-api` (override with
+  `VORA_RUNNER_CLIENT_IDENTITY`); plaintext requires `VORA_RUNNER_INSECURE=1`
+  and a loopback IP bind. Other channels keep their own TLS policy, and the
+  Unix socket is unaffected.
 - **Tenancy:** tenant-scoped keys may only access sandboxes and keys in their
   own tenant. Routes store `sandbox_id`, `runner_id`, and `tenant_id`; empty
   tenant IDs are global-admin-only. Non-admin keys cannot be created without a

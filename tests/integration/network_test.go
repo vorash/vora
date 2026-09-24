@@ -183,6 +183,20 @@ func TestNetworkFullBlocksPrivateRanges(t *testing.T) {
 		t.Fatalf("gateway service reachable in NetworkFull: %q (%v)", out, err)
 	}
 
+	// A host service bound on a routable address is local INPUT, not FORWARD.
+	// It must remain unreachable even though full mode permits public egress.
+	if hostIP := hostNonLoopbackIPv4(t); hostIP != "" {
+		ln, err := net.Listen("tcp", net.JoinHostPort(hostIP, "0"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ln.Close()
+		port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+		if out, err := nsenterErr(n.NetnsPID, "timeout", "2", "bash", "-c", "exec 3<>/dev/tcp/"+hostIP+"/"+port+" && echo UNEXPECTED"); err == nil || strings.Contains(out, "UNEXPECTED") {
+			t.Fatalf("host-local TCP service reachable from full sandbox: %q (%v)", out, err)
+		}
+	}
+
 	// The blocking rule is actually installed in the sandbox namespace.
 	if rules := nsenterRun(t, n.NetnsPID, "nft", "list", "ruleset"); !strings.Contains(rules, "169.254.0.0/16") {
 		t.Fatalf("private-range drop rule not installed:\n%s", rules)
@@ -219,6 +233,16 @@ func TestNetworkPrivateIsolatesTenants(t *testing.T) {
 		_ = m.Destroy(context.Background(), cID)
 	})
 
+	gw, err := net.Listen("tcp", net.JoinHostPort(a.GatewayIP, "0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gw.Close()
+	port := strconv.Itoa(gw.Addr().(*net.TCPAddr).Port)
+	if out, err := nsenterErr(a.NetnsPID, "timeout", "2", "bash", "-c", "exec 3<>/dev/tcp/"+a.GatewayIP+"/"+port+" && echo UNEXPECTED"); err == nil || strings.Contains(out, "UNEXPECTED") {
+		t.Fatalf("host gateway TCP service reachable from private sandbox: %q (%v)", out, err)
+	}
+
 	// Serve inside b's namespace.
 	addr := net.JoinHostPort(b.SandboxIP, "9999")
 	srv := exec.Command("nsenter", "-t", strconv.Itoa(b.NetnsPID), "-n", serve, "-addr", addr)
@@ -243,6 +267,29 @@ func TestNetworkPrivateIsolatesTenants(t *testing.T) {
 	if out, err := nsenterErr(a.NetnsPID, "timeout", "2", "bash", "-c", "exec 3<>/dev/tcp/1.1.1.1/80 && echo UNEXPECTED"); err == nil || strings.Contains(out, "UNEXPECTED") {
 		t.Fatalf("public egress allowed in NetworkPrivate: %q (%v)", out, err)
 	}
+}
+
+func hostNonLoopbackIPv4(t *testing.T) string {
+	t.Helper()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, addr := range addrs {
+			if network, ok := addr.(*net.IPNet); ok && network.IP.To4() != nil {
+				return network.IP.String()
+			}
+		}
+	}
+	return ""
 }
 
 func buildNetServe(t *testing.T) string {

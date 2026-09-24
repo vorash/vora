@@ -3,6 +3,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -37,6 +39,32 @@ import (
 	"github.com/vorash/vora/internal/ulid"
 	"github.com/vorash/vora/internal/version"
 )
+
+func verifyAPIIdentity(cert *x509.Certificate, identity string) error {
+	for _, name := range cert.DNSNames {
+		if name == identity {
+			return nil
+		}
+	}
+	return fmt.Errorf("runner TCP client certificate must have DNS SAN %q", identity)
+}
+
+func validateRunnerTCP(addr string, cfg tlsutil.Config, insecure bool) error {
+	if cfg.CAFile != "" && cfg.CertFile != "" && cfg.KeyFile != "" {
+		return nil
+	}
+	if !insecure || cfg.Enabled() {
+		return fmt.Errorf("runner TCP requires VORA_RUNNER_TLS_{CERT,KEY,CA}; for local plaintext use VORA_RUNNER_INSECURE=1 on loopback")
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("runner TCP address: %w", err)
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("insecure runner TCP must bind to a loopback IP")
+	}
+	return nil
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -136,21 +164,34 @@ func run() error {
 	// runner. The Unix socket remains the local CLI path.
 	var tcpServer *grpc.Server
 	if addr := os.Getenv("VORA_RUNNER_ADDR"); addr != "" {
-		tcpLn, err := net.Listen("tcp", addr)
-		if err != nil {
-			return fmt.Errorf("listen tcp %s: %w", addr, err)
-		}
-		defer tcpLn.Close()
 		runnerTLS := tlsutil.Config{
 			CertFile: os.Getenv("VORA_RUNNER_TLS_CERT"),
 			KeyFile:  os.Getenv("VORA_RUNNER_TLS_KEY"),
 			CAFile:   os.Getenv("VORA_RUNNER_TLS_CA"),
 		}
+		if err := validateRunnerTCP(addr, runnerTLS, os.Getenv("VORA_RUNNER_INSECURE") == "1"); err != nil {
+			return err
+		}
+		tcpLn, err := net.Listen("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("listen tcp %s: %w", addr, err)
+		}
+		defer tcpLn.Close()
 		var tcpOpts []grpc.ServerOption
 		if runnerTLS.Enabled() {
 			cfg, err := runnerTLS.Server()
 			if err != nil {
 				return fmt.Errorf("runner tls: %w", err)
+			}
+			identity := os.Getenv("VORA_RUNNER_CLIENT_IDENTITY")
+			if identity == "" {
+				identity = "vora-api"
+			}
+			cfg.VerifyConnection = func(cs tls.ConnectionState) error {
+				if len(cs.PeerCertificates) == 0 {
+					return fmt.Errorf("runner TCP requires an API client certificate")
+				}
+				return verifyAPIIdentity(cs.PeerCertificates[0], identity)
 			}
 			tcpOpts = append(tcpOpts, grpc.Creds(credentials.NewTLS(cfg)))
 		} else if os.Getenv("VORA_ALLOW_INSECURE_BROKER") != "1" {

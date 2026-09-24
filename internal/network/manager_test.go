@@ -104,7 +104,9 @@ func TestFullSandboxRulesBlockPrivateRanges(t *testing.T) {
 	for _, want := range []string{
 		"type filter hook output priority 0; policy accept",
 		"oifname \"lo\" accept",
-		"ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 127.0.0.0/8 } drop",
+		"meta nfproto ipv6 drop",
+		"100.64.0.0/10",
+		"ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } drop",
 	} {
 		if !contains(rules, want) {
 			t.Errorf("full sandbox rules missing %q:\n%s", want, rules)
@@ -136,7 +138,7 @@ func TestFullRunnerRulesMasquerade(t *testing.T) {
 	rules := runnerRules(n)
 	for _, want := range []string{
 		"table ip vora_fwd_sbx_full",
-		"ip saddr 10.7.0.2 ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 127.0.0.0/8 } drop",
+		"ip saddr 10.7.0.2 ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } drop",
 		"table ip vora_nat_sbx_full",
 		"type nat hook postrouting priority 100",
 		"ip saddr 10.7.0.2 masquerade",
@@ -162,6 +164,18 @@ func TestPrivateRunnerRulesAllowOnlyTenantSubnet(t *testing.T) {
 	// No NAT: private traffic stays inside the runner's namespace.
 	if contains(rules, "masquerade") {
 		t.Errorf("private runner rules must not masquerade:\n%s", rules)
+	}
+}
+
+func TestFullAndPrivateRunnerRulesDropHostInput(t *testing.T) {
+	for _, mode := range []runtime.NetworkMode{runtime.NetworkFull, runtime.NetworkPrivate} {
+		n := &Net{ID: "sbx_test", Mode: mode, SandboxIP: "10.7.0.2", SandboxCIDR: "10.9.0.0/24", iface: "veth-test"}
+		rules := runnerRules(n)
+		for _, want := range []string{"type filter hook input", "iifname \"veth-test\" ct state established,related accept", "iifname \"veth-test\" drop"} {
+			if !contains(rules, want) {
+				t.Errorf("%s allows traffic to host: missing %q in %s", mode, want, rules)
+			}
+		}
 	}
 }
 
