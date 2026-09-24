@@ -72,6 +72,7 @@ infallible; the design minimises the trusted surface.
 | Gateway / UDP bypass | nftables output filter default-drop; only loopback, TCP to the proxy/broker ports, and DNS to the resolver are accepted | network |
 | Proxy resource exhaustion | per-sandbox connection cap (default 128), idle timeout (default 5m), and a bounded, cached DNS resolver | network |
 | Cross-tenant API access | tenant-scoped keys can only see their own sandboxes and keys; unknown IDs return 404 | control plane |
+| Sandbox-ID collision or injection | the caller cannot choose a sandbox ID: the API rejects it and the runner assigns a canonical prefixed ULID; stores, backends and the network manager validate IDs before deriving paths, unit/cgroup/table names or command arguments, and a duplicate create can never remove an existing sandbox's workspace or record | control plane |
 | Missing audit of allowed egress | allow decisions are persisted before bytes are forwarded; persistence failure denies the connection (proxy, broker, and DNS) | audit |
 | Credential theft from env/disk | runner secrets never injected into sandbox | credentials |
 | Third-party credential exfiltration | credentials are stored encrypted by `vora-api`, resolved per create, and attached by the gateway broker; the value never reaches the sandbox environment, filesystem, `/proc`, the persisted record, or the audit trail (alias only) | credentials |

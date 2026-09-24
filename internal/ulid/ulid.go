@@ -62,6 +62,15 @@ func NewSecretID() string { return New(PrefixSecret) }
 // NewSnapshot returns a new snapshot identifier.
 func NewSnapshot() string { return New(PrefixSnapshot) }
 
+// ValidPrefix reports whether id is a canonical ULID with the expected prefix.
+func ValidPrefix(id, expected string) bool {
+	if !strings.HasPrefix(id, expected+"_") || !Valid(id) {
+		return false
+	}
+	parsed, _ := ulid.ParseStrict(strings.TrimPrefix(id, expected+"_"))
+	return id == expected+"_"+parsed.String()
+}
+
 // Valid reports whether id is a well-formed prefixed ULID with one of the
 // known prefixes.
 func Valid(id string) bool {

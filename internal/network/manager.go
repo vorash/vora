@@ -36,6 +36,7 @@ import (
 	"time"
 
 	"github.com/vorash/vora/internal/runtime"
+	"github.com/vorash/vora/internal/ulid"
 )
 
 const (
@@ -174,8 +175,8 @@ func NewManager(stateDir string, mc ManagerConfig, logger *slog.Logger) *Manager
 
 // Create prepares a network namespace for a sandbox. It is idempotent.
 func (m *Manager) Create(ctx context.Context, id string, pol Policy) (*Net, error) {
-	if id == "" {
-		return nil, fmt.Errorf("network: empty sandbox id")
+	if !ulid.ValidPrefix(id, ulid.PrefixSandbox) {
+		return nil, fmt.Errorf("network: invalid sandbox id %q", id)
 	}
 	switch pol.Mode {
 	case runtime.NetworkRestricted, runtime.NetworkFull, runtime.NetworkPrivate:
@@ -256,6 +257,9 @@ func (m *Manager) Destroy(_ context.Context, id string) error {
 	}
 	if n == nil {
 		return nil
+	}
+	if !ulid.ValidPrefix(id, ulid.PrefixSandbox) {
+		return fmt.Errorf("network: invalid sandbox id %q", id)
 	}
 	m.teardown(n)
 	m.removeState(id)

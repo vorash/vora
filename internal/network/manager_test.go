@@ -1,11 +1,21 @@
 package network
 
 import (
+	"context"
 	"os"
 	"testing"
 
 	"github.com/vorash/vora/internal/runtime"
 )
+
+func TestManagerRejectsNonCanonicalIDs(t *testing.T) {
+	m := NewManager(t.TempDir(), ManagerConfig{}, nil)
+	for _, id := range []string{".hidden", "-flag", "x.slice", "sbx_short"} {
+		if _, err := m.Create(context.Background(), id, Policy{Mode: runtime.NetworkFull}); err == nil {
+			t.Errorf("manager accepted unsafe id %q", id)
+		}
+	}
+}
 
 func TestSubnetFor(t *testing.T) {
 	cases := []struct {

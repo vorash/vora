@@ -5,12 +5,13 @@ import (
 	"testing"
 
 	"github.com/vorash/vora/internal/runtime"
+	"github.com/vorash/vora/internal/ulid"
 )
 
 func TestStoreRoundTrip(t *testing.T) {
 	s := NewStore(t.TempDir())
 	rec := &Record{
-		ID:        "snap_01JTEST",
+		ID:        ulid.NewSnapshot(),
 		SandboxID: "sbx_01JTEST",
 		TenantID:  "t1",
 		Spec:      runtime.SandboxSpec{ID: "sbx_01JTEST", Image: "vora/python"},
@@ -46,7 +47,7 @@ func TestStoreRoundTrip(t *testing.T) {
 
 func TestStoreRejectsEscapingIDs(t *testing.T) {
 	s := NewStore(t.TempDir())
-	for _, id := range []string{"", "../evil", `..\evil`, ".", ".."} {
+	for _, id := range []string{"", "../evil", `..\evil`, ".", "..", "snap_test", "sbx_01ARZ3NDEKTSV4RRFFQ69G5FAV", "-flag"} {
 		if err := s.Create(&Record{ID: id}); err == nil {
 			t.Fatalf("create(%q): accepted an id that could escape the store root", id)
 		}

@@ -174,9 +174,10 @@ func (s *Server) CreateSandbox(ctx context.Context, req *v1.CreateSandboxRequest
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	if spec.ID == "" {
-		spec.ID = ulid.NewSandbox()
+	if spec.ID != "" {
+		return nil, status.Error(codes.InvalidArgument, "sandbox_id is assigned by the runner")
 	}
+	spec.ID = ulid.NewSandbox()
 	if err := spec.Validate(); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -193,11 +194,6 @@ func (s *Server) CreateSandbox(ctx context.Context, req *v1.CreateSandboxRequest
 	ws := s.workspaces.Paths(spec.ID)
 	ws.RootfsDir = s.images.Rootfs(spec.Image)
 	spec.Workspace = ws
-	if _, err := s.workspaces.Create(ws); err != nil {
-		s.logger.Error("create workspace failed", "sandbox_id", spec.ID, "error", err)
-		return nil, status.Error(codes.Internal, "failed to prepare workspace")
-	}
-
 	rec := &sandbox.Record{
 		ID:       spec.ID,
 		Spec:     spec,
@@ -205,12 +201,16 @@ func (s *Server) CreateSandbox(ctx context.Context, req *v1.CreateSandboxRequest
 		RunnerID: s.runnerID,
 	}
 	if err := s.store.Create(rec); err != nil {
-		_ = s.workspaces.Destroy(spec.ID)
 		if _, loadErr := s.store.Load(spec.ID); loadErr == nil {
 			return nil, status.Errorf(codes.AlreadyExists, "sandbox %s already exists", spec.ID)
 		}
 		s.logger.Error("create sandbox failed", "sandbox_id", spec.ID, "error", err)
 		return nil, status.Error(codes.Internal, "failed to persist sandbox")
+	}
+	if _, err := s.workspaces.Create(ws); err != nil {
+		_ = s.workspaces.Destroy(spec.ID)
+		s.logger.Error("create workspace failed", "sandbox_id", spec.ID, "error", err)
+		return nil, status.Error(codes.Internal, "failed to prepare workspace")
 	}
 	s.applyDiskQuota(ctx, rec)
 
@@ -237,10 +237,7 @@ func (s *Server) GetSandbox(ctx context.Context, req *v1.GetSandboxRequest) (*v1
 	}
 	rec, err := s.store.Load(req.GetSandboxId())
 	if err != nil {
-		if errors.Is(err, sandbox.ErrNotFound) {
-			return nil, status.Errorf(codes.NotFound, "sandbox %s not found", req.GetSandboxId())
-		}
-		return nil, status.Error(codes.Internal, "failed to load sandbox")
+		return nil, s.loadError(err, req.GetSandboxId())
 	}
 	return toProtoSandbox(rec), nil
 }
@@ -973,6 +970,9 @@ func (s *Server) fail(rec *sandbox.Record, reason runtime.ExitReason, keyID stri
 func (s *Server) loadError(err error, id string) error {
 	if errors.Is(err, sandbox.ErrNotFound) {
 		return status.Errorf(codes.NotFound, "sandbox %s not found", id)
+	}
+	if errors.Is(err, sandbox.ErrInvalidID) {
+		return status.Error(codes.InvalidArgument, "invalid sandbox_id")
 	}
 	return status.Error(codes.Internal, "failed to load sandbox")
 }

@@ -340,6 +340,10 @@ func (s *Server) createSandbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if spec.GetSandboxId() != "" {
+		writeError(w, http.StatusBadRequest, "sandbox_id is assigned by the runner")
+		return
+	}
 	defer zeroBrokerSecrets(creds)
 
 	created, err := rc.CreateSandboxWithCredentials(r.Context(), spec, creds)

@@ -187,5 +187,8 @@ func (s *Server) snapshotLoadError(err error, id string) error {
 	if errors.Is(err, snapshot.ErrNotFound) {
 		return status.Errorf(codes.NotFound, "snapshot %s not found", id)
 	}
+	if errors.Is(err, snapshot.ErrInvalidID) {
+		return status.Error(codes.InvalidArgument, "invalid snapshot_id")
+	}
 	return status.Error(codes.Internal, "failed to load snapshot")
 }

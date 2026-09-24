@@ -8,6 +8,7 @@ import (
 
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/sandbox"
+	"github.com/vorash/vora/internal/ulid"
 )
 
 func quotaSandbox(t *testing.T, s *Server, id string, limit int64, fill int) {
@@ -44,12 +45,13 @@ func quotaSandbox(t *testing.T, s *Server, id string, limit int64, fill int) {
 
 func TestEnforceDiskQuotaStopsOverQuotaSandbox(t *testing.T) {
 	s := testServer(t, runtime.NewRegistry())
-	quotaSandbox(t, s, "sbx_over", 1024, 4096)
+	id := ulid.NewSandbox()
+	quotaSandbox(t, s, id, 1024, 4096)
 
 	if err := s.EnforceDiskQuota(context.Background()); err != nil {
 		t.Fatalf("EnforceDiskQuota: %v", err)
 	}
-	got, err := s.store.Load("sbx_over")
+	got, err := s.store.Load(id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,12 +65,13 @@ func TestEnforceDiskQuotaStopsOverQuotaSandbox(t *testing.T) {
 
 func TestEnforceDiskQuotaLeavesUnderQuotaSandbox(t *testing.T) {
 	s := testServer(t, runtime.NewRegistry())
-	quotaSandbox(t, s, "sbx_under", 1<<20, 4096)
+	id := ulid.NewSandbox()
+	quotaSandbox(t, s, id, 1<<20, 4096)
 
 	if err := s.EnforceDiskQuota(context.Background()); err != nil {
 		t.Fatalf("EnforceDiskQuota: %v", err)
 	}
-	got, err := s.store.Load("sbx_under")
+	got, err := s.store.Load(id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,12 +82,13 @@ func TestEnforceDiskQuotaLeavesUnderQuotaSandbox(t *testing.T) {
 
 func TestEnforceDiskQuotaIgnoresUnlimited(t *testing.T) {
 	s := testServer(t, runtime.NewRegistry())
-	quotaSandbox(t, s, "sbx_unlimited", 0, 1<<20)
+	id := ulid.NewSandbox()
+	quotaSandbox(t, s, id, 0, 1<<20)
 
 	if err := s.EnforceDiskQuota(context.Background()); err != nil {
 		t.Fatalf("EnforceDiskQuota: %v", err)
 	}
-	got, err := s.store.Load("sbx_unlimited")
+	got, err := s.store.Load(id)
 	if err != nil {
 		t.Fatal(err)
 	}

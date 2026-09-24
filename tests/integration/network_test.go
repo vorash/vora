@@ -15,6 +15,7 @@ import (
 
 	"github.com/vorash/vora/internal/network"
 	"github.com/vorash/vora/internal/runtime"
+	"github.com/vorash/vora/internal/ulid"
 )
 
 // TestNetworkRestrictedDNAT proves the enforcement primitive: in a prepared
@@ -34,11 +35,12 @@ func TestNetworkRestrictedDNAT(t *testing.T) {
 	m := network.NewManager(t.TempDir(), network.ManagerConfig{ProxyPort: network.DefaultProxyPort}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	n, err := m.Create(ctx, "sbx_net_test", network.Policy{Mode: runtime.NetworkRestricted})
+	id := ulid.NewSandbox()
+	n, err := m.Create(ctx, id, network.Policy{Mode: runtime.NetworkRestricted})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	t.Cleanup(func() { _ = m.Destroy(context.Background(), "sbx_net_test") })
+	t.Cleanup(func() { _ = m.Destroy(context.Background(), id) })
 
 	ln, err := net.Listen("tcp", n.ProxyAddr())
 	if err != nil {
@@ -103,7 +105,7 @@ func TestNetworkRestrictedDNAT(t *testing.T) {
 
 	// Teardown must remove both manager state and the namespace/veth resources.
 	netnsPath := n.NetnsPath()
-	if err := m.Destroy(context.Background(), "sbx_net_test"); err != nil {
+	if err := m.Destroy(context.Background(), id); err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
 	if ids := m.List(); len(ids) != 0 {
@@ -156,11 +158,12 @@ func TestNetworkFullBlocksPrivateRanges(t *testing.T) {
 	m := network.NewManager(t.TempDir(), network.ManagerConfig{}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	n, err := m.Create(ctx, "sbx_full_net", network.Policy{Mode: runtime.NetworkFull})
+	id := ulid.NewSandbox()
+	n, err := m.Create(ctx, id, network.Policy{Mode: runtime.NetworkFull})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	t.Cleanup(func() { _ = m.Destroy(context.Background(), "sbx_full_net") })
+	t.Cleanup(func() { _ = m.Destroy(context.Background(), id) })
 
 	for _, dst := range []string{"10.0.0.1", "192.168.1.1", "169.254.169.254"} {
 		out, err := nsenterErr(n.NetnsPID, "timeout", "2", "bash", "-c", "exec 3<>/dev/tcp/"+dst+"/80 && echo UNEXPECTED")
@@ -197,22 +200,23 @@ func TestNetworkPrivateIsolatesTenants(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	a, err := m.Create(ctx, "sbx_pa", network.Policy{Mode: runtime.NetworkPrivate, TenantID: "tenant-a"})
+	aID, bID, cID := ulid.NewSandbox(), ulid.NewSandbox(), ulid.NewSandbox()
+	a, err := m.Create(ctx, aID, network.Policy{Mode: runtime.NetworkPrivate, TenantID: "tenant-a"})
 	if err != nil {
 		t.Fatalf("Create a: %v", err)
 	}
-	b, err := m.Create(ctx, "sbx_pb", network.Policy{Mode: runtime.NetworkPrivate, TenantID: "tenant-a"})
+	b, err := m.Create(ctx, bID, network.Policy{Mode: runtime.NetworkPrivate, TenantID: "tenant-a"})
 	if err != nil {
 		t.Fatalf("Create b: %v", err)
 	}
-	c, err := m.Create(ctx, "sbx_pc", network.Policy{Mode: runtime.NetworkPrivate, TenantID: "tenant-b"})
+	c, err := m.Create(ctx, cID, network.Policy{Mode: runtime.NetworkPrivate, TenantID: "tenant-b"})
 	if err != nil {
 		t.Fatalf("Create c: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = m.Destroy(context.Background(), "sbx_pa")
-		_ = m.Destroy(context.Background(), "sbx_pb")
-		_ = m.Destroy(context.Background(), "sbx_pc")
+		_ = m.Destroy(context.Background(), aID)
+		_ = m.Destroy(context.Background(), bID)
+		_ = m.Destroy(context.Background(), cID)
 	})
 
 	// Serve inside b's namespace.

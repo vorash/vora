@@ -2,6 +2,7 @@
 package ulid
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -12,6 +13,16 @@ func TestNewPrefixedAndValid(t *testing.T) {
 	}
 	if id[:4] != "sbx_" {
 		t.Fatalf("expected sbx_ prefix, got %q", id)
+	}
+}
+
+func TestValidPrefixRequiresCanonicalType(t *testing.T) {
+	id := NewSandbox()
+	if !ValidPrefix(id, PrefixSandbox) || ValidPrefix(id, PrefixSnapshot) {
+		t.Fatalf("sandbox id accepted with wrong prefix: %s", id)
+	}
+	if ValidPrefix(strings.ToLower(id), PrefixSandbox) {
+		t.Fatal("noncanonical lowercase ULID accepted")
 	}
 }
 

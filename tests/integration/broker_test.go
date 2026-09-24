@@ -21,6 +21,7 @@ import (
 	"github.com/vorash/vora/internal/network"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/runtime/bwrap"
+	"github.com/vorash/vora/internal/ulid"
 	"github.com/vorash/vora/internal/workspace"
 )
 
@@ -229,13 +230,14 @@ func TestBrokerThroughNetns(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	n, err := manager.Create(ctx, "sbx_broker_netns", network.Policy{Mode: runtime.NetworkRestricted})
+	id := ulid.NewSandbox()
+	n, err := manager.Create(ctx, id, network.Policy{Mode: runtime.NetworkRestricted})
 	if err != nil {
 		t.Fatalf("network Create: %v", err)
 	}
-	t.Cleanup(func() { _ = manager.Destroy(context.Background(), "sbx_broker_netns") })
+	t.Cleanup(func() { _ = manager.Destroy(context.Background(), id) })
 
-	broker := egress.NewBroker("sbx_broker_netns",
+	broker := egress.NewBroker(id,
 		egress.Policy{AllowedDomains: []string{host}},
 		[]egress.Credential{{Alias: "echo", Host: host, Scheme: egress.SchemeBearer, Value: secret}},
 		logger, sink)

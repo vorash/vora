@@ -6,6 +6,7 @@ import (
 
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/sandbox"
+	"github.com/vorash/vora/internal/ulid"
 )
 
 type fakeSweeper struct {
@@ -21,16 +22,17 @@ func (f *fakeSweeper) Reap(_ context.Context, id string) error {
 }
 
 func TestReconcileReapsActiveStoreRecord(t *testing.T) {
-	sw := &fakeSweeper{fakeBackend: fakeBackend{name: "gvisor"}, listed: []string{"sbx_live"}}
+	id := ulid.NewSandbox()
+	sw := &fakeSweeper{fakeBackend: fakeBackend{name: "gvisor"}, listed: []string{id}}
 	reg := runtime.NewRegistry()
 	if err := reg.Register(sw); err != nil {
 		t.Fatal(err)
 	}
 	s := testServer(t, reg)
 	rec := &sandbox.Record{
-		ID:    "sbx_live",
+		ID:    id,
 		State: sandbox.StateRunning,
-		Spec:  runtime.SandboxSpec{ID: "sbx_live", Backend: "gvisor"},
+		Spec:  runtime.SandboxSpec{ID: id, Backend: "gvisor"},
 	}
 	if err := s.store.Create(rec); err != nil {
 		t.Fatal(err)
@@ -38,10 +40,10 @@ func TestReconcileReapsActiveStoreRecord(t *testing.T) {
 	if err := s.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(sw.reaped) == 0 || sw.reaped[0] != "sbx_live" {
+	if len(sw.reaped) == 0 || sw.reaped[0] != id {
 		t.Fatalf("reaped = %v, want [sbx_live]", sw.reaped)
 	}
-	got, err := s.store.Load("sbx_live")
+	got, err := s.store.Load(id)
 	if err != nil {
 		t.Fatal(err)
 	}

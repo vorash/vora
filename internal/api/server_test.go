@@ -250,6 +250,18 @@ func TestAuthRejectsBadKey(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxRejectsCallerID(t *testing.T) {
+	fr := &fakeRunner{}
+	_, ts := newTestServer(t, fr)
+	resp := do(t, http.MethodPost, ts.URL+"/v1/sandboxes", bootstrap, &v1.SandboxSpec{
+		SandboxId: "sbx_victim", Image: "vora/base",
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest || len(fr.specs) != 0 {
+		t.Fatalf("caller-controlled ID reached runner: status=%d specs=%v", resp.StatusCode, fr.specs)
+	}
+}
+
 func TestCreateSandboxRoutesToRunner(t *testing.T) {
 	fr := &fakeRunner{}
 	s, ts := newTestServer(t, fr)

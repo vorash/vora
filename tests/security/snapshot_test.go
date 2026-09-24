@@ -38,7 +38,7 @@ func TestForkedSandboxesAreIndependent(t *testing.T) {
 			t.Fatalf("setup exec exit = %d", code)
 		}
 
-		srcWS := f.ws.Paths(srcID)
+		srcWS := f.ws.Paths(fixtureID(srcID))
 		var archive bytes.Buffer
 		if _, err := snapshot.Archive(&archive, snapshotFolders(srcWS)); err != nil {
 			t.Fatalf("archive: %v", err)
@@ -51,7 +51,7 @@ func TestForkedSandboxesAreIndependent(t *testing.T) {
 
 		forkWS := map[string]runtime.WorkspaceSpec{}
 		for _, id := range []string{"sbx_snap_fork1", "sbx_snap_fork2"} {
-			ws := f.ws.Paths(id)
+			ws := f.ws.Paths(fixtureID(id))
 			if _, err := f.ws.Create(ws); err != nil {
 				t.Fatal(err)
 			}
@@ -105,7 +105,7 @@ func TestSnapshotRestoreCannotEscape(t *testing.T) {
 			t.Fatalf("setup exec exit = %d", code)
 		}
 
-		srcWS := f.ws.Paths(srcID)
+		srcWS := f.ws.Paths(fixtureID(srcID))
 		var buf bytes.Buffer
 		if _, err := snapshot.Archive(&buf, snapshotFolders(srcWS)); err != nil {
 			t.Fatalf("archive: %v", err)
@@ -118,7 +118,7 @@ func TestSnapshotRestoreCannotEscape(t *testing.T) {
 			tar.Header{Name: "workspace/evil/" + filepath.Base(hostTarget), Typeflag: tar.TypeReg, Mode: 0o644},
 			[]byte("pwned"))
 
-		ws := f.ws.Paths("sbx_snap_evil_fork")
+		ws := f.ws.Paths(fixtureID("sbx_snap_evil_fork"))
 		if _, err := f.ws.Create(ws); err != nil {
 			t.Fatal(err)
 		}

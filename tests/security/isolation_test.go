@@ -81,7 +81,7 @@ func TestCrossSandboxFilesystemIsolation(t *testing.T) {
 		if strings.Contains(out, "secret-b.txt") {
 			t.Fatalf("sandbox A sees B's file: %s", out)
 		}
-		if _, _, code := f.exec(a, "sh", "-c", "test -e "+f.ws.Paths("sbx_b").WorkspaceDir); code == 0 {
+		if _, _, code := f.exec(a, "sh", "-c", "test -e "+f.ws.Paths(fixtureID("sbx_b")).WorkspaceDir); code == 0 {
 			t.Fatal("sandbox A can see sandbox B's workspace directory")
 		}
 	})
@@ -272,7 +272,7 @@ func TestControlSocketIsolation(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, f *fixture) {
 		a := f.create("sbx_sock_a", limits(128, 64))
 		_ = f.create("sbx_sock_b", limits(128, 64))
-		bIPC := f.ws.Paths("sbx_sock_b").IPCDir
+		bIPC := f.ws.Paths(fixtureID("sbx_sock_b")).IPCDir
 		if _, _, code := f.exec(a, "sh", "-c", "test -e "+bIPC); code == 0 {
 			t.Fatal("sandbox A can see sandbox B's ipc directory")
 		}

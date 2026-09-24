@@ -12,10 +12,12 @@ import (
 	"time"
 
 	"github.com/vorash/vora/internal/runtime"
+	"github.com/vorash/vora/internal/ulid"
 )
 
 // ErrNotFound is returned when a sandbox record does not exist.
 var ErrNotFound = errors.New("sandbox: not found")
+var ErrInvalidID = errors.New("sandbox: invalid id")
 
 const configFile = "config.json"
 
@@ -171,11 +173,8 @@ func (s *Store) Delete(id string) error {
 
 // validateID rejects ids that could escape the store root.
 func validateID(id string) error {
-	if id == "" {
-		return fmt.Errorf("sandbox: empty id")
-	}
-	if strings.ContainsAny(id, `/\`) || id == "." || id == ".." {
-		return fmt.Errorf("sandbox: invalid id %q", id)
+	if !ulid.ValidPrefix(id, ulid.PrefixSandbox) {
+		return fmt.Errorf("%w %q", ErrInvalidID, id)
 	}
 	return nil
 }

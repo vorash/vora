@@ -152,7 +152,7 @@ func TestExecRecordPersistsBeforeExitChunk(t *testing.T) {
 
 	ctx := context.Background()
 	created, err := s.CreateSandbox(ctx, &v1.CreateSandboxRequest{Spec: &v1.SandboxSpec{
-		SandboxId: "sbx_order", Image: "img", Backend: "fake",
+		Image: "img", Backend: "fake",
 		Resources: &v1.ResourceLimits{CpuMillis: 100, MemoryBytes: 1 << 20, Pids: 4},
 		Network:   &v1.NetworkPolicy{Mode: v1.NetworkMode_NETWORK_NONE},
 	}})
@@ -163,10 +163,11 @@ func TestExecRecordPersistsBeforeExitChunk(t *testing.T) {
 		t.Fatalf("StartSandbox: %v", err)
 	}
 
+	id := created.GetSandbox().GetId()
 	ss := &execServerStream{got: make(chan struct{}, 8)}
 	done := make(chan error, 1)
 	go func() {
-		done <- s.ExecSandbox(&v1.ExecSandboxRequest{SandboxId: "sbx_order", Exec: &v1.ExecRequest{Command: "true"}}, ss)
+		done <- s.ExecSandbox(&v1.ExecSandboxRequest{SandboxId: id, Exec: &v1.ExecRequest{Command: "true"}}, ss)
 	}()
 
 	deadline := time.After(5 * time.Second)
@@ -179,7 +180,7 @@ func TestExecRecordPersistsBeforeExitChunk(t *testing.T) {
 	}
 
 	// The moment a client could see the exit, the record must be readable.
-	execs, err := s.GetSandboxExecs(ctx, &v1.GetSandboxExecsRequest{SandboxId: "sbx_order"})
+	execs, err := s.GetSandboxExecs(ctx, &v1.GetSandboxExecsRequest{SandboxId: id})
 	if err != nil {
 		t.Fatal(err)
 	}

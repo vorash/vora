@@ -15,10 +15,12 @@ import (
 	"time"
 
 	"github.com/vorash/vora/internal/runtime"
+	"github.com/vorash/vora/internal/ulid"
 )
 
 // ErrNotFound is returned when a snapshot record does not exist.
 var ErrNotFound = errors.New("snapshot: not found")
+var ErrInvalidID = errors.New("snapshot: invalid id")
 
 const (
 	recordFile = "config.json"
@@ -181,11 +183,8 @@ func (s *Store) Delete(id string) error {
 
 // validateID rejects ids that could escape the store root.
 func validateID(id string) error {
-	if id == "" {
-		return fmt.Errorf("snapshot: empty id")
-	}
-	if strings.ContainsAny(id, `/\`) || id == "." || id == ".." {
-		return fmt.Errorf("snapshot: invalid id %q", id)
+	if !ulid.ValidPrefix(id, ulid.PrefixSnapshot) {
+		return fmt.Errorf("%w %q", ErrInvalidID, id)
 	}
 	return nil
 }
