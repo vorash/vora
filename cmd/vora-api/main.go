@@ -95,7 +95,7 @@ func run() error {
 	shutdownTracing, err := telemetry.SetupTracing(ctx, telemetry.TracingConfig{
 		Endpoint:    os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 		ServiceName: "vora-api",
-		Insecure:    true,
+		Insecure:    os.Getenv("OTEL_EXPORTER_OTLP_INSECURE") == "true",
 	})
 	if err != nil {
 		return fmt.Errorf("tracing: %w", err)
@@ -222,7 +222,10 @@ func run() error {
 	}
 	defer grpcLn.Close()
 
-	httpSrv := &http.Server{Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	httpSrv := &http.Server{
+		Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
+	}
 
 	httpTLS := tlsutil.Config{
 		CertFile: os.Getenv("VORA_API_HTTP_TLS_CERT"),

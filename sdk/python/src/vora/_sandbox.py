@@ -6,7 +6,7 @@ from typing import Any, AsyncGenerator, AsyncIterator, Sequence
 from urllib.parse import urlencode
 
 from ._errors import VoraError
-from ._http import Transport
+from ._http import Transport, path_segment
 from ._types import (
     ExecChunk,
     ExecResult,
@@ -41,7 +41,7 @@ class Sandbox:
         return self._info
 
     def _path(self, suffix: str = "") -> str:
-        return f"/v1/sandboxes/{self.id}{suffix}"
+        return f"/v1/sandboxes/{path_segment(self.id)}{suffix}"
 
     async def refresh(self) -> SandboxInfo:
         self._info = decode_sandbox_info(await self._transport.json(self._path()))

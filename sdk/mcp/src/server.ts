@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { parseCPU, parseDuration, parseSize } from "@vorash/sdk";
 import type { ExecResult, Vora } from "@vorash/sdk";
 import { z } from "zod";
 
@@ -15,13 +16,46 @@ export interface ServerOptions {
  */
 export function createServer(vora: Vora, options: ServerOptions): McpServer {
   const server = new McpServer({ name: options.name ?? "vora", version: options.version });
-  registerTools(server, vora);
+  registerTools(server, vora, policyFromEnv());
   return server;
 }
 
 const utf8 = new TextDecoder("utf-8", { fatal: true });
 
-function registerTools(server: McpServer, vora: Vora): void {
+interface SandboxPolicy {
+  networks: Set<string>;
+  images: Set<string>;
+  maxMemory: number;
+  maxCPU: number;
+  maxPids: number;
+  maxDisk: number;
+  maxTTL: number;
+}
+
+function policyFromEnv(): SandboxPolicy {
+  const values = (name: string, fallback: string): Set<string> =>
+    new Set((process.env[name] ?? fallback).split(",").map((s) => s.trim()).filter(Boolean));
+  const cap = (name: string, fallback: string, parse: (v: string) => number): number => {
+    const value = parse(process.env[name] ?? fallback);
+    if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a positive finite value`);
+    return value;
+  };
+  const networks = values("VORA_MCP_ALLOWED_NETWORKS", "none");
+  if ([...networks].some((n) => !["none", "restricted", "full", "private"].includes(n))) {
+    throw new Error("invalid VORA_MCP_ALLOWED_NETWORKS");
+  }
+  return {
+    networks,
+    images: values("VORA_MCP_ALLOWED_IMAGES", "vora/base,vora/python,vora/node"),
+    maxMemory: cap("VORA_MCP_MAX_MEMORY", "1Gi", parseSize),
+    maxCPU: cap("VORA_MCP_MAX_CPU", "2", parseCPU),
+    maxPids: cap("VORA_MCP_MAX_PIDS", "128", Number),
+    maxDisk: cap("VORA_MCP_MAX_DISK", "2Gi", parseSize),
+    maxTTL: cap("VORA_MCP_MAX_TTL", "1h", parseDuration),
+  };
+}
+
+function registerTools(server: McpServer, vora: Vora, policy: SandboxPolicy): void {
   server.registerTool(
     "sandbox_create",
     {
@@ -47,15 +81,28 @@ function registerTools(server: McpServer, vora: Vora): void {
     },
     async (args) => {
       try {
+        const network = args.network ?? "none";
+        const memory = args.memory ?? "512Mi";
+        const cpu = args.cpu ?? 1;
+        const pids = args.pids ?? 64;
+        const disk = args.disk ?? "1Gi";
+        const ttl = args.ttl ?? "1h";
+        if (!policy.networks.has(network) || !policy.images.has(args.image)) {
+          throw new Error("sandbox image or network mode is not allowed by the MCP server policy");
+        }
+        if (parseSize(memory) > policy.maxMemory || parseCPU(cpu) > policy.maxCPU ||
+            pids > policy.maxPids || parseSize(disk) > policy.maxDisk || parseDuration(ttl) > policy.maxTTL) {
+          throw new Error("sandbox resources or TTL exceed the MCP server policy");
+        }
         const sandbox = await vora.sandboxes.create({
           image: args.image,
-          memory: args.memory,
-          cpu: args.cpu,
-          pids: args.pids,
-          disk: args.disk,
-          network: args.network,
+          memory,
+          cpu,
+          pids,
+          disk,
+          network,
           env: args.env,
-          ttl: args.ttl,
+          ttl,
           backend: args.backend,
         });
         const state = sandbox.info.state ?? "unknown";

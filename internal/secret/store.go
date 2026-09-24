@@ -116,9 +116,10 @@ type Store interface {
 func keyOf(tenant, alias string) string { return tenant + "\x00" + alias }
 
 type entry struct {
-	rec   Record
-	nonce []byte
-	ct    []byte
+	rec     Record
+	nonce   []byte
+	ct      []byte
+	version int
 }
 
 // MemStore is an in-memory Store used for development and tests. Values are
@@ -167,13 +168,26 @@ func (m *MemStore) Get(_ context.Context, tenant, alias string) (Record, error) 
 
 // Reveal implements Store.
 func (m *MemStore) Reveal(_ context.Context, tenant, alias string) (Record, string, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	e, ok := m.m[keyOf(tenant, alias)]
 	if !ok {
 		return Record{}, "", ErrNotFound
 	}
-	value, err := m.sealer.Open(e.nonce, e.ct)
+	var value string
+	var err error
+	if e.version == boundKeyVersion {
+		value, err = m.sealer.OpenBound(e.nonce, e.ct, e.rec)
+	} else {
+		value, err = m.sealer.Open(e.nonce, e.ct)
+		if err == nil {
+			e.nonce, e.ct, err = m.sealer.SealBound(value, e.rec)
+			if err == nil {
+				e.version = boundKeyVersion
+				m.m[keyOf(tenant, alias)] = e
+			}
+		}
+	}
 	if err != nil {
 		return Record{}, "", err
 	}
@@ -235,9 +249,9 @@ func prepare(sealer *Sealer, rec Record, value string) (entry, error) {
 		rec.CreatedAt = time.Now().UTC()
 	}
 	rec.UpdatedAt = time.Now().UTC()
-	nonce, ct, err := sealer.Seal(value)
+	nonce, ct, err := sealer.SealBound(value, rec)
 	if err != nil {
 		return entry{}, err
 	}
-	return entry{rec: rec, nonce: nonce, ct: ct}, nil
+	return entry{rec: rec, nonce: nonce, ct: ct, version: boundKeyVersion}, nil
 }

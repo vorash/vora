@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vorash/vora/internal/runtime/bwrap"
 )
 
 func TestCloneCannotCreateUserNamespace(t *testing.T) {
@@ -277,6 +279,20 @@ func TestUnprivilegedUserNamespace(t *testing.T) {
 		got, _, _ := f.exec(h, "cat", "/proc/self/uid_map")
 		if strings.TrimSpace(got) == strings.TrimSpace(string(hostMap)) && strings.Contains(string(hostMap), "4294967295") {
 			t.Fatalf("sandbox uid_map is the host's: %s", got)
+		}
+	})
+}
+
+func TestReplacedControlSocketFailsClosed(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, f *fixture) {
+		if _, ok := f.backend.(*bwrap.Backend); !ok {
+			t.Skip("bwrap control socket only")
+		}
+		h := f.create("sbx_control_swap", limits(128, 64))
+		_, _, _ = f.exec(h, "sh", "-c", "rm -f /vora/control.sock; ln -s /tmp/forged.sock /vora/control.sock")
+		out, _, code, err := f.execStream(h, "echo", "trusted")
+		if err == nil && (code != 0 || strings.TrimSpace(out) != "trusted") {
+			t.Fatalf("exec returned a forged response: output %q, code %d", out, code)
 		}
 	})
 }

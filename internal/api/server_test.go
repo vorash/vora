@@ -240,6 +240,39 @@ func do(t *testing.T, method, url, key string, body any) *http.Response {
 	return resp
 }
 
+func TestAuthRejectsBadKey(t *testing.T) {
+	_, ts := newTestServer(t, &fakeRunner{})
+	for _, key := range []string{"", "wrong", "vora_nope"} {
+		resp := do(t, http.MethodGet, ts.URL+"/v1/runners", key, nil)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("key %q: status = %d, want 401", key, resp.StatusCode)
+		}
+	}
+	resp := do(t, http.MethodGet, ts.URL+"/v1/runners", bootstrap, nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("bootstrap key: status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestTenantResponsesDoNotRevealRunnerIdentity(t *testing.T) {
+	key := APIKey{TenantID: "tenant-a"}
+	sandbox := &v1.Sandbox{RunnerId: "run_private"}
+	snapshot := &v1.Snapshot{RunnerId: "run_private"}
+	hideRunnerID(key, sandbox)
+	hideSnapshotRunnerID(key, snapshot)
+	if sandbox.GetRunnerId() != "" || snapshot.GetRunnerId() != "" {
+		t.Fatal("tenant response exposed runner identity")
+	}
+	hideRunnerID(APIKey{}, sandbox)
+	admin := &v1.Sandbox{RunnerId: "run_private"}
+	hideRunnerID(APIKey{}, admin)
+	if admin.GetRunnerId() == "" {
+		t.Fatal("global admin lost runner identity")
+	}
+}
+
 func TestRunnerRegistryBindsIDToClientCertificate(t *testing.T) {
 	s := New(Options{RequireRunnerIdentity: true})
 	ctx := peer.NewContext(context.Background(), &peer.Peer{AuthInfo: credentials.TLSInfo{State: tls.ConnectionState{
@@ -256,19 +289,26 @@ func TestRunnerRegistryBindsIDToClientCertificate(t *testing.T) {
 	}
 }
 
-func TestAuthRejectsBadKey(t *testing.T) {
-	_, ts := newTestServer(t, &fakeRunner{})
-	for _, key := range []string{"", "wrong", "vora_nope"} {
-		resp := do(t, http.MethodGet, ts.URL+"/v1/runners", key, nil)
+func TestCreateSandboxRejectsInvalidAgentAndTenant(t *testing.T) {
+	fr := &fakeRunner{}
+	_, ts := newTestServer(t, fr)
+	for _, spec := range []*v1.SandboxSpec{
+		{Image: "vora/base", TenantId: "tenant/other"},
+		{Image: "vora/base", TenantId: "tenant-a", AgentId: "agent/other"},
+	} {
+		resp := do(t, http.MethodPost, ts.URL+"/v1/sandboxes", bootstrap, spec)
 		resp.Body.Close()
-		if resp.StatusCode != http.StatusUnauthorized {
-			t.Errorf("key %q: status = %d, want 401", key, resp.StatusCode)
+		if resp.StatusCode != http.StatusBadRequest || len(fr.specs) > 0 {
+			t.Fatalf("invalid identity reached runner: spec=%v status=%d", spec, resp.StatusCode)
 		}
 	}
-	resp := do(t, http.MethodGet, ts.URL+"/v1/runners", bootstrap, nil)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("bootstrap key: status = %d, want 200", resp.StatusCode)
+}
+
+func TestInternalRunnerErrorsDoNotExposeHostPaths(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeGRPCError(w, status.Error(codes.Internal, "open /var/lib/vora/secret: permission denied"))
+	if strings.Contains(w.Body.String(), "/var/lib/vora") {
+		t.Fatalf("internal host path leaked: %s", w.Body.String())
 	}
 }
 

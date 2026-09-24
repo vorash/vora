@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import json
 from typing import Any, AsyncIterator
+from urllib.parse import quote
 
 import httpx
 
 from ._errors import VoraError
+
+
+def path_segment(id: str) -> str:
+    if not id or any(part in (".", "..") for part in id.split("/")):
+        raise ValueError("invalid resource id")
+    return quote(id, safe="")
 
 
 class Transport:

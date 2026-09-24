@@ -9,6 +9,16 @@ import (
 	"github.com/vorash/vora/internal/runtime"
 )
 
+func TestWriteLimitsFailsIfSwapCannotBeDisabled(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "memory.swap.max"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLimits(dir, runtime.ResourceLimits{MemoryBytes: 64 << 20, Pids: 4, CPUMillis: 1000}); err == nil {
+		t.Fatal("cgroup started without a swap cap after memory.swap.max failed")
+	}
+}
+
 func TestCPUMax(t *testing.T) {
 	if got := cpuMax(1000); got != "100000 100000" {
 		t.Fatalf("cpuMax(1000) = %q", got)

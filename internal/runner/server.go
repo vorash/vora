@@ -53,19 +53,26 @@ type Server struct {
 	handlesMu sync.Mutex
 	handles   map[string]sandboxHandle
 
-	createMu   sync.Mutex
-	snapshotMu sync.Mutex
-
 	// brokerMu guards credentials resolved by the control plane for a sandbox
 	// that has been created but not yet started. They are transient by design:
 	// never persisted with the record, never logged, dropped once the sandbox
 	// starts (or is destroyed).
 	brokerMu    sync.Mutex
 	brokerCreds map[string][]egress.Credential
+	denyMu      sync.Mutex
+	denyWindows map[string]denyWindow
+	createMu    sync.Mutex
+	snapshotMu  sync.Mutex
 }
 
 // sandboxHandle binds a sandbox to the backend that manages it, so later RPCs
 // (exec/stats/signal/destroy) use the right backend.
+type denyWindow struct {
+	start      time.Time
+	written    int
+	suppressed int
+}
+
 type sandboxHandle struct {
 	backend runtime.Backend
 	handle  runtime.Handle
@@ -91,6 +98,7 @@ func NewServer(cfg config.Config, store *sandbox.Store, registry *runtime.Regist
 		metrics:     telemetry.New(),
 		handles:     make(map[string]sandboxHandle),
 		brokerCreds: make(map[string][]egress.Credential),
+		denyWindows: make(map[string]denyWindow),
 	}
 	s.setQuotaModeMetric()
 	return s
@@ -142,6 +150,30 @@ func (s *Server) RecordEgress(event egress.Event) error {
 		Allowed:   event.Allowed,
 		Reason:    event.Reason,
 		Timestamp: event.Time.UTC(),
+	}
+	if !event.Allowed {
+		s.denyMu.Lock()
+		defer s.denyMu.Unlock()
+		window := s.denyWindows[event.SandboxID]
+		now := time.Now()
+		if now.Sub(window.start) >= time.Second {
+			if window.suppressed > 0 {
+				summary := record
+				summary.Host, summary.Remote, summary.Alias = "", "", ""
+				summary.Reason = fmt.Sprintf("%d additional denials suppressed", window.suppressed)
+				if err := s.audit.AppendEgress(context.Background(), event.SandboxID, summary); err != nil {
+					return err
+				}
+			}
+			window = denyWindow{start: now}
+		}
+		if window.written >= 20 {
+			window.suppressed++
+			s.denyWindows[event.SandboxID] = window
+			return nil
+		}
+		window.written++
+		s.denyWindows[event.SandboxID] = window
 	}
 	if err := s.audit.AppendEgress(context.Background(), event.SandboxID, record); err != nil {
 		s.metrics.AuditWriteFailedTotal.Inc()

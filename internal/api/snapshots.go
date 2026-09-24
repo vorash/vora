@@ -59,6 +59,7 @@ func (s *Server) snapshotSandbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logger.Info("snapshot placed", "snapshot_id", snap.GetId(), "sandbox_id", id, "runner_id", route.RunnerID)
+	hideSnapshotRunnerID(principalFrom(r.Context()).key, snap)
 	writeProto(w, http.StatusCreated, snap)
 }
 
@@ -82,6 +83,7 @@ func (s *Server) getSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeGRPCError(w, err)
 		return
 	}
+	hideSnapshotRunnerID(principalFrom(r.Context()).key, snap)
 	writeProto(w, http.StatusOK, snap)
 }
 
@@ -102,6 +104,7 @@ func (s *Server) listSnapshots(w http.ResponseWriter, r *http.Request) {
 		key := principalFrom(r.Context()).key
 		for _, snap := range items {
 			if canAccessTenant(key, snap.GetTenantId()) && canAccessAgent(key, snap.GetSpec().GetAgentId()) {
+				hideSnapshotRunnerID(key, snap)
 				all.Snapshots = append(all.Snapshots, snap)
 			}
 		}
@@ -110,6 +113,12 @@ func (s *Server) listSnapshots(w http.ResponseWriter, r *http.Request) {
 }
 
 // deleteSnapshot removes a snapshot; sandboxes forked from it are unaffected.
+func hideSnapshotRunnerID(key APIKey, snap *v1.Snapshot) {
+	if key.TenantID != "" && snap != nil {
+		snap.RunnerId = ""
+	}
+}
+
 func (s *Server) deleteSnapshot(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	route, err := s.authorizedSnapshotRoute(r.Context(), id)
@@ -200,6 +209,7 @@ func (s *Server) forkSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logger.Info("sandbox forked", "snapshot_id", id, "sandbox_id", sb.GetId(), "runner_id", route.RunnerID)
+	hideRunnerID(principalFrom(r.Context()).key, sb)
 	writeProto(w, http.StatusCreated, sb)
 }
 

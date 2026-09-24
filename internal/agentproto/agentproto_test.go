@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -73,6 +74,44 @@ func startAgent(t *testing.T) (*Client, *fakeHandler) {
 	}
 	t.Cleanup(func() { client.Close() })
 	return client, h
+}
+
+func TestAgentRejectsReplacedControlSocketOnReconnect(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "control.sock")
+	listen := func() (net.Listener, *grpc.Server) {
+		l, err := net.Listen("unix", socket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := grpc.NewServer()
+		v1.RegisterAgentServiceServer(server, NewServer(&fakeHandler{}))
+		go func() { _ = server.Serve(l) }()
+		return l, server
+	}
+	original, server := listen()
+	client, err := Dial(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	if err := client.WaitReady(ctx, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	server.Stop()
+	original.Close()
+	if err := os.Remove(socket); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	fake, fakeServer := listen()
+	defer fake.Close()
+	defer fakeServer.Stop()
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := client.Ping(ctx); err == nil {
+		t.Fatal("agent accepted a replacement socket and forged a response")
+	}
 }
 
 func TestAgentRoundTrip(t *testing.T) {

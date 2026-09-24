@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -225,10 +226,10 @@ func (b *Backend) Create(_ context.Context, spec runtime.SandboxSpec) (runtime.H
 	if err := spec.Validate(); err != nil {
 		return nil, err
 	}
+	if !ulid.ValidPrefix(spec.ID, ulid.PrefixSandbox) {
+		return nil, fmt.Errorf("%w: invalid sandbox id %q", runtime.ErrInvalidSpec, spec.ID)
+	}
 	if spec.Network.Mode != runtime.NetworkNone && spec.Network.Mode != runtime.NetworkRestricted {
-		if !ulid.ValidPrefix(spec.ID, ulid.PrefixSandbox) {
-			return nil, fmt.Errorf("%w: invalid sandbox id %q", runtime.ErrInvalidSpec, spec.ID)
-		}
 		return nil, fmt.Errorf("%w: network mode %q (gvisor supports %q and %q)",
 			runtime.ErrUnsupported, spec.Network.Mode, runtime.NetworkNone, runtime.NetworkRestricted)
 	}
@@ -382,13 +383,13 @@ func (b *Backend) start(ctx context.Context, hd *handle, opts runOpts, resolvCon
 		return err
 	}
 	opts.group = group
-	if out, err := b.runInOpts(ctx, opts, "create", "--bundle", hd.bundleDir, hd.id); err != nil {
+	if out, err := b.runInOpts(ctx, opts, "create", "--bundle", hd.bundleDir, "--", hd.id); err != nil {
 		_ = group.Destroy()
 		hd.group = nil
 		return fmt.Errorf("gvisor: create: %w: %s", err, out)
 	}
-	if out, err := b.runInOpts(ctx, opts, "start", hd.id); err != nil {
-		_, _ = b.run(ctx, "delete", "--force", hd.id)
+	if out, err := b.runInOpts(ctx, opts, "start", "--", hd.id); err != nil {
+		_, _ = b.run(ctx, "delete", "--force", "--", hd.id)
 		_ = group.Destroy()
 		hd.group = nil
 		return fmt.Errorf("gvisor: start: %w: %s", err, out)
@@ -450,8 +451,7 @@ func (b *Backend) Exec(ctx context.Context, h runtime.Handle, req runtime.ExecRe
 		execCtx, timeoutCancel = context.WithTimeout(ctx, req.Timeout)
 		cancel = timeoutCancel
 	}
-	args := append(b.globalFlags("none"), "exec", hd.id, req.Command)
-	args = append(args, req.Args...)
+	args := append(b.globalFlags("none"), execArgs(hd.id, req)...)
 	cmd := exec.CommandContext(execCtx, b.runsc, args...)
 	if len(req.Stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(req.Stdin)
@@ -476,13 +476,30 @@ func (b *Backend) Exec(ctx context.Context, h runtime.Handle, req runtime.ExecRe
 	return es, nil
 }
 
+func execArgs(id string, req runtime.ExecRequest) []string {
+	args := []string{"exec"}
+	if req.Cwd != "" {
+		args = append(args, "-cwd", req.Cwd)
+	}
+	keys := make([]string, 0, len(req.Env))
+	for k := range req.Env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		args = append(args, "-env", k+"="+req.Env[k])
+	}
+	args = append(args, "--", id, req.Command)
+	return append(args, req.Args...)
+}
+
 // Signal sends a signal to a sandbox.
 func (b *Backend) Signal(ctx context.Context, h runtime.Handle, sig int32) error {
 	hd, err := b.handle(h)
 	if err != nil {
 		return err
 	}
-	out, err := b.run(ctx, "kill", hd.id, fmt.Sprintf("%d", sig))
+	out, err := b.run(ctx, "kill", "--", hd.id, fmt.Sprintf("%d", sig))
 	if err != nil && isMissing(out) {
 		return nil
 	}
@@ -511,7 +528,7 @@ func (b *Backend) Stop(ctx context.Context, h runtime.Handle) error {
 	if err != nil {
 		return err
 	}
-	out, err := b.run(ctx, "kill", hd.id, "KILL")
+	out, err := b.run(ctx, "kill", "--", hd.id, "KILL")
 	if err != nil && !isMissing(out) {
 		return err
 	}
@@ -527,8 +544,8 @@ func (b *Backend) Destroy(ctx context.Context, h runtime.Handle) error {
 	if err != nil {
 		return err
 	}
-	_, _ = b.run(ctx, "kill", hd.id, "KILL")
-	if out, err := b.run(ctx, "delete", "--force", hd.id); err != nil && !isMissing(out) {
+	_, _ = b.run(ctx, "kill", "--", hd.id, "KILL")
+	if out, err := b.run(ctx, "delete", "--force", "--", hd.id); err != nil && !isMissing(out) {
 		b.logger.Warn("gvisor delete failed", "sandbox_id", hd.id, "error", err, "output", out)
 	}
 	if hd.net != nil {
@@ -565,8 +582,8 @@ func (b *Backend) List(ctx context.Context) ([]string, error) {
 
 // Reap implements runtime.Sweeper.
 func (b *Backend) Reap(ctx context.Context, id string) error {
-	_, _ = b.run(ctx, "kill", id, "KILL")
-	_, err := b.run(ctx, "delete", "--force", id)
+	_, _ = b.run(ctx, "kill", "--", id, "KILL")
+	_, err := b.run(ctx, "delete", "--force", "--", id)
 	if b.networks != nil {
 		_ = b.networks.Destroy(ctx, id)
 	}

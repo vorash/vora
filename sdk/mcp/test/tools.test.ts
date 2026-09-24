@@ -93,10 +93,18 @@ describe("sandbox_create", () => {
     const create = harness.api.requests.find((request) => request.method === "POST" && request.url === "/v1/sandboxes");
     expect(JSON.parse(create?.body ?? "{}")).toEqual({
       image: "vora/python",
-      resources: { cpuMillis: "1000", memoryBytes: "536870912" },
+      resources: { cpuMillis: "1000", memoryBytes: "536870912", diskBytes: "1073741824", pids: "64" },
       network: { mode: "NETWORK_NONE" },
       ttlSeconds: "3600",
     });
+    await harness.close();
+  });
+
+  it("does not let model-selected full networking reach the API by default", async () => {
+    const harness = await connect();
+    const result = await harness.client.callTool({ name: "sandbox_create", arguments: { image: "vora/python", network: "full" } });
+    expect(result.isError).toBe(true);
+    expect(harness.api.requests.some((request) => request.method === "POST" && request.url === "/v1/sandboxes")).toBe(false);
     await harness.close();
   });
 

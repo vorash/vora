@@ -104,8 +104,9 @@ type Net struct {
 	SandboxCIDR string
 	ProxyPort   string
 
-	iface  string
-	holder *exec.Cmd
+	iface    string
+	hostSlot uint32
+	holder   *exec.Cmd
 }
 
 // NetnsPath is the netns path for nsenter.
@@ -145,6 +146,7 @@ type Manager struct {
 	nets        map[string]*Net
 	tenantIndex map[string]uint32
 	tenantHosts map[string]uint32
+	freeHosts   map[string][]uint32
 	nextTenant  uint32
 }
 
@@ -167,6 +169,7 @@ func NewManager(stateDir string, mc ManagerConfig, logger *slog.Logger) *Manager
 		nets:        map[string]*Net{},
 		tenantIndex: map[string]uint32{},
 		tenantHosts: map[string]uint32{},
+		freeHosts:   map[string][]uint32{},
 	}
 	_ = os.MkdirAll(m.stateDir, 0o755)
 	m.reapLeftovers()
@@ -189,8 +192,11 @@ func (m *Manager) Create(ctx context.Context, id string, pol Policy) (*Net, erro
 		m.mu.Unlock()
 		return n, nil
 	}
+	if m.next >= 16384 {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("network: subnet space exhausted")
+	}
 	idx := m.next
-	m.next++
 	enforcement := pol.Enforcement
 	if enforcement == "" {
 		enforcement = EnforceSandbox
@@ -211,17 +217,18 @@ func (m *Manager) Create(ctx context.Context, id string, pol Policy) (*Net, erro
 			m.nextTenant++
 			m.tenantIndex[pol.TenantID] = tIdx
 		}
-		host := m.tenantHosts[pol.TenantID]
-		if host >= maxPrivateHostsPerTenant {
+		host, ok := m.allocateTenantHost(pol.TenantID)
+		if !ok {
 			m.mu.Unlock()
 			return nil, fmt.Errorf("network: tenant %s has too many sandboxes", pol.TenantID)
 		}
-		m.tenantHosts[pol.TenantID]++
+		n.hostSlot = host
 		n.GatewayIP, n.SandboxIP, n.SandboxCIDR = tenantAddresses(tIdx, host)
 	} else {
 		gw, sb := subnetFor(idx)
 		n.GatewayIP, n.SandboxIP, n.SandboxCIDR = gw, sb, gw+"/30"
 	}
+	m.next++
 	n.iface = ifacePrefix + strconv.FormatUint(uint64(idx), 10)
 	m.mu.Unlock()
 
@@ -234,6 +241,11 @@ func (m *Manager) Create(ctx context.Context, id string, pol Policy) (*Net, erro
 
 	if err := m.setup(ctx, n); err != nil {
 		m.teardown(n)
+		m.mu.Lock()
+		if n.Mode == runtime.NetworkPrivate {
+			m.releaseTenantHost(n)
+		}
+		m.mu.Unlock()
 		return nil, err
 	}
 	m.writeState(n)
@@ -246,6 +258,9 @@ func (m *Manager) Create(ctx context.Context, id string, pol Policy) (*Net, erro
 
 // Destroy tears down a sandbox network.
 func (m *Manager) Destroy(_ context.Context, id string) error {
+	if !ulid.ValidPrefix(id, ulid.PrefixSandbox) {
+		return fmt.Errorf("network: invalid sandbox id %q", id)
+	}
 	m.mu.Lock()
 	n, ok := m.nets[id]
 	delete(m.nets, id)
@@ -258,12 +273,33 @@ func (m *Manager) Destroy(_ context.Context, id string) error {
 	if n == nil {
 		return nil
 	}
-	if !ulid.ValidPrefix(id, ulid.PrefixSandbox) {
-		return fmt.Errorf("network: invalid sandbox id %q", id)
-	}
 	m.teardown(n)
 	m.removeState(id)
+	if ok && n.Mode == runtime.NetworkPrivate {
+		m.mu.Lock()
+		m.releaseTenantHost(n)
+		m.mu.Unlock()
+	}
 	return nil
+}
+
+func (m *Manager) allocateTenantHost(tenant string) (uint32, bool) {
+	free := m.freeHosts[tenant]
+	if len(free) > 0 {
+		slot := free[len(free)-1]
+		m.freeHosts[tenant] = free[:len(free)-1]
+		return slot, true
+	}
+	slot := m.tenantHosts[tenant]
+	if slot >= maxPrivateHostsPerTenant {
+		return 0, false
+	}
+	m.tenantHosts[tenant]++
+	return slot, true
+}
+
+func (m *Manager) releaseTenantHost(n *Net) {
+	m.freeHosts[n.TenantID] = append(m.freeHosts[n.TenantID], n.hostSlot)
 }
 
 // List returns the ids this manager created.

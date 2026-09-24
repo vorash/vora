@@ -9,7 +9,12 @@ package agentproto
 import (
 	"context"
 	"fmt"
+	"net"
+	"os"
+	"sync"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -74,7 +79,53 @@ type Client struct {
 
 // Dial connects to the agent socket. It does not wait for readiness.
 func Dial(socket string) (*Client, error) {
+	var mu sync.Mutex
+	var original os.FileInfo
+	var trusted *unix.Ucred
+	dial := func(ctx context.Context, _ string) (net.Conn, error) {
+		before, err := os.Lstat(socket)
+		if err != nil {
+			return nil, err
+		}
+		if before.Mode()&os.ModeSocket == 0 {
+			return nil, fmt.Errorf("agentproto: control path is not a socket")
+		}
+		connection, err := (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		if err != nil {
+			return nil, err
+		}
+		fail := func(err error) (net.Conn, error) { _ = connection.Close(); return nil, err }
+		after, err := os.Lstat(socket)
+		if err != nil {
+			return fail(err)
+		}
+		if !os.SameFile(before, after) {
+			return fail(fmt.Errorf("agentproto: control socket changed during dial"))
+		}
+		unixConn := connection.(*net.UnixConn)
+		raw, err := unixConn.SyscallConn()
+		if err != nil {
+			return fail(err)
+		}
+		var peer *unix.Ucred
+		var peerErr error
+		if err := raw.Control(func(fd uintptr) { peer, peerErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED) }); err != nil {
+			return fail(err)
+		}
+		if peerErr != nil {
+			return fail(peerErr)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if original == nil {
+			original, trusted = before, peer
+		} else if !os.SameFile(original, before) || trusted.Pid != peer.Pid || trusted.Uid != peer.Uid || trusted.Gid != peer.Gid {
+			return fail(fmt.Errorf("agentproto: control socket identity changed"))
+		}
+		return connection, nil
+	}
 	conn, err := grpc.NewClient("unix://"+socket,
+		grpc.WithContextDialer(dial),
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, fmt.Errorf("agentproto: dial %s: %w", socket, err)

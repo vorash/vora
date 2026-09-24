@@ -193,7 +193,9 @@ func writeLimits(dir string, lim runtime.ResourceLimits) error {
 	if err := writeCgroupFile(dir, "memory.max", strconv.FormatInt(lim.MemoryBytes, 10)); err != nil {
 		return fmt.Errorf("cgroup: memory.max: %w", err)
 	}
-	_ = writeCgroupFile(dir, "memory.swap.max", "0")
+	if err := writeCgroupFile(dir, "memory.swap.max", "0"); err != nil {
+		return fmt.Errorf("cgroup: memory.swap.max: %w", err)
+	}
 	if err := writeCgroupFile(dir, "pids.max", strconv.FormatInt(lim.Pids, 10)); err != nil {
 		return fmt.Errorf("cgroup: pids.max: %w", err)
 	}

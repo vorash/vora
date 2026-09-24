@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/vorash/vora/internal/runtime"
 )
@@ -115,6 +117,30 @@ func TestReadFileRejectsOversize(t *testing.T) {
 	_, err := ReadFile(spec, "/workspace/big")
 	if !errors.Is(err, ErrFileTooLarge) {
 		t.Fatalf("want ErrFileTooLarge, got %v", err)
+	}
+}
+
+func TestFilesAPIRefusesFIFOWithoutBlocking(t *testing.T) {
+	spec := testWorkspace(t)
+	if err := syscall.Mkfifo(filepath.Join(spec.WorkspaceDir, "pipe"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, call := range map[string]func() error{
+		"read":  func() error { _, err := ReadFile(spec, "/workspace/pipe"); return err },
+		"write": func() error { _, err := WriteFile(spec, "/workspace/pipe", []byte("x"), false); return err },
+	} {
+		t.Run(name, func(t *testing.T) {
+			done := make(chan error, 1)
+			go func() { done <- call() }()
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatal("FIFO accepted by files API")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("files API blocked on workload-created FIFO")
+			}
+		})
 	}
 }
 

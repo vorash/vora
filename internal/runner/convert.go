@@ -306,7 +306,6 @@ func toProtoSandbox(rec *sandbox.Record) *v1.Sandbox {
 		Reason:          reasonToProto(rec.Reason),
 		CreatedAtUnixMs: rec.CreatedAt.UnixMilli(),
 		UpdatedAtUnixMs: rec.UpdatedAt.UnixMilli(),
-		ImageRootfs:     rec.Spec.Workspace.RootfsDir,
 	}
 }
 
