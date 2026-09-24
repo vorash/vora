@@ -30,6 +30,12 @@ proves it. If the mechanism is removed, the test must fail.
 | Control socket | A's control socket lives in its own `ipc/` directory bound only into A | per-sandbox bind mount | `TestControlSocketIsolation` |
 | Metadata / secrets | A has no network and no runner credentials in env, files or `/proc/self/environ`; brokered credentials are attached outside the sandbox | no network; broker route (ADR 013) | `TestNoSecretsLeak` (+ broker case) |
 
+Sandbox and snapshot IDs are canonical prefixed ULIDs. The API refuses a
+caller-selected sandbox ID, the runner generates it and persists the record
+before preparing a workspace, and stores/backends/network manager validate IDs
+before deriving paths or command arguments. A duplicate cannot remove the
+existing sandbox's workspace or record (`TestCreateRejectsCallerIDsWithoutTouchingExistingWorkspace`).
+
 CPU quota is set (`cpu.max` / systemd `CPUQuota`) and asserted by
 `TestSystemdUnitLimitsAndTeardown` / the gVisor subtree writer. There is no
 live-throttle security test (too flaky). Disk is bounded by `DiskBytes`: a

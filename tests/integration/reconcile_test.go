@@ -27,10 +27,11 @@ func discardLogger() *slog.Logger {
 func TestTTLReaperDestroysExpiredSandbox(t *testing.T) {
 	cfg := config.Config{StateDir: t.TempDir(), SystemdMode: config.SystemdUser, DefaultTTL: time.Minute}
 	store := sandbox.NewStore(cfg.SandboxesDir())
+	id := ulid.NewSandbox()
 	rec := &sandbox.Record{
-		ID:    "sbx_ttl",
+		ID:    id,
 		State: sandbox.StateRunning,
-		Spec:  runtime.SandboxSpec{ID: "sbx_ttl", TTL: time.Second},
+		Spec:  runtime.SandboxSpec{ID: id, TTL: time.Second},
 	}
 	if err := store.Create(rec); err != nil {
 		t.Fatalf("create record: %v", err)
@@ -46,7 +47,7 @@ func TestTTLReaperDestroysExpiredSandbox(t *testing.T) {
 		t.Fatalf("ReapExpired: %v", err)
 	}
 
-	got, err := store.Load("sbx_ttl")
+	got, err := store.Load(id)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -67,7 +68,8 @@ func TestReconcileCleansOrphans(t *testing.T) {
 	ctx := context.Background()
 
 	// A runtime unit from a "previous" runner.
-	name := cgroup.UnitName("sbx_orphan_unit")
+	unitID := ulid.NewSandbox()
+	name := cgroup.UnitName(unitID)
 	u, err := cgroups.Start(ctx, cgroup.StartRequest{
 		Name:   name,
 		Limits: runtime.ResourceLimits{CPUMillis: 1000, MemoryBytes: 64 << 20, Pids: 16},
@@ -80,7 +82,8 @@ func TestReconcileCleansOrphans(t *testing.T) {
 
 	// A record left in RUNNING state.
 	store := sandbox.NewStore(cfg.SandboxesDir())
-	rec := &sandbox.Record{ID: "sbx_orphan_rec", State: sandbox.StateRunning, Spec: runtime.SandboxSpec{ID: "sbx_orphan_rec"}}
+	id := ulid.NewSandbox()
+	rec := &sandbox.Record{ID: id, State: sandbox.StateRunning, Spec: runtime.SandboxSpec{ID: id}}
 	if err := store.Create(rec); err != nil {
 		t.Fatalf("create record: %v", err)
 	}
@@ -94,7 +97,7 @@ func TestReconcileCleansOrphans(t *testing.T) {
 	if _, err := cgroups.Attach(ctx, name); !errors.Is(err, cgroup.ErrNotFound) {
 		t.Fatalf("orphan unit still present: %v", err)
 	}
-	got, err := store.Load("sbx_orphan_rec")
+	got, err := store.Load(id)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}

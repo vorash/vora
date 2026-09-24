@@ -18,6 +18,7 @@ import (
 	"github.com/vorash/vora/internal/config"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/runtime/bwrap"
+	"github.com/vorash/vora/internal/ulid"
 	"github.com/vorash/vora/internal/workspace"
 )
 
@@ -97,7 +98,7 @@ func newBwrapSandbox(t *testing.T) (*bwrap.Backend, runtime.Handle) {
 		t.Fatalf("new backend: %v", err)
 	}
 
-	id := "sbx_" + strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "")
+	id := ulid.NewSandbox()
 	ws := wsManager.Paths(id)
 	ws.RootfsDir = rootfs
 	if _, err := wsManager.Create(ws); err != nil {

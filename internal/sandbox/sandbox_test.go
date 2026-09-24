@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/vorash/vora/internal/runtime"
+	"github.com/vorash/vora/internal/ulid"
 )
 
 func testRecord(id string) *Record {
@@ -66,13 +67,14 @@ func TestStoreRoundTrip(t *testing.T) {
 
 func TestStoreRejectsDuplicateAndBadID(t *testing.T) {
 	s := NewStore(t.TempDir())
-	if err := s.Create(testRecord("sbx_a")); err != nil {
+	id := ulid.NewSandbox()
+	if err := s.Create(testRecord(id)); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if err := s.Create(testRecord("sbx_a")); err == nil {
+	if err := s.Create(testRecord(id)); err == nil {
 		t.Fatal("duplicate Create should fail")
 	}
-	for _, id := range []string{"", "../escape", "a/b"} {
+	for _, id := range []string{"", "../escape", "a/b", ".hidden", "-flag", "a b", "x.slice", "sbx_a"} {
 		if err := s.Create(testRecord(id)); err == nil {
 			t.Errorf("Create(%q) should fail", id)
 		}
@@ -82,7 +84,7 @@ func TestStoreRejectsDuplicateAndBadID(t *testing.T) {
 func TestSaveIsAtomicAndLeavesNoTempFiles(t *testing.T) {
 	dir := t.TempDir()
 	s := NewStore(dir)
-	rec := testRecord("sbx_atomic")
+	rec := testRecord(ulid.NewSandbox())
 	if err := s.Create(rec); err != nil {
 		t.Fatalf("Create: %v", err)
 	}

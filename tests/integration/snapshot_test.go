@@ -80,7 +80,7 @@ func TestSnapshotLifecycle(t *testing.T) {
 		t.Fatalf("ListSnapshots: %v entries, want exactly %q", len(list.GetSnapshots()), snapID)
 	}
 
-	if _, err := client.SnapshotSandbox(ctx, &v1.SnapshotSandboxRequest{SandboxId: "sbx_01NOPE"}); status.Code(err) != codes.NotFound {
+	if _, err := client.SnapshotSandbox(ctx, &v1.SnapshotSandboxRequest{SandboxId: ulid.NewSandbox()}); status.Code(err) != codes.NotFound {
 		t.Fatalf("SnapshotSandbox(unknown) code = %v, want NotFound", status.Code(err))
 	}
 

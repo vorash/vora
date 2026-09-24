@@ -10,6 +10,7 @@ package security
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	oklogulid "github.com/oklog/ulid/v2"
 	"github.com/vorash/vora/internal/cgroup"
 	"github.com/vorash/vora/internal/config"
 	"github.com/vorash/vora/internal/runtime"
@@ -124,8 +126,13 @@ func newFixture(t *testing.T, bc backendCase) *fixture {
 		// bwrap needs vora-init; harmless for gVisor.
 		t.Setenv("VORA_INIT_BINARY", mustBuildInit(t))
 	}
+	stateDir, err := os.MkdirTemp("", "vora-sec-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
 	cfg := config.Config{
-		StateDir:       t.TempDir(),
+		StateDir:       stateDir,
 		SystemdMode:    config.SystemdUser,
 		GvisorPlatform: "kvm",
 		GvisorRunRoot:  gvisorTestRoot(),
@@ -134,8 +141,16 @@ func newFixture(t *testing.T, bc backendCase) *fixture {
 }
 
 // create starts a sandbox with the given limits and returns its handle.
+func fixtureID(label string) string {
+	hash := sha256.Sum256([]byte(label))
+	var id oklogulid.ULID
+	copy(id[:], hash[:16])
+	return "sbx_" + id.String()
+}
+
 func (f *fixture) create(id string, limits runtime.ResourceLimits) runtime.Handle {
 	f.t.Helper()
+	id = fixtureID(id)
 	ws := f.ws.Paths(id)
 	ws.RootfsDir = imageRootfs(f.t, "base")
 	if _, err := f.ws.Create(ws); err != nil {

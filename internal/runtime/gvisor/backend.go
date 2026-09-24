@@ -25,6 +25,7 @@ import (
 	"github.com/vorash/vora/internal/egress"
 	"github.com/vorash/vora/internal/network"
 	"github.com/vorash/vora/internal/runtime"
+	"github.com/vorash/vora/internal/ulid"
 )
 
 // Backend is the gVisor runtime backend.
@@ -225,6 +226,9 @@ func (b *Backend) Create(_ context.Context, spec runtime.SandboxSpec) (runtime.H
 		return nil, err
 	}
 	if spec.Network.Mode != runtime.NetworkNone && spec.Network.Mode != runtime.NetworkRestricted {
+		if !ulid.ValidPrefix(spec.ID, ulid.PrefixSandbox) {
+			return nil, fmt.Errorf("%w: invalid sandbox id %q", runtime.ErrInvalidSpec, spec.ID)
+		}
 		return nil, fmt.Errorf("%w: network mode %q (gvisor supports %q and %q)",
 			runtime.ErrUnsupported, spec.Network.Mode, runtime.NetworkNone, runtime.NetworkRestricted)
 	}

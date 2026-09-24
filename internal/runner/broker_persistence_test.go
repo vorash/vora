@@ -89,9 +89,8 @@ func TestBrokerSecretsAreNeverPersisted(t *testing.T) {
 
 	const secret = "ghp_secret_that_must_not_be_persisted"
 	ctx := context.Background()
-	if _, err := s.CreateSandbox(ctx, &v1.CreateSandboxRequest{
+	created, err := s.CreateSandbox(ctx, &v1.CreateSandboxRequest{
 		Spec: &v1.SandboxSpec{
-			SandboxId: "sbx_persist",
 			Image:     "base",
 			Resources: &v1.ResourceLimits{CpuMillis: 1000, MemoryBytes: 256 << 20, Pids: 64},
 			Network: &v1.NetworkPolicy{
@@ -103,10 +102,12 @@ func TestBrokerSecretsAreNeverPersisted(t *testing.T) {
 		BrokerSecrets: []*v1.BrokerCredential{
 			{Alias: "github", Host: "api.example.com", Scheme: egress.SchemeBearer, Value: secret},
 		},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("CreateSandbox: %v", err)
 	}
-	if _, err := s.StartSandbox(ctx, &v1.StartSandboxRequest{SandboxId: "sbx_persist"}); err != nil {
+	id := created.GetSandbox().GetId()
+	if _, err := s.StartSandbox(ctx, &v1.StartSandboxRequest{SandboxId: id}); err != nil {
 		t.Fatalf("StartSandbox: %v", err)
 	}
 
@@ -114,7 +115,7 @@ func TestBrokerSecretsAreNeverPersisted(t *testing.T) {
 		t.Fatalf("backend did not receive the credential: %+v", backend.creds)
 	}
 
-	raw, err := os.ReadFile(filepath.Join(store.Dir("sbx_persist"), "config.json"))
+	raw, err := os.ReadFile(filepath.Join(store.Dir(id), "config.json"))
 	if err != nil {
 		t.Fatalf("read record: %v", err)
 	}
@@ -129,7 +130,7 @@ func TestBrokerSecretsAreNeverPersisted(t *testing.T) {
 	}
 
 	// The staged copy is consumed by the start call, so it cannot be replayed.
-	if got := s.takeBrokerCredentials("sbx_persist"); got != nil {
+	if got := s.takeBrokerCredentials(id); got != nil {
 		t.Fatalf("credentials survived the start call: %+v", got)
 	}
 }
@@ -153,7 +154,6 @@ func TestBrokerStartWithoutCredentialsFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	if _, err := s.CreateSandbox(ctx, &v1.CreateSandboxRequest{
 		Spec: &v1.SandboxSpec{
-			SandboxId: "sbx_no_creds",
 			Image:     "base",
 			Resources: &v1.ResourceLimits{CpuMillis: 1000, MemoryBytes: 256 << 20, Pids: 64},
 			Network: &v1.NetworkPolicy{

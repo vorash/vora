@@ -24,6 +24,7 @@ import (
 	"github.com/vorash/vora/internal/egress"
 	"github.com/vorash/vora/internal/network"
 	"github.com/vorash/vora/internal/runtime"
+	"github.com/vorash/vora/internal/ulid"
 )
 
 const agentReadyTimeout = 15 * time.Second
@@ -125,6 +126,9 @@ func (b *Backend) netnsReady() bool {
 func (b *Backend) Create(_ context.Context, spec runtime.SandboxSpec) (runtime.Handle, error) {
 	if err := spec.Validate(); err != nil {
 		return nil, err
+	}
+	if !ulid.ValidPrefix(spec.ID, ulid.PrefixSandbox) {
+		return nil, fmt.Errorf("%w: invalid sandbox id %q", runtime.ErrInvalidSpec, spec.ID)
 	}
 	switch spec.Network.Mode {
 	case runtime.NetworkNone:

@@ -12,6 +12,7 @@ import (
 	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/sandbox"
+	"github.com/vorash/vora/internal/ulid"
 )
 
 func fileTestSandbox(t *testing.T, s *Server, id string, state sandbox.State) {
@@ -39,11 +40,12 @@ func fileTestSandbox(t *testing.T, s *Server, id string, state sandbox.State) {
 
 func TestSandboxFileRoundTrip(t *testing.T) {
 	s := testServer(t, runtime.NewRegistry())
-	fileTestSandbox(t, s, "sbx_files", sandbox.StateRunning)
+	id := ulid.NewSandbox()
+	fileTestSandbox(t, s, id, sandbox.StateRunning)
 	ctx := context.Background()
 
 	put, err := s.PutSandboxFile(ctx, &v1.PutSandboxFileRequest{
-		SandboxId:     "sbx_files",
+		SandboxId:     id,
 		Path:          "/workspace/nested/a.txt",
 		Content:       []byte("payload"),
 		CreateParents: true,
@@ -55,7 +57,7 @@ func TestSandboxFileRoundTrip(t *testing.T) {
 		t.Fatalf("bytes_written = %d", put.GetBytesWritten())
 	}
 
-	get, err := s.GetSandboxFile(ctx, &v1.GetSandboxFileRequest{SandboxId: "sbx_files", Path: "/workspace/nested/a.txt"})
+	get, err := s.GetSandboxFile(ctx, &v1.GetSandboxFileRequest{SandboxId: id, Path: "/workspace/nested/a.txt"})
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -66,8 +68,9 @@ func TestSandboxFileRoundTrip(t *testing.T) {
 
 func TestSandboxFileRequiresRunning(t *testing.T) {
 	s := testServer(t, runtime.NewRegistry())
-	fileTestSandbox(t, s, "sbx_stopped", sandbox.StateStopped)
-	_, err := s.GetSandboxFile(context.Background(), &v1.GetSandboxFileRequest{SandboxId: "sbx_stopped", Path: "/workspace/a"})
+	id := ulid.NewSandbox()
+	fileTestSandbox(t, s, id, sandbox.StateStopped)
+	_, err := s.GetSandboxFile(context.Background(), &v1.GetSandboxFileRequest{SandboxId: id, Path: "/workspace/a"})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("code = %v, want FailedPrecondition (err=%v)", status.Code(err), err)
 	}
@@ -75,8 +78,9 @@ func TestSandboxFileRequiresRunning(t *testing.T) {
 
 func TestSandboxFileRejectsPathOutsideRoots(t *testing.T) {
 	s := testServer(t, runtime.NewRegistry())
-	fileTestSandbox(t, s, "sbx_path", sandbox.StateRunning)
-	_, err := s.GetSandboxFile(context.Background(), &v1.GetSandboxFileRequest{SandboxId: "sbx_path", Path: "/etc/passwd"})
+	id := ulid.NewSandbox()
+	fileTestSandbox(t, s, id, sandbox.StateRunning)
+	_, err := s.GetSandboxFile(context.Background(), &v1.GetSandboxFileRequest{SandboxId: id, Path: "/etc/passwd"})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("code = %v, want InvalidArgument (err=%v)", status.Code(err), err)
 	}
@@ -84,8 +88,9 @@ func TestSandboxFileRejectsPathOutsideRoots(t *testing.T) {
 
 func TestSandboxFileMissingFileIsNotFound(t *testing.T) {
 	s := testServer(t, runtime.NewRegistry())
-	fileTestSandbox(t, s, "sbx_missing", sandbox.StateRunning)
-	_, err := s.GetSandboxFile(context.Background(), &v1.GetSandboxFileRequest{SandboxId: "sbx_missing", Path: "/workspace/nope"})
+	id := ulid.NewSandbox()
+	fileTestSandbox(t, s, id, sandbox.StateRunning)
+	_, err := s.GetSandboxFile(context.Background(), &v1.GetSandboxFileRequest{SandboxId: id, Path: "/workspace/nope"})
 	if status.Code(err) != codes.NotFound {
 		t.Fatalf("code = %v, want NotFound (err=%v)", status.Code(err), err)
 	}
