@@ -36,6 +36,9 @@ jobs:
           sudo apt-get install -y shellcheck
           shellcheck scripts/*.sh
 
+      - name: Systemd exposure regression
+        run: bash scripts/check-systemd-security.sh
+
   unit:
     name: unit
     runs-on: ubuntu-latest

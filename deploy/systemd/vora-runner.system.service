@@ -6,10 +6,10 @@
 # Delegate=yes is required: the runner creates a delegated cgroup v2 subtree to
 # enforce sandbox cpu/memory/pids limits (ADR 006, ADR 012).
 #
-# The usual systemd hardening directives (ProtectSystem, PrivateUsers,
-# RestrictNamespaces, NoNewPrivileges, ProtectHome) are deliberately absent:
-# the runner must create namespaces, mount filesystems and write its own cgroup
-# to run a sandbox. Sandbox isolation comes from Vora, not from this unit.
+# Requires a dedicated vora system user, a rootless containerd socket owned by
+# that user, and a lingering systemd --user manager for sandbox cgroups.
+# CAP_SYS_ADMIN and CAP_NET_ADMIN are still needed for namespace and nft setup;
+# this unit does not make a compromised runner harmless.
 [Unit]
 Description=Vora runner
 Documentation=https://github.com/vorash/vora
@@ -18,6 +18,9 @@ Wants=network-online.target containerd.service
 
 [Service]
 Type=simple
+User=vora
+Group=vora
+Environment=VORA_SYSTEMD_MODE=user VORA_STATE_DIR=/var/lib/vora VORA_SOCKET=/run/vora/runner.sock XDG_RUNTIME_DIR=/run/user/%U DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
 EnvironmentFile=/etc/vora/runner.env
 ExecStart=/usr/local/bin/vora-runner
 Restart=on-failure
@@ -26,13 +29,28 @@ TimeoutSec=0
 KillMode=mixed
 Delegate=yes
 
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/vora /run/vora
+BindPaths=/run/vora/netns:/run/netns
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN
+AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN
+UMask=0077
+
 # Sandboxes carry their own pids/memory limits; the runner is long-lived and
 # manages many of them, so it must not be capped by the unit.
 TasksMax=infinity
 LimitNOFILE=1048576
 
 # The control socket is expected at /var/run/vora/runner.sock.
-RuntimeDirectory=vora
+RuntimeDirectory=vora vora/netns
 RuntimeDirectoryMode=0750
 StateDirectory=vora
 StateDirectoryMode=0750

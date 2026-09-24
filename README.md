@@ -465,15 +465,22 @@ Control-plane configuration: `VORA_API_HTTP_ADDR`, `VORA_API_GRPC_ADDR`,
 `VORA_API_DSN` (PostgreSQL; omitted → in-memory), `VORA_API_BOOTSTRAP_KEY`
 (initial admin key), `VORA_API_JOIN_TOKEN` (runner registration), and on the
 runner `VORA_RUNNER_ADDR` (TCP gRPC), `VORA_RUNNER_ADVERTISE_ADDR`,
-`VORA_API_GRPC`, `VORA_API_JOIN_TOKEN`. Credential brokering is enabled by
+`VORA_API_GRPC`, `VORA_API_JOIN_TOKEN`. Runner resource ceilings use
+`VORA_MAX_MEMORY` (bytes), `VORA_MAX_CPU` (millicores), `VORA_MAX_PIDS`,
+`VORA_MAX_TTL` (duration), `VORA_DEFAULT_DISK` (bytes), and
+`VORA_MAX_SNAPSHOT_BYTES` (bytes). Credential brokering is enabled by
 `VORA_MASTER_KEY` (≥32 bytes, `vora-api` only); brokered creates also require
 TLS on the API→runner channel unless `VORA_ALLOW_INSECURE_BROKER=1`. TLS/mTLS is
 enabled per channel with
 `VORA_API_HTTP_TLS_{CERT,KEY,CA}` (external HTTP/CLI),
 `VORA_API_REGISTRY_TLS_{CERT,KEY,CA}` (runner registry), and
-`VORA_RUNNER_TLS_{CERT,KEY,CA}` (API→runner). A server-side CA requires and
-verifies client certificates. Unset means plaintext. `VORA_API_TLS_*` is no
-longer read.
+`VORA_RUNNER_TLS_{CERT,KEY,CA}` (API→runner). Runner TCP requires all three
+(mTLS); the API client certificate must carry DNS SAN `vora-api` (or the
+`VORA_RUNNER_CLIENT_IDENTITY` override). For local development only, plaintext
+runner TCP requires `VORA_RUNNER_INSECURE=1` and a loopback IP bind. Other
+channels retain their own TLS settings. `VORA_API_TLS_*` is no longer read. A tunnel bound to loopback may use
+`VORA_TUNNEL_INSECURE=1` for local development, but then brokered credentials
+are refused by default.
 
 ## Releases
 
@@ -492,16 +499,16 @@ $ gh release download v0.4.0 --pattern 'SHA256SUMS'
 $ sha256sum --check --ignore-missing SHA256SUMS
 $ tar -xzf vora_v0.4.0_linux_amd64.tar.gz
 
-# system host (root) — see docs/release.md for the env files and prerequisites
-$ sudo install -m 0755 vora vora-runner vora-init vora-api /usr/local/bin/
-$ sudo install -d -m 0750 /etc/vora && sudo install -d -m 0750 /var/lib/vora
-$ sudo install -m 0644 deploy/systemd/vora-runner.system.service /etc/systemd/system/vora-runner.service
-$ sudo systemctl daemon-reload && sudo systemctl enable --now vora-runner
+# System installation requires the dedicated vora user, its lingering user
+# manager, and its rootless containerd socket; see docs/release.md.
+$ # From a source checkout with the downloaded binaries in this directory:
+$ sudo ./scripts/install-system.sh --from "$PWD" --api
 ```
 
 From a checkout the equivalents are `make release-artifacts` and
 `sudo make install-system API=1` (which also writes the `/etc/vora/*.env`
-templates). Host convergence for real machines is
+templates; existing root-owned state and system containerd sockets must be
+migrated before installation). Host convergence for real machines is
 [`vora-ansible`](https://github.com/vorash/vora-ansible);
 [docs/release.md](docs/release.md) covers what a release contains, the image
 requirement (`/etc/resolv.conf` must exist in the image layers for

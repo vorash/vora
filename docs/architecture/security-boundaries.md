@@ -23,8 +23,8 @@ proves it. If the mechanism is removed, the test must fail.
 | Egress (bwrap, `NetworkRestricted`) | A's only route is the gateway; every TCP connection is DNAT'd to the SNI proxy, which allows listed domains and denies the rest | per-sandbox netns + veth + nft DNAT + SNI proxy (ADR 012) | `TestNetworkRestrictedDNAT` + `egress` unit tests |
 | Name resolution (bwrap) | A can only resolve allowlisted names, through the gateway resolver; private/CGNAT answers and non-address types are refused | allowlist-only resolver on the gateway + nft accept (ADR 012) | `TestDNSThroughNetns` + `egress` DNS unit tests |
 | Brokered credentials (bwrap) | A reaches an allowlisted API through the broker route without ever holding the credential; the broker binds each alias to one host and never follows a redirect | gateway broker + host/allowlist binding (ADR 013) | `TestNoSecretsLeakBroker` + `egress` broker unit tests |
-| Egress (bwrap, `NetworkFull`) | A reaches public hosts through the runner, but private ranges (RFC1918, link-local/metadata, loopback) and every other sandbox stay blocked | per-sandbox netns + veth + nft output drop + runner forward/NAT (ADR 016) | `TestNetworkFullBlocksPrivateRanges` |
-| Peer network (bwrap, `NetworkPrivate`) | A reaches the other sandboxes of its tenant and nothing else; public egress, other tenants and host private ranges are denied | per-sandbox netns + veth + per-tenant routing + nft default-deny (ADR 016) | `TestNetworkPrivateIsolatesTenants` |
+| Egress (bwrap, `NetworkFull`) | A reaches public hosts through the runner, but private/CGNAT/IPv6 ranges, host-local services on the runner's own addresses and every other sandbox stay blocked | per-sandbox netns + veth + nft output drop (IPv6 included) + runner forward/NAT + input drop for the sandbox veth (ADR 016) | `TestNetworkFullBlocksPrivateRanges`, `TestFullAndPrivateRunnerRulesDropHostInput` |
+| Peer network (bwrap, `NetworkPrivate`) | A reaches the other sandboxes of its tenant and nothing else; public egress, other tenants, host-local services and host private ranges are denied | per-sandbox netns + veth + per-tenant routing + nft default-deny + input drop for the sandbox veth (ADR 016) | `TestNetworkPrivateIsolatesTenants`, `TestFullAndPrivateRunnerRulesDropHostInput` |
 | Memory | A's allocations are capped; exceeding the cap kills A, not B | `memory.max`, `memory.swap.max=0` | `TestMemoryBombKilled` |
 | PIDs | A's fork attempts hit its own `pids.max`; B's process budget is untouched | `pids.max` | `TestForkBombContained` |
 | Control socket | A's control socket lives in its own `ipc/` directory bound only into A | per-sandbox bind mount | `TestControlSocketIsolation` |
@@ -52,6 +52,7 @@ scan (ADR 015); `TestDiskQuotaBoundsHostWrites` covers the hard path.
 | Devices | minimal `/dev` from Bubblewrap / gVisor OCI spec |
 | cgroup hierarchy | bwrap: transient systemd units. gVisor: delegated subtree under `vora-runner.service` (`Delegate=yes`) |
 | Availability | memory/PID caps prevent host exhaustion; CPU quota bounds utilisation |
+| Runner privilege | the system runner runs as a dedicated `vora` user with only `CAP_SYS_ADMIN`/`CAP_NET_ADMIN`, `ProtectSystem=strict`, `ProtectHome=yes`, `ProtectKernelModules=yes`, `RestrictSUIDSGID=yes`, `LockPersonality=yes`, `SystemCallArchitectures=native` and a `ReadWritePaths` allowlist; the API uses `DynamicUser=yes`. CI fails if the `systemd-analyze security` score regresses (`scripts/check-systemd-security.sh`) |
 
 ## Residual risks (accepted)
 

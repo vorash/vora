@@ -12,8 +12,8 @@
 #   sudo scripts/install-system.sh --from dist [--api]
 #
 # Prerequisites it does not install (that is the runtime role's job):
-#   bubblewrap, iproute2, nftables, util-linux, containerd (vora namespace),
-#   optional runsc.
+#   bubblewrap, iproute2, nftables, util-linux, a dedicated vora user with
+#   lingering systemd --user manager and rootless containerd; optional runsc.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -33,11 +33,32 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "$(id -u)" -eq 0 ]] || { echo "error: run as root (sudo)" >&2; exit 1; }
+if ! id -u vora >/dev/null 2>&1; then
+  useradd --system --user-group --home-dir /var/lib/vora --shell /usr/bin/nologin vora
+fi
+if ! getent group vora-api-tls >/dev/null; then
+  groupadd --system vora-api-tls
+fi
+loginctl enable-linger vora
+vora_uid="$(id -u vora)"
+containerd_socket="/run/user/$vora_uid/containerd-rootless/containerd.sock"
+if [[ ! -S "$containerd_socket" ]]; then
+  echo "error: rootless containerd for vora is required at $containerd_socket; refusing host-root containerd access" >&2
+  exit 1
+fi
+if [[ -d "$STATE" && "$(stat -c %U "$STATE")" != vora && -n "$(ls -A "$STATE")" ]]; then
+  echo "error: existing $STATE is not owned by vora; migrate its ownership and rootless containerd before installing" >&2
+  exit 1
+fi
 for bin in vora vora-runner vora-init; do
   [[ -x "$FROM/$bin" ]] || { echo "error: $FROM/$bin missing (run scripts/release.sh first)" >&2; exit 1; }
 done
 if [[ "$WITH_API" -eq 1 && ! -x "$FROM/vora-api" ]]; then
   echo "error: $FROM/vora-api missing" >&2; exit 1
+fi
+
+if [[ "$(< /proc/sys/net/ipv4/ip_forward)" != 1 ]]; then
+  echo "warning: NetworkFull/NetworkPrivate need net.ipv4.ip_forward=1 set by the host administrator (runner cannot change protected kernel tunables)" >&2
 fi
 
 echo "==> installing binaries into $BIN_DIR"
@@ -50,30 +71,25 @@ if [[ "$WITH_API" -eq 1 ]]; then
 fi
 
 echo "==> creating $ETC and $STATE"
-install -d -m 0750 "$ETC"
-install -d -m 0750 "$STATE"
-install -d -m 0750 "$ETC/tls"
+install -d -m 0755 "$ETC"
+install -d -m 0750 -o vora -g vora "$STATE"
+install -d -m 0755 "$ETC/tls"
 
-# StateDirectory=vora only accepts a root-owned directory: anything else makes
-# systemd fail the unit with 238/STATE_DIRECTORY and it crash-loops. install -d
-# leaves an existing directory's ownership alone, so say so instead of letting it
-# surface as a restart loop.
-if [[ "$(stat -c %U:%G "$STATE")" != "root:root" ]]; then
-  echo "warning: $STATE is $(stat -c %U:%G "$STATE"), but StateDirectory=vora requires root:root." >&2
-  echo "warning: the units will fail with status 238/STATE_DIRECTORY; fix with:" >&2
-  echo "warning:   chown root:root $STATE" >&2
-fi
 
 # Environment files: created once, never overwritten. The units require them,
 # so an unconfigured host fails to start instead of running with defaults.
+if [[ "$(stat -c %a "$ETC")" != 755 || "$(stat -c %a "$ETC/tls")" != 755 ]]; then
+  echo "error: $ETC and $ETC/tls must be traversable (0755); private keys must be protected by their own file modes" >&2
+  exit 1
+fi
 if [[ ! -f "$ETC/runner.env" ]]; then
   echo "==> writing $ETC/runner.env (template; edit before starting)"
-  cat >"$ETC/runner.env" <<'EOF'
+  cat >"$ETC/runner.env" <<EOF
 # Vora runner configuration. See vora/docs/adr and README.
 # Audit trail: PostgreSQL/Supabase DSN, or unset for per-sandbox JSONL.
 #VORA_AUDIT_DSN=postgres://user:pass@host:5432/vora
 # Image store: the system containerd socket (the rootless socket is dev-only).
-VORA_CONTAINERD_ADDRESS=/run/containerd/containerd.sock
+VORA_CONTAINERD_ADDRESS=$containerd_socket
 VORA_CONTAINERD_NAMESPACE=vora
 VORA_IMAGES_MODE=auto
 # Metrics are unauthenticated: keep them on loopback.
@@ -86,9 +102,11 @@ VORA_METRICS_ADDR=127.0.0.1:9101
 # TLS for the API->runner channel (required for credential brokering):
 #VORA_RUNNER_TLS_CERT=/etc/vora/tls/runner.crt
 #VORA_RUNNER_TLS_KEY=/etc/vora/tls/runner.key
+# Set private key ownership to vora:vora with mode 0600.
 #VORA_RUNNER_TLS_CA=/etc/vora/tls/ca.crt
 #VORA_API_REGISTRY_TLS_CERT=/etc/vora/tls/registry-client.crt
 #VORA_API_REGISTRY_TLS_KEY=/etc/vora/tls/registry-client.key
+# Set the client key ownership to vora:vora with mode 0600.
 #VORA_API_REGISTRY_TLS_CA=/etc/vora/tls/ca.crt
 EOF
   chmod 0600 "$ETC/runner.env"
@@ -116,6 +134,7 @@ VORA_API_GRPC_ADDR=127.0.0.1:9301
 # Registry gRPC TLS:
 #VORA_API_REGISTRY_TLS_CERT=/etc/vora/tls/registry.crt
 #VORA_API_REGISTRY_TLS_KEY=/etc/vora/tls/registry.key
+# Set API private key group to vora-api-tls with mode 0640.
 #VORA_API_REGISTRY_TLS_CA=/etc/vora/tls/ca.crt
 EOF
   chmod 0600 "$ETC/api.env"

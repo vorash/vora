@@ -425,7 +425,7 @@ func TestProxyControlRejectsPrivateIP(t *testing.T) {
 }
 
 func TestBlockedIP(t *testing.T) {
-	for _, ip := range []string{"127.0.0.1", "10.0.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "::1"} {
+	for _, ip := range []string{"127.0.0.1", "10.0.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "240.0.0.1", "0.1.2.3", "::1"} {
 		if !blockedIP(net.ParseIP(ip)) {
 			t.Errorf("expected %s to be blocked", ip)
 		}

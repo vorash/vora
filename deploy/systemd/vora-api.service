@@ -19,6 +19,9 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
+DynamicUser=yes
+SupplementaryGroups=vora-api-tls
+StateDirectory=vora-api
 EnvironmentFile=/etc/vora/api.env
 ExecStart=/usr/local/bin/vora-api
 Restart=on-failure
@@ -26,7 +29,10 @@ RestartSec=5
 
 NoNewPrivileges=yes
 PrivateTmp=yes
-ProtectSystem=full
+ProtectSystem=strict
+LockPersonality=yes
+SystemCallArchitectures=native
+UMask=0077
 ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

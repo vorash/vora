@@ -360,7 +360,7 @@ func blockedIP(ip net.IP) bool {
 	if v4 := ip.To4(); v4 != nil {
 		// 100.64.0.0/10 (CGNAT) and 169.254.0.0/16 are covered by IsPrivate
 		// for the latter; block CGNAT explicitly.
-		if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
+		if v4[0] == 0 || v4[0] >= 240 || (v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127) {
 			return true
 		}
 	}
