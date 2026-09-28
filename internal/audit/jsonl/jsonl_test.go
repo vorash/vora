@@ -69,3 +69,32 @@ func TestActorRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestEgressCountsOnlyCoversTheWindow(t *testing.T) {
+	root := t.TempDir()
+	store := New(func(sandboxID string) string {
+		dir := filepath.Join(root, sandboxID)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	})
+	ctx := context.Background()
+	const id = "sbx_counts"
+	base := time.Now().UTC()
+	for _, r := range []sandbox.EgressRecord{
+		{Allowed: true, Timestamp: base.Add(-time.Minute)},
+		{Allowed: true, Timestamp: base.Add(time.Second)},
+		{Allowed: false, Timestamp: base.Add(2 * time.Second)},
+		{Allowed: false, Timestamp: base.Add(time.Minute)},
+	} {
+		r.SandboxID = id
+		if err := store.AppendEgress(ctx, id, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	allowed, denied, err := store.EgressCounts(ctx, id, base, base.Add(10*time.Second))
+	if err != nil || allowed != 1 || denied != 1 {
+		t.Fatalf("EgressCounts = %d allowed, %d denied, %v; want 1, 1", allowed, denied, err)
+	}
+}

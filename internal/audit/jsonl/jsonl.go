@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/vorash/vora/internal/audit"
 	"github.com/vorash/vora/internal/sandbox"
@@ -96,6 +97,25 @@ func (s *Store) AppendEgress(_ context.Context, sandboxID string, record sandbox
 // Egress implements audit.Store.
 func (s *Store) Egress(_ context.Context, sandboxID string) ([]sandbox.EgressRecord, error) {
 	return sandbox.ReadEgress(s.logsDir(sandboxID))
+}
+
+// EgressCounts implements audit.Store.
+func (s *Store) EgressCounts(_ context.Context, sandboxID string, start, end time.Time) (allowed, denied int64, err error) {
+	records, err := sandbox.ReadEgress(s.logsDir(sandboxID))
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, r := range records {
+		if ts := r.Timestamp.UTC(); ts.Before(start) || ts.After(end) {
+			continue
+		}
+		if r.Allowed {
+			allowed++
+		} else {
+			denied++
+		}
+	}
+	return allowed, denied, nil
 }
 
 // Close implements audit.Store.

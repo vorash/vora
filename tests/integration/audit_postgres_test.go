@@ -130,6 +130,15 @@ func TestPostgresAuditStore(t *testing.T) {
 	if len(egress) != 2 || !egress[0].Allowed || egress[1].Reason != "domain_not_allowed" {
 		t.Fatalf("egress = %+v", egress)
 	}
+	// EgressCounts is answered by the database for just the window asked for.
+	allowedN, deniedN, err := store.EgressCounts(ctx, sandboxID, now.Add(-time.Second), now.Add(time.Second))
+	if err != nil || allowedN != 1 || deniedN != 1 {
+		t.Fatalf("EgressCounts = %d allowed, %d denied, %v; want 1, 1", allowedN, deniedN, err)
+	}
+	allowedN, deniedN, err = store.EgressCounts(ctx, sandboxID, now.Add(time.Hour), now.Add(2*time.Hour))
+	if err != nil || allowedN != 0 || deniedN != 0 {
+		t.Fatalf("EgressCounts outside the window = %d, %d, %v; want 0, 0", allowedN, deniedN, err)
+	}
 	// Credential-broker decisions carry the alias, never a secret value: the
 	// schema has no column a value could be stored in.
 	if egress[0].Alias != "github" {
