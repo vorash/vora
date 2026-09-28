@@ -367,7 +367,7 @@ func (b *Backend) start(ctx context.Context, hd *handle, opts runOpts, resolvCon
 	// The init is Vora's static binary, copied into the ipc directory (bound at
 	// /vora) so the sandbox never depends on the image having a shell.
 	ws := hd.spec.Workspace
-	if err := os.MkdirAll(ws.IPCDir, 0o755); err != nil {
+	if err := os.MkdirAll(ws.IPCDir, 0o700); err != nil {
 		_ = group.Destroy()
 		hd.group = nil
 		return fmt.Errorf("gvisor: ipc dir: %w", err)

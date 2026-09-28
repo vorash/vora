@@ -73,7 +73,7 @@ func (s *Store) Create(rec *Record) error {
 	if _, err := os.Stat(filepath.Join(dir, recordFile)); err == nil {
 		return fmt.Errorf("snapshot: %s already exists", rec.ID)
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("snapshot: create dir: %w", err)
 	}
 	rec.CreatedAt = time.Now().UTC()
@@ -97,7 +97,7 @@ func (s *Store) write(rec *Record) error {
 		return fmt.Errorf("snapshot: marshal: %w", err)
 	}
 	dir := s.Dir(rec.ID)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("snapshot: create dir: %w", err)
 	}
 	tmp, err := os.CreateTemp(dir, "."+recordFile+".tmp-*")

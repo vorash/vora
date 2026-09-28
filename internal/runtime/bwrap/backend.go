@@ -255,7 +255,7 @@ func (b *Backend) startRestricted(ctx context.Context, hd *handle, creds []egres
 // NetworkPrivate get only the namespace and its firewall policy.
 func (b *Backend) startInNetns(ctx context.Context, hd *handle, creds []egress.Credential) error {
 	ws := hd.spec.Workspace
-	if err := os.MkdirAll(ws.IPCDir, 0o755); err != nil {
+	if err := os.MkdirAll(ws.IPCDir, 0o700); err != nil {
 		return fmt.Errorf("bwrap: ipc dir: %w", err)
 	}
 	if ws.ControlSocket != "" {
@@ -442,7 +442,7 @@ func waitReadyCmd(ctx context.Context, done <-chan error, client *agentproto.Cli
 // startUnit launches the sandbox as a transient systemd unit (NetworkNone).
 func (b *Backend) startUnit(ctx context.Context, hd *handle) error {
 	ws := hd.spec.Workspace
-	if err := os.MkdirAll(ws.IPCDir, 0o755); err != nil {
+	if err := os.MkdirAll(ws.IPCDir, 0o700); err != nil {
 		return fmt.Errorf("bwrap: ipc dir: %w", err)
 	}
 	// Remove a stale socket from a previous run.

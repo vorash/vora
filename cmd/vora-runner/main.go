@@ -42,6 +42,15 @@ import (
 	"github.com/vorash/vora/internal/version"
 )
 
+// ensurePrivateDir creates dir, or tightens an existing one, to 0700: the
+// runner's state holds workloads' files and control sockets.
+func ensurePrivateDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(dir, 0o700)
+}
+
 func verifyAPIIdentity(cert *x509.Certificate, identity string) error {
 	for _, name := range cert.DNSNames {
 		if name == identity {
@@ -104,7 +113,7 @@ func run() error {
 	}
 	defer func() { _ = shutdownTracing(context.Background()) }()
 
-	if err := os.MkdirAll(cfg.SandboxesDir(), 0o755); err != nil {
+	if err := ensurePrivateDir(cfg.SandboxesDir()); err != nil {
 		return fmt.Errorf("create state dir: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(cfg.SocketPath), 0o755); err != nil {
