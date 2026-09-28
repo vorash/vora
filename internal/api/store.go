@@ -95,6 +95,9 @@ type SandboxRoute struct {
 	AgentID     string `json:"agent_id,omitempty"`
 	CPUMillis   int64  `json:"cpu_millis,omitempty"`
 	MemoryBytes int64  `json:"memory_bytes,omitempty"`
+	// Destroyed marks a route kept after destroy so the sandbox's audit trail
+	// stays reachable through the API. It no longer counts toward placement.
+	Destroyed bool `json:"destroyed,omitempty"`
 }
 
 // SnapshotRoute records which runner holds a snapshot and which tenant may
