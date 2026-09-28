@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/vorash/vora/internal/runtime"
 )
@@ -18,6 +19,8 @@ const (
 	logsDir      = "logs"
 	execLogDir   = "exec"
 	controlSock  = "control.sock"
+	// recordFile is the sandbox store's record, kept as the tombstone.
+	recordFile = "config.json"
 )
 
 // Manager creates and removes sandbox directories under a root.
@@ -80,13 +83,27 @@ func (m *Manager) Destroy(id string) error {
 	return nil
 }
 
-// Clean removes a sandbox's mutable directories and logs but keeps the root
-// and config.json so a destroyed sandbox remains as a tombstone record.
+// Clean reduces a sandbox directory to its tombstone: config.json (and any
+// in-flight temp copy of it) plus logs/. Everything else goes, including
+// backend leftovers such as a gVisor bundle/ or a bound resolv.conf. The
+// workload can destroy its own sandbox, so destroy must never erase the record
+// of what it ran.
 func (m *Manager) Clean(id string) error {
-	spec := m.Paths(id)
-	for _, d := range []string{spec.WorkspaceDir, spec.HomeDir, spec.IPCDir, filepath.Join(spec.RootDir, logsDir)} {
-		if err := os.RemoveAll(d); err != nil {
-			return fmt.Errorf("workspace: clean %s: %w", d, err)
+	root := m.Paths(id).RootDir
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("workspace: clean %s: %w", root, err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if name == recordFile || name == logsDir || strings.HasPrefix(name, "."+recordFile+".tmp-") {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(root, name)); err != nil {
+			return fmt.Errorf("workspace: clean %s: %w", name, err)
 		}
 	}
 	return nil

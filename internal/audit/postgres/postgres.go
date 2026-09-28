@@ -13,6 +13,7 @@ import (
 
 	"github.com/vorash/vora/internal/audit"
 	"github.com/vorash/vora/internal/sandbox"
+	"github.com/vorash/vora/internal/ulid"
 )
 
 //go:embed schema.sql
@@ -77,16 +78,15 @@ func (s *Store) AppendEvent(ctx context.Context, _ string, event sandbox.Event) 
 
 // AppendExec implements audit.Store.
 func (s *Store) AppendExec(ctx context.Context, sandboxID string, exec sandbox.ExecRecord) error {
+	if !ulid.ValidPrefix(exec.ExecutionID, ulid.PrefixExec) {
+		return fmt.Errorf("audit/postgres: invalid execution id %q", exec.ExecutionID)
+	}
+	// Records are append-only: a reused execution_id violates the primary key
+	// and fails rather than rewriting the earlier record.
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO sandbox_execs
 		   (execution_id, sandbox_id, command, args, cwd, started_at, finished_at, exit_code, reason, stdout_bytes, stderr_bytes, tenant_id, agent_identity, key_id)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-		 ON CONFLICT (execution_id) DO UPDATE SET
-		   finished_at  = EXCLUDED.finished_at,
-		   exit_code    = EXCLUDED.exit_code,
-		   reason       = EXCLUDED.reason,
-		   stdout_bytes = EXCLUDED.stdout_bytes,
-		   stderr_bytes = EXCLUDED.stderr_bytes`,
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
 		exec.ExecutionID, sandboxID, exec.Command, exec.Args, exec.Cwd,
 		exec.StartedAt, exec.FinishedAt, exec.ExitCode, string(exec.Reason),
 		exec.StdoutBytes, exec.StderrBytes,

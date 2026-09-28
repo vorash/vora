@@ -15,6 +15,7 @@ import (
 	"github.com/vorash/vora/internal/audit/postgres"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/sandbox"
+	"github.com/vorash/vora/internal/ulid"
 )
 
 // TestPostgresAuditStore runs the audit store against a real PostgreSQL started
@@ -71,17 +72,28 @@ func TestPostgresAuditStore(t *testing.T) {
 	}
 
 	rec := sandbox.ExecRecord{
-		ExecutionID: "exe_pg_1", SandboxID: sandboxID, Actor: actor, Command: "/bin/echo",
+		ExecutionID: ulid.NewExec(), SandboxID: sandboxID, Actor: actor, Command: "/bin/echo",
 		Args: []string{"hi"}, Cwd: "/workspace", StartedAt: now, FinishedAt: now.Add(time.Second),
 		ExitCode: 0, Reason: runtime.ReasonExited, StdoutBytes: 3, StderrBytes: 0,
 	}
 	if err := store.AppendExec(ctx, sandboxID, rec); err != nil {
 		t.Fatalf("append exec: %v", err)
 	}
-	// Re-appending the same execution id updates rather than duplicates.
-	rec.ExitCode = 7
-	if err := store.AppendExec(ctx, sandboxID, rec); err != nil {
-		t.Fatalf("re-append exec: %v", err)
+	// Records are append-only: reusing an execution id, even from another
+	// sandbox, must fail and leave the stored row untouched.
+	replay := rec
+	replay.ExitCode = 7
+	replay.Command = "/bin/rm"
+	if err := store.AppendExec(ctx, sandboxID, replay); err == nil {
+		t.Fatal("re-appending an existing execution id succeeded")
+	}
+	if err := store.AppendExec(ctx, "sbx_pg_other", replay); err == nil {
+		t.Fatal("another sandbox rewrote an existing execution record")
+	}
+	bad := rec
+	bad.ExecutionID = "not-a-ulid"
+	if err := store.AppendExec(ctx, sandboxID, bad); err == nil {
+		t.Fatal("non-canonical execution id accepted")
 	}
 
 	events, err := store.Events(ctx, sandboxID)
@@ -102,7 +114,7 @@ func TestPostgresAuditStore(t *testing.T) {
 	if len(execs) != 1 {
 		t.Fatalf("execs = %d, want 1", len(execs))
 	}
-	if execs[0].ExitCode != 7 || execs[0].Command != "/bin/echo" || len(execs[0].Args) != 1 || execs[0].Args[0] != "hi" {
+	if execs[0].ExitCode != 0 || execs[0].Command != "/bin/echo" || len(execs[0].Args) != 1 || execs[0].Args[0] != "hi" {
 		t.Fatalf("exec record = %+v", execs[0])
 	}
 	if execs[0].Actor != actor {
