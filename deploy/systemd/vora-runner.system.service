@@ -15,6 +15,10 @@ Description=Vora runner
 Documentation=https://github.com/vorash/vora
 After=network-online.target containerd.service
 Wants=network-online.target containerd.service
+# With VORA_AUDIT_DSN set the runner refuses to start until the audit database
+# is reachable. Keep retrying rather than tripping the default start limit (5
+# starts in 10s), so a slow database means a late runner, not a dead one.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple

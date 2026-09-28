@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"os"
@@ -63,6 +64,13 @@ type Server struct {
 	denyWindows map[string]denyWindow
 	createMu    sync.Mutex
 	snapshotMu  sync.Mutex
+	// sandboxLocks serialise destroy and audit pruning per sandbox, striped by
+	// id so the set stays bounded however many tombstones accumulate.
+	sandboxLocks [64]sync.Mutex
+	// localAudit is true while the audit trail is the runner's own JSONL
+	// store, the only one retention may prune. It is configuration, not a type
+	// check, so wrapping the store cannot silently disable retention.
+	localAudit bool
 }
 
 // sandboxHandle binds a sandbox to the backend that manages it, so later RPCs
@@ -99,6 +107,7 @@ func NewServer(cfg config.Config, store *sandbox.Store, registry *runtime.Regist
 		handles:     make(map[string]sandboxHandle),
 		brokerCreds: make(map[string][]egress.Credential),
 		denyWindows: make(map[string]denyWindow),
+		localAudit:  true,
 	}
 	s.setQuotaModeMetric()
 	return s
@@ -108,7 +117,17 @@ func NewServer(cfg config.Config, store *sandbox.Store, registry *runtime.Regist
 func (s *Server) SetAudit(a audit.Store) {
 	if a != nil {
 		s.audit = a
+		s.localAudit = false
 	}
+}
+
+// lockSandbox takes the lock that serialises destroy and pruning for id.
+func (s *Server) lockSandbox(id string) func() {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(id))
+	mu := &s.sandboxLocks[h.Sum32()%uint32(len(s.sandboxLocks))]
+	mu.Lock()
+	return mu.Unlock
 }
 
 // SetMetrics replaces the default metric set (used by the daemon).
@@ -553,6 +572,7 @@ func (s *Server) recordExec(sandboxID string, req runtime.ExecRequest, started t
 		EgressDenied:    denied,
 	}
 	if err := s.audit.AppendExec(context.Background(), sandboxID, rec); err != nil {
+		s.metrics.AuditWriteFailedTotal.Inc()
 		s.logger.Warn("write exec record failed", "sandbox_id", sandboxID, "execution_id", req.ExecutionID, "error", err)
 	}
 }
@@ -659,6 +679,7 @@ func (s *Server) DestroySandbox(ctx context.Context, req *v1.DestroySandboxReque
 
 // destroy releases a sandbox's runtime resources and marks it DESTROYED.
 func (s *Server) destroy(ctx context.Context, id, keyID string) error {
+	defer s.lockSandbox(id)()
 	rec, err := s.store.Load(id)
 	if err != nil {
 		return s.loadError(err, id)
@@ -773,6 +794,50 @@ func (s *Server) ReapExpired(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// PruneAudit removes the tombstone, including the local audit trail, of
+// sandboxes that finished longer ago than the configured retention. Retention
+// is off by default: destroy never deletes audit, only this reaper does. It
+// only applies to the local JSONL trail: with an external audit store the
+// tombstone is what makes that store's rows reachable through the API.
+func (s *Server) PruneAudit(ctx context.Context) error {
+	if !s.localAudit || s.cfg.AuditRetention <= 0 {
+		return nil
+	}
+	recs, err := s.store.List()
+	if err != nil {
+		return err
+	}
+	cutoff := time.Now().Add(-s.cfg.AuditRetention)
+	for _, rec := range recs {
+		if !rec.State.Terminal() || !rec.UpdatedAt.Before(cutoff) {
+			continue
+		}
+		s.pruneOne(ctx, rec.ID, cutoff)
+	}
+	return nil
+}
+
+// pruneOne removes one expired tombstone. It re-reads the record under the
+// sandbox lock: a destroy that raced the listing may have just rewritten it,
+// and deleting underneath that destroy would resurrect a partial tombstone.
+func (s *Server) pruneOne(ctx context.Context, id string, cutoff time.Time) {
+	defer s.lockSandbox(id)()
+	rec, err := s.store.Load(id)
+	if err != nil || !rec.State.Terminal() || !rec.UpdatedAt.Before(cutoff) {
+		return
+	}
+	// A sandbox that failed without being destroyed may still hold its
+	// project quota; release it so the limit does not outlive the directory.
+	if rec.State != sandbox.StateDestroyed {
+		s.releaseDiskQuota(ctx, rec)
+	}
+	if err := s.store.Delete(rec.ID); err != nil {
+		s.logger.Warn("prune audit failed", "sandbox_id", rec.ID, "error", err)
+		return
+	}
+	s.logger.Info("audit trail pruned", "sandbox_id", rec.ID, "retention", s.cfg.AuditRetention.String())
 }
 
 // Reconcile fail-closes runner state at startup: active store records are
@@ -1057,7 +1122,8 @@ func (s *Server) transition(rec *sandbox.Record, to sandbox.State, reason runtim
 		RunnerID:  s.runnerID,
 	}
 	if err := s.audit.AppendEvent(context.Background(), rec.ID, event); err != nil {
-		s.logger.Debug("append event failed", "sandbox_id", rec.ID, "error", err)
+		s.metrics.AuditWriteFailedTotal.Inc()
+		s.logger.Warn("append event failed", "sandbox_id", rec.ID, "to", to, "error", err)
 	}
 	return nil
 }
