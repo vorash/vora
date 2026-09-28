@@ -7,6 +7,10 @@
 Description=Vora runner (rootlesskit, gVisor-capable)
 Documentation=https://github.com/vorash/vora
 After=network.target
+# With VORA_AUDIT_DSN set the runner refuses to start until the audit database
+# is reachable. Keep retrying rather than tripping the default start limit (5
+# starts in 10s), so a slow database means a late runner, not a dead one.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple

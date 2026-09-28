@@ -1,11 +1,14 @@
 package agentproto
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -76,19 +79,46 @@ func startAgent(t *testing.T) (*Client, *fakeHandler) {
 	return client, h
 }
 
+// replacementSocketEnv tells a re-executed test binary to act as the forged
+// agent in TestAgentRejectsReplacedControlSocketOnReconnect.
+const replacementSocketEnv = "VORA_AGENTPROTO_REPLACEMENT_SOCKET"
+
+// TestHelperReplacementAgent is not a test: it is the forged agent, run in its
+// own process. It serves a valid AgentService on the socket path, reports
+// ready, and exits when the parent closes its stdin.
+func TestHelperReplacementAgent(t *testing.T) {
+	socket := os.Getenv(replacementSocketEnv)
+	if socket == "" {
+		t.Skip("helper process for TestAgentRejectsReplacedControlSocketOnReconnect")
+	}
+	l, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	v1.RegisterAgentServiceServer(server, NewServer(&fakeHandler{}))
+	go func() { _ = server.Serve(l) }()
+	fmt.Println("ready")
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	server.Stop()
+}
+
+// A workload can replace /vora/control.sock with its own listener. The runner
+// must refuse to talk to it on reconnect, or the workload could forge exec
+// results and exit codes in the audit trail. The replacement is served from a
+// separate process, as a workload's would be: the socket inode alone is not a
+// reliable identity (filesystems reuse a freed inode number for the next
+// socket), so this pins the peer-credential check that actually holds.
 func TestAgentRejectsReplacedControlSocketOnReconnect(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "control.sock")
-	listen := func() (net.Listener, *grpc.Server) {
-		l, err := net.Listen("unix", socket)
-		if err != nil {
-			t.Fatal(err)
-		}
-		server := grpc.NewServer()
-		v1.RegisterAgentServiceServer(server, NewServer(&fakeHandler{}))
-		go func() { _ = server.Serve(l) }()
-		return l, server
+	original, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
 	}
-	original, server := listen()
+	server := grpc.NewServer()
+	v1.RegisterAgentServiceServer(server, NewServer(&fakeHandler{}))
+	go func() { _ = server.Serve(original) }()
+
 	client, err := Dial(socket)
 	if err != nil {
 		t.Fatal(err)
@@ -104,9 +134,45 @@ func TestAgentRejectsReplacedControlSocketOnReconnect(t *testing.T) {
 	if err := os.Remove(socket); err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
-	fake, fakeServer := listen()
-	defer fake.Close()
-	defer fakeServer.Stop()
+
+	forged := exec.Command(os.Args[0], "-test.run=^TestHelperReplacementAgent$")
+	forged.Env = append(os.Environ(), replacementSocketEnv+"="+socket)
+	stdin, err := forged.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := forged.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := forged.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		stdin.Close()
+		_ = forged.Wait()
+	}()
+	ready := make(chan bool, 1)
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			if scanner.Text() == "ready" {
+				ready <- true
+				_, _ = io.Copy(io.Discard, stdout)
+				return
+			}
+		}
+		ready <- false
+	}()
+	select {
+	case ok := <-ready:
+		if !ok {
+			t.Fatal("replacement agent exited before serving")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("replacement agent did not start")
+	}
+
 	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if _, err := client.Ping(ctx); err == nil {
