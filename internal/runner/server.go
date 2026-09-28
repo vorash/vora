@@ -62,11 +62,12 @@ type Server struct {
 	denyMu      sync.Mutex
 	denyWindows map[string]denyWindow
 	// allowedWindow is the aggregation window for allowed egress decisions.
-	allowedWindow  time.Duration
-	allowMu        sync.Mutex
-	allowedWindows map[allowedKey]*allowedCount
-	createMu       sync.Mutex
-	snapshotMu     sync.Mutex
+	allowedWindow    time.Duration
+	allowMu          sync.Mutex
+	allowedWindows   map[allowedKey]*allowedCount
+	allowedSandboxes map[string]*allowedCount
+	createMu         sync.Mutex
+	snapshotMu       sync.Mutex
 }
 
 // sandboxHandle binds a sandbox to the backend that manages it, so later RPCs
@@ -81,8 +82,16 @@ type denyWindow struct {
 // window; the rest are counted and written as one summary row. Every allowed
 // decision stays accounted for, but a sandbox cannot turn an allowlisted name
 // into an unbounded stream of synchronous audit writes.
+//
+// allowedSandboxBudget caps a sandbox's individual rows per window across all
+// keys: allowlisting a domain allows every subdomain, so a sandbox that queries
+// fresh names under a wildcard-DNS domain would otherwise get a new per-host
+// budget, and a new map entry, for each one. Past the cap, names without an
+// open window are counted under the sandbox's overflow host instead.
 const (
 	allowedBudget        = 10
+	allowedSandboxBudget = 100
+	allowedOverflowHost  = "*"
 	defaultAllowedWindow = 10 * time.Second
 )
 
@@ -121,8 +130,9 @@ func NewServer(cfg config.Config, store *sandbox.Store, registry *runtime.Regist
 		brokerCreds: make(map[string][]egress.Credential),
 		denyWindows: make(map[string]denyWindow),
 
-		allowedWindow:  defaultAllowedWindow,
-		allowedWindows: make(map[allowedKey]*allowedCount),
+		allowedWindow:    defaultAllowedWindow,
+		allowedWindows:   make(map[allowedKey]*allowedCount),
+		allowedSandboxes: make(map[string]*allowedCount),
 	}
 	s.setQuotaModeMetric()
 	return s
@@ -200,10 +210,10 @@ func (s *Server) RecordEgress(event egress.Event) error {
 		s.denyWindows[event.SandboxID] = window
 	}
 	if event.Allowed {
-		summary, suppressed, write := s.admitAllowed(record)
+		summary, key, suppressed, write := s.admitAllowed(record)
 		if summary != nil {
 			if err := s.audit.AppendEgress(context.Background(), event.SandboxID, *summary); err != nil {
-				s.restoreSuppressed(keyOf(record), suppressed)
+				s.restoreSuppressed(key, suppressed)
 				s.metrics.AuditWriteFailedTotal.Inc()
 				s.logger.Error("write egress summary failed", "sandbox_id", event.SandboxID, "host", event.Host, "error", err)
 				return err
@@ -236,15 +246,25 @@ func allowedSummary(k allowedKey, n int64, at time.Time, actor sandbox.Actor) sa
 	}
 }
 
-// admitAllowed decides whether an allowed decision is written individually. It
-// returns a summary of the previous window's suppressed decisions when that
-// window has ended. It never holds its lock across an audit write, so one
-// sandbox's flood cannot serialise every other tenant's allowed egress.
-func (s *Server) admitAllowed(record sandbox.EgressRecord) (summary *sandbox.EgressRecord, suppressed int64, write bool) {
-	k := keyOf(record)
+// admitAllowed decides whether an allowed decision is written individually,
+// and returns the key it was counted under. It returns a summary of that key's
+// previous window's suppressed decisions when the window has ended. It never
+// holds its lock across an audit write, so one sandbox's flood cannot serialise
+// every other tenant's allowed egress.
+func (s *Server) admitAllowed(record sandbox.EgressRecord) (summary *sandbox.EgressRecord, k allowedKey, suppressed int64, write bool) {
+	k = keyOf(record)
 	now := time.Now()
 	s.allowMu.Lock()
 	defer s.allowMu.Unlock()
+	sb := s.allowedSandboxes[k.sandboxID]
+	if sb == nil || now.Sub(sb.start) >= s.allowedWindow {
+		sb = &allowedCount{start: now}
+		s.allowedSandboxes[k.sandboxID] = sb
+	}
+	overflow := s.allowedWindows[k] == nil && sb.written >= allowedSandboxBudget
+	if overflow {
+		k.host = allowedOverflowHost
+	}
 	c := s.allowedWindows[k]
 	if c == nil || now.Sub(c.start) >= s.allowedWindow {
 		if c != nil && c.suppressed > 0 {
@@ -254,12 +274,13 @@ func (s *Server) admitAllowed(record sandbox.EgressRecord) (summary *sandbox.Egr
 		c = &allowedCount{start: now}
 		s.allowedWindows[k] = c
 	}
-	if c.written >= allowedBudget {
+	if overflow || c.written >= allowedBudget || sb.written >= allowedSandboxBudget {
 		c.suppressed++
-		return summary, suppressed, false
+		return summary, k, suppressed, false
 	}
 	c.written++
-	return summary, suppressed, true
+	sb.written++
+	return summary, k, suppressed, true
 }
 
 // restoreSuppressed puts back counts whose summary could not be persisted, so
@@ -299,6 +320,11 @@ func (s *Server) flushAllowed(ctx context.Context, sandboxID string, all bool) e
 			due = append(due, pending{k, c.suppressed})
 		}
 		delete(s.allowedWindows, k)
+	}
+	for id, sb := range s.allowedSandboxes {
+		if all && id == sandboxID || !all && now.Sub(sb.start) >= s.allowedWindow {
+			delete(s.allowedSandboxes, id)
+		}
 	}
 	s.allowMu.Unlock()
 

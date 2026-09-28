@@ -182,3 +182,47 @@ func TestEgressInWindowAsksTheStoreForOnlyTheWindow(t *testing.T) {
 		t.Fatalf("store asked for [%v, %v] in %d calls, want [%v, %v] once", c.countStart, c.countEnd, c.countCalls, start, end)
 	}
 }
+
+// Allowlisting a domain allows every subdomain, and a tenant can allowlist a
+// wildcard-DNS domain it controls. A budget that were only per host would give
+// each fresh name its own budget and tracked window, so the flood would still
+// reach the shared audit database and the runner's memory without bound.
+func TestAllowedBudgetCoversFreshSubdomains(t *testing.T) {
+	const id, flood = "sbx_allowed_subdomains", 10000
+	s, c := budgetServer(t, id)
+	for i := 0; i < flood; i++ {
+		if err := s.RecordEgress(allowed(id, fmt.Sprintf("n%d.example.com", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c.writes > allowedSandboxBudget {
+		t.Fatalf("%d fresh subdomains caused %d audit writes, want at most %d", flood, c.writes, allowedSandboxBudget)
+	}
+	s.allowMu.Lock()
+	tracked := len(s.allowedWindows)
+	s.allowMu.Unlock()
+	if tracked > allowedSandboxBudget+1 {
+		t.Fatalf("%d fresh subdomains left %d tracked windows, want at most %d", flood, tracked, allowedSandboxBudget+1)
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	if err := s.FlushEgress(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	records, err := s.audit.Egress(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var individual, aggregated int
+	for _, r := range records {
+		var n int
+		if _, err := fmtSscanAggregated(r.Reason, &n); err == nil {
+			aggregated += n
+		} else {
+			individual++
+		}
+	}
+	if individual+aggregated != flood {
+		t.Fatalf("audit accounts for %d decisions (%d rows + %d aggregated), want %d", individual+aggregated, individual, aggregated, flood)
+	}
+}
