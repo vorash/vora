@@ -97,9 +97,6 @@ func main() {
 	os.Exit(0)
 }
 
-// pause is the gVisor init: it blocks until the sandbox is stopped, reaping
-// reparented children so PID 1 never accumulates zombies. gVisor uses
-// `runsc exec` (NativeExec), so there is nothing to serve.
 // listenAgent opens the agent's control socket. The socket is owned by the
 // runner's own host UID (the sandbox user namespace maps onto it), so only the
 // owner needs access; it must not be reachable by other local users.
@@ -119,6 +116,9 @@ func listenAgent(socket string) (net.Listener, error) {
 	return lis, nil
 }
 
+// pause is the gVisor init: it blocks until the sandbox is stopped, reaping
+// reparented children so PID 1 never accumulates zombies. gVisor uses
+// `runsc exec` (NativeExec), so there is nothing to serve.
 func pause() {
 	fmt.Fprintln(os.Stderr, "vora-init: pause (pid", os.Getpid(), ")")
 
