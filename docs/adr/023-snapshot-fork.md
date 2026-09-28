@@ -67,3 +67,8 @@ its source is gone is valid; `snapshot rm` reclaims the space.
 - A fork whose image is no longer resolvable fails at create time with the
   usual loud error, exactly like a normal create.
 - SDK/MCP surfaces are not part of this change and follow separately.
+- Forking a brokered snapshot works because the runner returns the spec's
+  `broker_aliases`, which the control plane reads to resolve the fork's
+  credentials. A fork that cannot start is marked `FAILED` and destroyed by the
+  runner itself: the caller never receives its ID (the control plane writes no
+  route until the fork succeeds), so it could not be cleaned up from outside.
