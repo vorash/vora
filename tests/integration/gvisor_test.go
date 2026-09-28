@@ -21,6 +21,7 @@ import (
 	"github.com/vorash/vora/internal/network"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/runtime/gvisor"
+	"github.com/vorash/vora/internal/ulid"
 	"github.com/vorash/vora/internal/workspace"
 )
 
@@ -302,4 +303,87 @@ func TestGvisorRestrictedEgress(t *testing.T) {
 		}
 	}
 	t.Fatalf("no denied egress event recorded for %s (events=%+v)", id, events)
+}
+
+// A timeout used to kill only the `runsc exec` client, so the command kept
+// running inside the sandbox while the record said it had timed out.
+func TestGvisorExecTimeoutKillsTheCommand(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("gVisor Method 2 requires a rootlesskit userns or root (run under rootlesskit)")
+	}
+	if _, err := os.Stat("/dev/kvm"); err != nil {
+		t.Skipf("/dev/kvm unavailable: %v", err)
+	}
+	rootfs := imageRootfs(t, "base")
+	cfg := config.Config{StateDir: t.TempDir(), GvisorPlatform: "kvm", GvisorRunRoot: filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "vora-gvisor-itest")}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	subtree, err := cgroup.NewSubtree()
+	if err != nil {
+		t.Skipf("cgroup subtree unavailable: %v", err)
+	}
+	backend, err := gvisor.New(cfg, logger, subtree)
+	if err != nil {
+		t.Skipf("gvisor backend unavailable: %v", err)
+	}
+	id := ulid.NewSandbox()
+	ws := workspace.NewManager(cfg.SandboxesDir())
+	wsp := ws.Paths(id)
+	wsp.RootfsDir = rootfs
+	if _, err := ws.Create(wsp); err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Destroy(id) })
+	ctx := context.Background()
+	h, err := backend.Create(ctx, runtime.SandboxSpec{
+		ID: id, Image: "base",
+		Resources: runtime.ResourceLimits{CPUMillis: 1000, MemoryBytes: 256 << 20, Pids: 64},
+		Network:   runtime.NetworkPolicy{Mode: runtime.NetworkNone},
+		TTL:       time.Minute, Workspace: wsp,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := backend.Start(ctx, h); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = backend.Destroy(context.Background(), h) })
+
+	started := time.Now()
+	stream, err := backend.Exec(ctx, h, runtime.ExecRequest{Command: "/bin/sleep", Args: []string{"60"}, Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	var reason runtime.ExitReason
+	for {
+		chunk, err := stream.Recv()
+		if err != nil {
+			break
+		}
+		if chunk.Exit != nil {
+			reason = chunk.Exit.Reason
+		}
+	}
+	stream.Close()
+	if reason != runtime.ReasonTimeout {
+		t.Fatalf("reason = %s, want %s", reason, runtime.ReasonTimeout)
+	}
+	// The command holds the exec's pipes while it runs, so a stream that only
+	// ends after `sleep 60` finished on its own means nothing killed it.
+	if elapsed := time.Since(started); elapsed > 20*time.Second {
+		t.Fatalf("exec with a 1s timeout took %v to finish: the command was not killed", elapsed)
+	}
+
+	// The pattern is written so this shell's own command line does not match it.
+	const survivors = `cat /proc/[0-9]*/cmdline 2>/dev/null | tr '\0' ' ' | grep -c 'sle[e]p 60'`
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		out := strings.TrimSpace(runGvisor(t, backend, h, "/bin/sh", []string{"-c", survivors}))
+		if out == "0" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("`sleep 60` was still running in the sandbox after its exec timed out (matches: %s)", out)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 }
