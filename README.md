@@ -72,7 +72,9 @@ snapshots. Written in Go, with no Kubernetes in the path.
   outside its own writable roots).
 - **Audit trail** behind a `Store` interface: local JSONL, or **PostgreSQL /
   Supabase** (`VORA_AUDIT_DSN`), with lifecycle events, per-execution records,
-  and restricted-network decisions (`vora logs --egress`).
+  and restricted-network decisions (`vora logs --egress`). The trail outlives
+  the sandbox: destroy never deletes it, and only an opt-in
+  `VORA_AUDIT_RETENTION` age limit does ([ADR 026](docs/adr/026-audit-retention.md)).
 - **Prometheus metrics** at `127.0.0.1:9101/metrics`, and **OpenTelemetry
 tracing** across API → runner → runtime (off unless
 `OTEL_EXPORTER_OTLP_ENDPOINT` is set), with trace ids in logs and an
@@ -433,8 +435,9 @@ Configuration is via environment variables: `VORA_STATE_DIR`, `VORA_SOCKET`,
 `VORA_GVISOR_PLATFORM` (`kvm`/`systrap`), `VORA_GVISOR_ROOT`, `VORA_RUNSC`,
 `VORA_CONTAINERD_ADDRESS`, `VORA_CONTAINERD_NAMESPACE` (default `vora`),
 `VORA_CONTAINERD_SNAPSHOTTER` (default `native`), `VORA_IMAGES_MODE`
-(`auto`/`containerd`/`cache`), and `VORA_AUDIT_DSN` (PostgreSQL/Supabase;
-omitted → local JSONL).
+(`auto`/`containerd`/`cache`), `VORA_AUDIT_DSN` (PostgreSQL/Supabase;
+omitted → local JSONL; set but unreachable → the runner refuses to start), and
+`VORA_AUDIT_RETENTION` (duration; unset keeps local audit trails forever).
 
 Network-restricted sandbox:
 

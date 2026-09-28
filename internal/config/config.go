@@ -38,8 +38,11 @@ type Config struct {
 	MaxSandboxesPerTenant int32
 	MaxSnapshotsPerTenant int32
 	MaxTTL                time.Duration
-	DefaultDiskBytes      int64
-	MaxDiskBytes          int64
+	// AuditRetention is how long a finished sandbox's local audit trail is
+	// kept. Zero keeps it forever.
+	AuditRetention   time.Duration
+	DefaultDiskBytes int64
+	MaxDiskBytes     int64
 	// MaxSnapshotBytes caps one on-disk snapshot archive.
 	MaxSnapshotBytes int64
 	// MetricsAddr is the listen address for the Prometheus /metrics endpoint.
@@ -278,6 +281,21 @@ func Default() (Config, error) {
 		c.DefaultTTL = 30 * time.Minute
 	}
 	return c, nil
+}
+
+// AuditRetentionFromEnv parses VORA_AUDIT_RETENTION. It is separate from
+// Default because only the runner uses it: the CLI also calls Default, and a
+// runner-only typo must not break every CLI command.
+func AuditRetentionFromEnv() (time.Duration, error) {
+	v := os.Getenv("VORA_AUDIT_RETENTION")
+	if v == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("invalid VORA_AUDIT_RETENTION %q (want positive duration)", v)
+	}
+	return d, nil
 }
 
 func userStateDir() string {

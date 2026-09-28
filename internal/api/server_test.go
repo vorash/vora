@@ -817,3 +817,20 @@ func TestTraceHeaderAbsentWithoutSpan(t *testing.T) {
 		t.Fatalf("X-Trace-Id = %q, want empty", got)
 	}
 }
+
+// The runner assigns execution IDs; a caller-chosen one would let a later exec
+// overwrite an earlier audit record, so the API refuses it at the boundary.
+func TestExecRejectsCallerChosenExecutionID(t *testing.T) {
+	fr := &fakeRunner{chunks: []*v1.ExecChunk{
+		{Payload: &v1.ExecChunk_Exit{Exit: &v1.ExecExit{ExitCode: 0, Reason: v1.ExitReason_EXITED}}},
+	}}
+	_, ts := newTestServer(t, fr)
+	_ = do(t, http.MethodPost, ts.URL+"/v1/sandboxes", bootstrap, &v1.SandboxSpec{Image: "vora/base"}).Body.Close()
+
+	resp := do(t, http.MethodPost, ts.URL+"/v1/sandboxes/sbx_test/exec", bootstrap,
+		&v1.ExecRequest{Command: "true", ExecutionId: "exe_chosen_by_caller"})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
