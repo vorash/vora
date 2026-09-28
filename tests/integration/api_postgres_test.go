@@ -127,6 +127,26 @@ func TestPostgresAPIStore(t *testing.T) {
 	if err := store.SetRoute(ctx, route); err != nil {
 		t.Fatalf("set route (idempotent): %v", err)
 	}
+	// A destroyed sandbox keeps its route as a tombstone so its audit trail
+	// stays reachable; the flag must survive the upsert and both read paths,
+	// or placement would keep charging the runner for it.
+	tombstone := route
+	tombstone.Destroyed = true
+	if err := store.SetRoute(ctx, tombstone); err != nil {
+		t.Fatalf("mark route destroyed: %v", err)
+	}
+	if got, err := store.Route(ctx, "sbx_pg_test"); err != nil || !got.Destroyed {
+		t.Fatalf("destroyed route = %+v, %v", got, err)
+	}
+	listed, err := store.ListRoutes(ctx)
+	if err != nil {
+		t.Fatalf("list routes: %v", err)
+	}
+	for _, r := range listed {
+		if r.SandboxID == "sbx_pg_test" && !r.Destroyed {
+			t.Fatalf("listed route lost the destroyed flag: %+v", r)
+		}
+	}
 	legacy := api.SandboxRoute{SandboxID: "sbx_pg_legacy", RunnerID: "run_pg_test"}
 	if err := store.SetRoute(ctx, legacy); err != nil {
 		t.Fatalf("set legacy route: %v", err)

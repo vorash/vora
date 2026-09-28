@@ -51,6 +51,7 @@ alter table sandbox_routes add column if not exists tenant_id text not null defa
 alter table sandbox_routes add column if not exists agent_id text not null default '';
 alter table sandbox_routes add column if not exists cpu_millis bigint not null default 0;
 alter table sandbox_routes add column if not exists memory_bytes bigint not null default 0;
+alter table sandbox_routes add column if not exists destroyed boolean not null default false;
 create index if not exists sandbox_routes_tenant_idx on sandbox_routes (tenant_id);
 
 create table if not exists snapshot_routes (
@@ -239,17 +240,18 @@ func (s *PostgresStore) Runner(ctx context.Context, id string) (Runner, error) {
 
 func (s *PostgresStore) SetRoute(ctx context.Context, route SandboxRoute) error {
 	_, err := s.pool.Exec(ctx,
-		`insert into sandbox_routes (sandbox_id, runner_id, tenant_id, agent_id, cpu_millis, memory_bytes) values ($1,$2,$3,$4,$5,$6)
+		`insert into sandbox_routes (sandbox_id, runner_id, tenant_id, agent_id, cpu_millis, memory_bytes, destroyed) values ($1,$2,$3,$4,$5,$6,$7)
 		 on conflict (sandbox_id) do update set runner_id = excluded.runner_id, tenant_id = excluded.tenant_id,
-		   agent_id = excluded.agent_id, cpu_millis = excluded.cpu_millis, memory_bytes = excluded.memory_bytes`,
-		route.SandboxID, route.RunnerID, route.TenantID, route.AgentID, route.CPUMillis, route.MemoryBytes)
+		   agent_id = excluded.agent_id, cpu_millis = excluded.cpu_millis, memory_bytes = excluded.memory_bytes,
+		   destroyed = excluded.destroyed`,
+		route.SandboxID, route.RunnerID, route.TenantID, route.AgentID, route.CPUMillis, route.MemoryBytes, route.Destroyed)
 	return err
 }
 
 func (s *PostgresStore) Route(ctx context.Context, sandboxID string) (SandboxRoute, error) {
 	route := SandboxRoute{SandboxID: sandboxID}
-	err := s.pool.QueryRow(ctx, `select runner_id, tenant_id, agent_id, cpu_millis, memory_bytes from sandbox_routes where sandbox_id = $1`, sandboxID).
-		Scan(&route.RunnerID, &route.TenantID, &route.AgentID, &route.CPUMillis, &route.MemoryBytes)
+	err := s.pool.QueryRow(ctx, `select runner_id, tenant_id, agent_id, cpu_millis, memory_bytes, destroyed from sandbox_routes where sandbox_id = $1`, sandboxID).
+		Scan(&route.RunnerID, &route.TenantID, &route.AgentID, &route.CPUMillis, &route.MemoryBytes, &route.Destroyed)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SandboxRoute{}, ErrNotFound
 	}
@@ -257,7 +259,7 @@ func (s *PostgresStore) Route(ctx context.Context, sandboxID string) (SandboxRou
 }
 
 func (s *PostgresStore) ListRoutes(ctx context.Context) ([]SandboxRoute, error) {
-	rows, err := s.pool.Query(ctx, `select sandbox_id, runner_id, tenant_id, agent_id, cpu_millis, memory_bytes from sandbox_routes`)
+	rows, err := s.pool.Query(ctx, `select sandbox_id, runner_id, tenant_id, agent_id, cpu_millis, memory_bytes, destroyed from sandbox_routes`)
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +267,7 @@ func (s *PostgresStore) ListRoutes(ctx context.Context) ([]SandboxRoute, error) 
 	var out []SandboxRoute
 	for rows.Next() {
 		var r SandboxRoute
-		if err := rows.Scan(&r.SandboxID, &r.RunnerID, &r.TenantID, &r.AgentID, &r.CPUMillis, &r.MemoryBytes); err != nil {
+		if err := rows.Scan(&r.SandboxID, &r.RunnerID, &r.TenantID, &r.AgentID, &r.CPUMillis, &r.MemoryBytes, &r.Destroyed); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

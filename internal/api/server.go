@@ -476,19 +476,35 @@ func hideRunnerID(key APIKey, sb *v1.Sandbox) {
 	}
 }
 
+// destroySandbox stops a sandbox but keeps its route, marked destroyed: the
+// runner keeps the audit trail as a tombstone, and the route is how the API
+// reaches it. A runner that no longer knows the sandbox (its tombstone was
+// pruned by retention) drops the route instead.
 func (s *Server) destroySandbox(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	rc, err := s.runnerFor(r.Context(), id)
+	route, err := s.authorizedRoute(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	rc, err := s.runnerByID(r.Context(), route.RunnerID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	defer rc.Close()
 	if err := rc.DestroySandboxAs(r.Context(), id, actorFromKey(principalFrom(r.Context()).key)); err != nil {
+		if status.Code(err) == codes.NotFound {
+			_ = s.store.DeleteRoute(r.Context(), id)
+		}
 		writeGRPCError(w, err)
 		return
 	}
-	_ = s.store.DeleteRoute(r.Context(), id)
+	route.Destroyed = true
+	if err := s.store.SetRoute(r.Context(), route); err != nil {
+		writeError(w, http.StatusInternalServerError, "sandbox destroyed but route update failed")
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -952,6 +968,9 @@ func (s *Server) committedByRunner(ctx context.Context) map[string]sandboxResour
 	}
 	out := make(map[string]sandboxResources, len(routes))
 	for _, r := range routes {
+		if r.Destroyed {
+			continue
+		}
 		c := out[r.RunnerID]
 		c.cpu += r.CPUMillis
 		c.mem += r.MemoryBytes
