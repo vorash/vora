@@ -38,8 +38,11 @@ type Config struct {
 	MaxSandboxesPerTenant int32
 	MaxSnapshotsPerTenant int32
 	MaxTTL                time.Duration
-	DefaultDiskBytes      int64
-	MaxDiskBytes          int64
+	// AuditRetention is how long a finished sandbox's local audit trail is
+	// kept. Zero keeps it forever.
+	AuditRetention   time.Duration
+	DefaultDiskBytes int64
+	MaxDiskBytes     int64
 	// MaxSnapshotBytes caps one on-disk snapshot archive.
 	MaxSnapshotBytes int64
 	// MetricsAddr is the listen address for the Prometheus /metrics endpoint.
@@ -199,6 +202,13 @@ func Default() (Config, error) {
 			return Config{}, fmt.Errorf("invalid VORA_MAX_TTL %q (want positive duration)", v)
 		}
 		c.MaxTTL = d
+	}
+	if v := os.Getenv("VORA_AUDIT_RETENTION"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return Config{}, fmt.Errorf("invalid VORA_AUDIT_RETENTION %q (want positive duration)", v)
+		}
+		c.AuditRetention = d
 	}
 	if v := os.Getenv("VORA_MAX_SNAPSHOT_BYTES"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)

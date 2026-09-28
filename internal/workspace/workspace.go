@@ -80,11 +80,13 @@ func (m *Manager) Destroy(id string) error {
 	return nil
 }
 
-// Clean removes a sandbox's mutable directories and logs but keeps the root
-// and config.json so a destroyed sandbox remains as a tombstone record.
+// Clean removes a sandbox's mutable directories but keeps the root, config.json
+// and logs/ so a destroyed sandbox remains as a tombstone with its audit trail.
+// The workload can destroy its own sandbox, so destroy must never erase the
+// record of what it ran.
 func (m *Manager) Clean(id string) error {
 	spec := m.Paths(id)
-	for _, d := range []string{spec.WorkspaceDir, spec.HomeDir, spec.IPCDir, filepath.Join(spec.RootDir, logsDir)} {
+	for _, d := range []string{spec.WorkspaceDir, spec.HomeDir, spec.IPCDir} {
 		if err := os.RemoveAll(d); err != nil {
 			return fmt.Errorf("workspace: clean %s: %w", d, err)
 		}

@@ -42,6 +42,19 @@ import (
 	"github.com/vorash/vora/internal/version"
 )
 
+// openAudit connects to the Postgres audit store and applies its schema.
+func openAudit(ctx context.Context, dsn string) (*postgres.Store, error) {
+	store, err := postgres.Open(ctx, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("audit: postgres unavailable: %w", err)
+	}
+	if err := store.Migrate(ctx); err != nil {
+		store.Close()
+		return nil, fmt.Errorf("audit: migration failed: %w", err)
+	}
+	return store, nil
+}
+
 func verifyAPIIdentity(cert *x509.Certificate, identity string) error {
 	for _, name := range cert.DNSNames {
 		if name == identity {
@@ -122,21 +135,19 @@ func run() error {
 	server.SetMetrics(metrics)
 
 	// Configure durable audit before exposing any runner endpoint or starting a
-	// restricted-network proxy.
+	// restricted-network proxy. With a DSN set, an unreachable or unmigratable
+	// database is fatal: serving on the ephemeral JSONL store instead would hand
+	// the operator a weaker audit guarantee than they configured.
 	if dsn := os.Getenv("VORA_AUDIT_DSN"); dsn != "" {
 		auditCtx, auditCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		auditStore, err := postgres.Open(auditCtx, dsn)
-		if err != nil {
-			logger.Warn("audit: postgres unavailable, using jsonl", "error", err)
-		} else if err := auditStore.Migrate(auditCtx); err != nil {
-			logger.Warn("audit: migration failed, using jsonl", "error", err)
-			auditStore.Close()
-		} else {
-			server.SetAudit(auditStore)
-			defer auditStore.Close()
-			logger.Info("audit store: postgres")
-		}
+		auditStore, err := openAudit(auditCtx, dsn)
 		auditCancel()
+		if err != nil {
+			return err
+		}
+		server.SetAudit(auditStore)
+		defer auditStore.Close()
+		logger.Info("audit store: postgres")
 	}
 
 	manager := registerBackends(cfg, registry, logger, server.RecordEgress)
@@ -331,6 +342,9 @@ func run() error {
 				}
 				if err := server.EnforceDiskQuota(ctx); err != nil {
 					logger.Warn("disk quota enforcer failed", "error", err)
+				}
+				if err := server.PruneAudit(ctx); err != nil {
+					logger.Warn("audit retention failed", "error", err)
 				}
 			}
 		}

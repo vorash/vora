@@ -46,3 +46,36 @@ func TestEgressLimitsRejectInvalidValues(t *testing.T) {
 		})
 	}
 }
+
+// The audit trail is kept forever unless the operator opts into an age limit:
+// deleting evidence must be a decision, never a default.
+func TestAuditRetentionDefaultsToKeepForever(t *testing.T) {
+	t.Setenv("VORA_AUDIT_RETENTION", "")
+	cfg, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AuditRetention != 0 {
+		t.Fatalf("AuditRetention = %s, want 0 (keep forever)", cfg.AuditRetention)
+	}
+
+	t.Setenv("VORA_AUDIT_RETENTION", "720h")
+	cfg, err = Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AuditRetention != 720*time.Hour {
+		t.Fatalf("AuditRetention = %s, want 720h", cfg.AuditRetention)
+	}
+}
+
+func TestAuditRetentionRejectsInvalidValues(t *testing.T) {
+	for _, v := range []string{"0s", "-1h", "soon"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv("VORA_AUDIT_RETENTION", v)
+			if _, err := Default(); err == nil {
+				t.Fatal("expected invalid value to fail")
+			}
+		})
+	}
+}

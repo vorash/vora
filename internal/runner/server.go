@@ -553,6 +553,7 @@ func (s *Server) recordExec(sandboxID string, req runtime.ExecRequest, started t
 		EgressDenied:    denied,
 	}
 	if err := s.audit.AppendExec(context.Background(), sandboxID, rec); err != nil {
+		s.metrics.AuditWriteFailedTotal.Inc()
 		s.logger.Warn("write exec record failed", "sandbox_id", sandboxID, "execution_id", req.ExecutionID, "error", err)
 	}
 }
@@ -771,6 +772,33 @@ func (s *Server) ReapExpired(ctx context.Context) error {
 		if err := s.destroy(ctx, rec.ID, ""); err != nil {
 			s.logger.Warn("destroy expired sandbox failed", "sandbox_id", rec.ID, "error", err)
 		}
+	}
+	return nil
+}
+
+// PruneAudit removes the tombstone, including the local audit trail, of
+// sandboxes that finished longer ago than the configured retention. Retention
+// is off by default: destroy never deletes audit, only this reaper does. It
+// only applies to the local JSONL trail: with an external audit store the
+// tombstone is what makes that store's rows reachable through the API.
+func (s *Server) PruneAudit(_ context.Context) error {
+	if _, local := s.audit.(*jsonl.Store); !local || s.cfg.AuditRetention <= 0 {
+		return nil
+	}
+	recs, err := s.store.List()
+	if err != nil {
+		return err
+	}
+	cutoff := time.Now().Add(-s.cfg.AuditRetention)
+	for _, rec := range recs {
+		if !rec.State.Terminal() || !rec.UpdatedAt.Before(cutoff) {
+			continue
+		}
+		if err := s.store.Delete(rec.ID); err != nil {
+			s.logger.Warn("prune audit failed", "sandbox_id", rec.ID, "error", err)
+			continue
+		}
+		s.logger.Info("audit trail pruned", "sandbox_id", rec.ID, "retention", s.cfg.AuditRetention.String())
 	}
 	return nil
 }

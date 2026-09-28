@@ -52,3 +52,29 @@ func TestCreateRejectsEmptyRoot(t *testing.T) {
 		t.Fatal("Create with empty root should fail")
 	}
 }
+
+// The workload can destroy its own sandbox, so Clean must leave the audit
+// trail in place: dropping it would let the code under audit erase the record.
+func TestCleanKeepsAuditLogs(t *testing.T) {
+	m := NewManager(t.TempDir())
+	spec, err := m.Create(m.Paths(testID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	execRecord := m.ExecLogDir(testID) + "/exe_1.json"
+	if err := os.WriteFile(execRecord, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Clean(testID); err != nil {
+		t.Fatalf("Clean: %v", err)
+	}
+	if _, err := os.Stat(execRecord); err != nil {
+		t.Fatalf("audit record removed by Clean: %v", err)
+	}
+	for _, d := range []string{spec.WorkspaceDir, spec.HomeDir, spec.IPCDir} {
+		if _, err := os.Stat(d); !os.IsNotExist(err) {
+			t.Fatalf("%s should be removed by Clean: %v", d, err)
+		}
+	}
+}
