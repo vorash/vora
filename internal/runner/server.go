@@ -62,8 +62,13 @@ type Server struct {
 	brokerCreds map[string][]egress.Credential
 	denyMu      sync.Mutex
 	denyWindows map[string]denyWindow
-	createMu    sync.Mutex
-	snapshotMu  sync.Mutex
+	// allowedWindow is the aggregation window for allowed egress decisions.
+	allowedWindow    time.Duration
+	allowMu          sync.Mutex
+	allowedWindows   map[allowedKey]*allowedCount
+	allowedSandboxes map[string]*allowedCount
+	createMu         sync.Mutex
+	snapshotMu       sync.Mutex
 	// sandboxLocks serialise destroy and audit pruning per sandbox, striped by
 	// id so the set stays bounded however many tombstones accumulate.
 	sandboxLocks [64]sync.Mutex
@@ -79,6 +84,31 @@ type denyWindow struct {
 	start      time.Time
 	written    int
 	suppressed int
+}
+
+// Allowed decisions are audited individually up to allowedBudget per key per
+// window; the rest are counted and written as one summary row. Every allowed
+// decision stays accounted for, but a sandbox cannot turn an allowlisted name
+// into an unbounded stream of synchronous audit writes.
+//
+// allowedSandboxBudget caps a sandbox's individual rows per window across all
+// keys: allowlisting a domain allows every subdomain, so a sandbox that queries
+// fresh names under a wildcard-DNS domain would otherwise get a new per-host
+// budget, and a new map entry, for each one. Past the cap, names without an
+// open window are counted under the sandbox's overflow host instead.
+const (
+	allowedBudget        = 10
+	allowedSandboxBudget = 100
+	allowedOverflowHost  = "*"
+	defaultAllowedWindow = 10 * time.Second
+)
+
+type allowedKey struct{ sandboxID, host, alias, reason string }
+
+type allowedCount struct {
+	start      time.Time
+	written    int
+	suppressed int64
 }
 
 type sandboxHandle struct {
@@ -108,6 +138,10 @@ func NewServer(cfg config.Config, store *sandbox.Store, registry *runtime.Regist
 		brokerCreds: make(map[string][]egress.Credential),
 		denyWindows: make(map[string]denyWindow),
 		localAudit:  true,
+
+		allowedWindow:    defaultAllowedWindow,
+		allowedWindows:   make(map[allowedKey]*allowedCount),
+		allowedSandboxes: make(map[string]*allowedCount),
 	}
 	s.setQuotaModeMetric()
 	return s
@@ -194,6 +228,20 @@ func (s *Server) RecordEgress(event egress.Event) error {
 		window.written++
 		s.denyWindows[event.SandboxID] = window
 	}
+	if event.Allowed {
+		summary, key, suppressed, write := s.admitAllowed(record)
+		if summary != nil {
+			if err := s.audit.AppendEgress(context.Background(), event.SandboxID, *summary); err != nil {
+				s.restoreSuppressed(key, suppressed)
+				s.metrics.AuditWriteFailedTotal.Inc()
+				s.logger.Error("write egress summary failed", "sandbox_id", event.SandboxID, "host", event.Host, "error", err)
+				return err
+			}
+		}
+		if !write {
+			return nil
+		}
+	}
 	if err := s.audit.AppendEgress(context.Background(), event.SandboxID, record); err != nil {
 		s.metrics.AuditWriteFailedTotal.Inc()
 		s.logger.Error("write egress audit failed", "sandbox_id", event.SandboxID, "host", event.Host, "alias", event.Alias, "allowed", event.Allowed, "error", err)
@@ -203,6 +251,115 @@ func (s *Server) RecordEgress(event egress.Event) error {
 		s.logger.Info("egress denied", "sandbox_id", event.SandboxID, "host", event.Host, "alias", event.Alias, "reason", event.Reason)
 	}
 	return nil
+}
+
+func keyOf(r sandbox.EgressRecord) allowedKey {
+	return allowedKey{r.SandboxID, r.Host, r.Alias, r.Reason}
+}
+
+func allowedSummary(k allowedKey, n int64, at time.Time, actor sandbox.Actor) sandbox.EgressRecord {
+	return sandbox.EgressRecord{
+		SandboxID: k.sandboxID, Actor: actor, Host: k.host, Alias: k.alias, Allowed: true,
+		Reason:    fmt.Sprintf("%d additional allowed decisions aggregated (%s)", n, k.reason),
+		Timestamp: at.UTC(),
+	}
+}
+
+// admitAllowed decides whether an allowed decision is written individually,
+// and returns the key it was counted under. It returns a summary of that key's
+// previous window's suppressed decisions when the window has ended. It never
+// holds its lock across an audit write, so one sandbox's flood cannot serialise
+// every other tenant's allowed egress.
+func (s *Server) admitAllowed(record sandbox.EgressRecord) (summary *sandbox.EgressRecord, k allowedKey, suppressed int64, write bool) {
+	k = keyOf(record)
+	now := time.Now()
+	s.allowMu.Lock()
+	defer s.allowMu.Unlock()
+	sb := s.allowedSandboxes[k.sandboxID]
+	if sb == nil || now.Sub(sb.start) >= s.allowedWindow {
+		sb = &allowedCount{start: now}
+		s.allowedSandboxes[k.sandboxID] = sb
+	}
+	overflow := s.allowedWindows[k] == nil && sb.written >= allowedSandboxBudget
+	if overflow {
+		k.host = allowedOverflowHost
+	}
+	c := s.allowedWindows[k]
+	if c == nil || now.Sub(c.start) >= s.allowedWindow {
+		if c != nil && c.suppressed > 0 {
+			sum := allowedSummary(k, c.suppressed, now, record.Actor)
+			summary, suppressed = &sum, c.suppressed
+		}
+		c = &allowedCount{start: now}
+		s.allowedWindows[k] = c
+	}
+	if overflow || c.written >= allowedBudget || sb.written >= allowedSandboxBudget {
+		c.suppressed++
+		return summary, k, suppressed, false
+	}
+	c.written++
+	sb.written++
+	return summary, k, suppressed, true
+}
+
+// restoreSuppressed puts back counts whose summary could not be persisted, so
+// a failed write does not lose them.
+func (s *Server) restoreSuppressed(k allowedKey, n int64) {
+	s.allowMu.Lock()
+	defer s.allowMu.Unlock()
+	c := s.allowedWindows[k]
+	if c == nil {
+		c = &allowedCount{start: time.Now()}
+		s.allowedWindows[k] = c
+	}
+	c.suppressed += n
+}
+
+// FlushEgress writes out the suppressed-decision counts of aggregation windows
+// that have ended, so they are recorded even if the sandbox goes quiet.
+func (s *Server) FlushEgress(ctx context.Context) error {
+	return s.flushAllowed(ctx, "", false)
+}
+
+// flushAllowed writes summaries for ended windows (or, with all set, every
+// window of sandboxID) and forgets them.
+func (s *Server) flushAllowed(ctx context.Context, sandboxID string, all bool) error {
+	now := time.Now()
+	type pending struct {
+		key allowedKey
+		n   int64
+	}
+	var due []pending
+	s.allowMu.Lock()
+	for k, c := range s.allowedWindows {
+		if all && k.sandboxID != sandboxID || !all && now.Sub(c.start) < s.allowedWindow {
+			continue
+		}
+		if c.suppressed > 0 {
+			due = append(due, pending{k, c.suppressed})
+		}
+		delete(s.allowedWindows, k)
+	}
+	for id, sb := range s.allowedSandboxes {
+		if all && id == sandboxID || !all && now.Sub(sb.start) >= s.allowedWindow {
+			delete(s.allowedSandboxes, id)
+		}
+	}
+	s.allowMu.Unlock()
+
+	var firstErr error
+	for _, p := range due {
+		summary := allowedSummary(p.key, p.n, now, s.recordActor(p.key.sandboxID, ""))
+		if err := s.audit.AppendEgress(ctx, p.key.sandboxID, summary); err != nil {
+			s.restoreSuppressed(p.key, p.n)
+			s.metrics.AuditWriteFailedTotal.Inc()
+			s.logger.Error("write egress summary failed", "sandbox_id", p.key.sandboxID, "host", p.key.host, "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
 }
 
 // SetCgroups provides the cgroup manager, enabling reconciliation of orphaned
@@ -620,20 +777,9 @@ func (s *Server) usageDelta(ctx context.Context, backend runtime.Backend, h runt
 // egressInWindow counts restricted-network decisions inside [start, end], so an
 // execution's outbound requests and policy violations are recorded with it.
 func (s *Server) egressInWindow(sandboxID string, start, end time.Time) (allowed, denied int64) {
-	records, err := s.audit.Egress(context.Background(), sandboxID)
+	allowed, denied, err := s.audit.EgressCounts(context.Background(), sandboxID, start, end)
 	if err != nil {
 		return 0, 0
-	}
-	for _, r := range records {
-		ts := r.Timestamp.UTC()
-		if ts.Before(start) || ts.After(end) {
-			continue
-		}
-		if r.Allowed {
-			allowed++
-		} else {
-			denied++
-		}
 	}
 	return allowed, denied
 }
@@ -693,6 +839,7 @@ func (s *Server) destroy(ctx context.Context, id, keyID string) error {
 	}
 	s.delHandle(rec.ID)
 	s.dropBrokerCredentials(rec.ID)
+	_ = s.flushAllowed(ctx, rec.ID, true) // failures are logged and metered inside
 	if rec.State == sandbox.StateRunning {
 		s.metrics.SandboxRunning.Dec()
 		s.metrics.RunnerSandboxes.Dec()
