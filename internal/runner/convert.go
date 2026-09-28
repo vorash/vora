@@ -183,6 +183,7 @@ func networkPolicyToProto(n runtime.NetworkPolicy) *v1.NetworkPolicy {
 	return &v1.NetworkPolicy{
 		Mode:           networkModeToProto(n.Mode),
 		AllowedDomains: n.AllowedDomains,
+		BrokerAliases:  n.BrokerAliases,
 	}
 }
 

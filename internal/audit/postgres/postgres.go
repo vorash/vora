@@ -181,6 +181,18 @@ func (s *Store) Egress(ctx context.Context, sandboxID string) ([]sandbox.EgressR
 	return records, rows.Err()
 }
 
+// EgressCounts implements audit.Store.
+func (s *Store) EgressCounts(ctx context.Context, sandboxID string, start, end time.Time) (allowed, denied int64, err error) {
+	err = s.pool.QueryRow(ctx,
+		`SELECT count(*) FILTER (WHERE allowed), count(*) FILTER (WHERE NOT allowed)
+		 FROM sandbox_egress WHERE sandbox_id = $1 AND occurred_at BETWEEN $2 AND $3`,
+		sandboxID, start, end).Scan(&allowed, &denied)
+	if err != nil {
+		return 0, 0, fmt.Errorf("audit/postgres: count egress: %w", err)
+	}
+	return allowed, denied, nil
+}
+
 // Close implements audit.Store.
 func (s *Store) Close() error {
 	s.pool.Close()

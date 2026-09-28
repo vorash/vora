@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
+	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/sandbox"
 	"github.com/vorash/vora/internal/snapshot"
 	"github.com/vorash/vora/internal/ulid"
@@ -203,13 +204,26 @@ func (s *Server) ForkSnapshot(ctx context.Context, req *v1.ForkSnapshotRequest) 
 	if len(creds) > 0 {
 		s.stageBrokerCredentials(rec.ID, creds)
 	}
-	// A fork that fails to start is left as a FAILED record, exactly like a
-	// create whose start fails: inspectable and destroyable, never hidden.
+	// The caller only learns the fork's ID from a successful response, so a fork
+	// that fails to start could never be destroyed by them: release it here
+	// rather than strand its restored state and capacity slot.
 	started, err := s.StartSandbox(ctx, &v1.StartSandboxRequest{SandboxId: rec.ID, Actor: req.GetActor()})
 	if err != nil {
+		s.abortFork(ctx, rec.ID, req.GetActor().GetKeyId())
 		return nil, err
 	}
 	return &v1.ForkSnapshotResponse{Sandbox: started}, nil
+}
+
+// abortFork marks a fork that could not start FAILED and destroys it, which
+// releases its quota and removes its restored directories.
+func (s *Server) abortFork(ctx context.Context, id, keyID string) {
+	if rec, err := s.store.Load(id); err == nil && rec.State == sandbox.StateRequested {
+		s.fail(rec, runtime.ReasonRuntimeFailure, keyID)
+	}
+	if err := s.destroy(ctx, id, keyID); err != nil {
+		s.logger.Warn("abort failed fork", "sandbox_id", id, "error", err)
+	}
 }
 
 func (s *Server) snapshotLoadError(err error, id string) error {

@@ -5,6 +5,7 @@ package audit
 
 import (
 	"context"
+	"time"
 
 	"github.com/vorash/vora/internal/sandbox"
 )
@@ -23,6 +24,9 @@ type Store interface {
 	AppendEgress(ctx context.Context, sandboxID string, record sandbox.EgressRecord) error
 	// Egress returns policy decisions oldest first.
 	Egress(ctx context.Context, sandboxID string) ([]sandbox.EgressRecord, error)
+	// EgressCounts returns how many allowed and denied decisions were recorded
+	// within [start, end], without loading the sandbox's whole history.
+	EgressCounts(ctx context.Context, sandboxID string, start, end time.Time) (allowed, denied int64, err error)
 	// Close releases resources.
 	Close() error
 }

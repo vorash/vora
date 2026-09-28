@@ -48,17 +48,17 @@ func (s *systemd) available() error {
 	return nil
 }
 
-// Start launches a detached transient service with the requested limits.
-func (s *systemd) Start(ctx context.Context, req StartRequest) (*Unit, error) {
-	if len(req.Argv) == 0 {
-		return nil, fmt.Errorf("cgroup: empty argv")
-	}
+// runArgs builds the systemd-run command line for a transient service.
+func (s *systemd) runArgs(req StartRequest) []string {
 	args := []string{}
 	if s.mode == config.SystemdUser {
 		args = append(args, "--user")
 	}
 	args = append(args,
 		"--unit="+req.Name,
+		// The argv carries tenant-controlled env values; without this systemd
+		// expands ${VAR} in them from the service manager's own environment.
+		"--expand-environment=no",
 		"--property=MemoryMax="+strconv.FormatInt(req.Limits.MemoryBytes, 10),
 		"--property=MemorySwapMax=0",
 		"--property=TasksMax="+strconv.FormatInt(req.Limits.Pids, 10),
@@ -72,7 +72,15 @@ func (s *systemd) Start(ctx context.Context, req StartRequest) (*Unit, error) {
 		args = append(args, "--setenv="+e)
 	}
 	args = append(args, "--")
-	args = append(args, req.Argv...)
+	return append(args, req.Argv...)
+}
+
+// Start launches a detached transient service with the requested limits.
+func (s *systemd) Start(ctx context.Context, req StartRequest) (*Unit, error) {
+	if len(req.Argv) == 0 {
+		return nil, fmt.Errorf("cgroup: empty argv")
+	}
+	args := s.runArgs(req)
 
 	out, err := exec.CommandContext(ctx, "systemd-run", args...).CombinedOutput()
 	if err != nil {
