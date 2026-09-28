@@ -50,6 +50,8 @@ type fakeRunner struct {
 	deletedSnaps   []string
 	forked         []string
 	snapshotTenant string
+	snapshotSpec   *v1.SandboxSpec
+	forkCreds      [][]*v1.BrokerCredential
 	actors         []*v1.Actor
 	closed         int
 }
@@ -146,12 +148,16 @@ func (f *fakeRunner) SnapshotSandbox(_ context.Context, id string) (*v1.Snapshot
 }
 
 func (f *fakeRunner) GetSnapshot(_ context.Context, id string) (*v1.Snapshot, error) {
+	spec := &v1.SandboxSpec{SandboxId: "sbx_test", Resources: &v1.ResourceLimits{CpuMillis: 1, MemoryBytes: 1}}
+	if f.snapshotSpec != nil {
+		spec = f.snapshotSpec
+	}
 	return &v1.Snapshot{
 		Id:        id,
 		SandboxId: "sbx_test",
 		TenantId:  f.snapshotTenant,
 		RunnerId:  "run_test",
-		Spec:      &v1.SandboxSpec{SandboxId: "sbx_test", Resources: &v1.ResourceLimits{CpuMillis: 1, MemoryBytes: 1}},
+		Spec:      spec,
 	}, nil
 }
 
@@ -164,8 +170,13 @@ func (f *fakeRunner) DeleteSnapshot(_ context.Context, id string) error {
 	return nil
 }
 
-func (f *fakeRunner) ForkSnapshotWithCredentials(_ context.Context, id string, _ []*v1.BrokerCredential, actor *v1.Actor) (*v1.Sandbox, error) {
+func (f *fakeRunner) ForkSnapshotWithCredentials(_ context.Context, id string, creds []*v1.BrokerCredential, actor *v1.Actor) (*v1.Sandbox, error) {
 	f.forked = append(f.forked, id)
+	kept := make([]*v1.BrokerCredential, 0, len(creds))
+	for _, c := range creds {
+		kept = append(kept, proto.Clone(c).(*v1.BrokerCredential))
+	}
+	f.forkCreds = append(f.forkCreds, kept)
 	f.actors = append(f.actors, actor)
 	return &v1.Sandbox{
 		Id:    "sbx_fork",

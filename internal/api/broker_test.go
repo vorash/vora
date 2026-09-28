@@ -226,3 +226,33 @@ func TestCreateSandboxWithoutBrokerUnchanged(t *testing.T) {
 		t.Fatalf("credentials = %+v, want none", fr.creds)
 	}
 }
+
+// A fork inherits its snapshot's broker aliases, so the control plane must
+// resolve their credentials from the snapshot's spec and send them with the
+// fork; otherwise the runner (correctly) refuses to start it.
+func TestForkSnapshotResolvesBrokerSecrets(t *testing.T) {
+	fr, ts, secrets, key := brokerServer(t, true, true)
+	fr.snapshotTenant = "t1"
+	fr.snapshotSpec = brokeredSpec("github")
+	if err := secrets.Put(context.Background(), secret.Record{
+		TenantID: "t1", Alias: "github", Host: "api.example.com", Scheme: secret.SchemeBearer,
+	}, "ghp_brokered_secret"); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	resp := do(t, http.MethodPost, ts.URL+"/v1/sandboxes", key, brokeredSpec("github"))
+	resp.Body.Close()
+	resp = do(t, http.MethodPost, ts.URL+"/v1/sandboxes/sbx_test/snapshot", key, nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("snapshot status = %d, want 201", resp.StatusCode)
+	}
+
+	resp = do(t, http.MethodPost, ts.URL+"/v1/snapshots/snap_test/fork", key, nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("fork status = %d, want 201", resp.StatusCode)
+	}
+	if len(fr.forkCreds) != 1 || len(fr.forkCreds[0]) != 1 || fr.forkCreds[0][0].GetAlias() != "github" || fr.forkCreds[0][0].GetValue() != "ghp_brokered_secret" {
+		t.Fatalf("fork credentials = %+v, want the github credential", fr.forkCreds)
+	}
+}

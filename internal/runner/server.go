@@ -565,6 +565,7 @@ func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) 
 	creds := s.takeBrokerCredentials(rec.ID)
 	defer zeroCredentials(creds)
 	if len(rec.Spec.Network.BrokerAliases) > 0 && len(creds) == 0 {
+		s.fail(rec, runtime.ReasonRuntimeFailure, keyID)
 		return nil, status.Error(codes.FailedPrecondition, "broker credentials are unavailable; recreate the sandbox")
 	}
 	// Record the chosen backend so future RPCs and `inspect` are explicit.

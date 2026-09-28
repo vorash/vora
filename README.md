@@ -393,7 +393,8 @@ deploy/         systemd units for the system install (vora-ansible is its own re
 
 Requirements: Go 1.27+, `protoc` with `protoc-gen-go` and `protoc-gen-go-grpc`,
 Docker (to build images), Bubblewrap, `runsc` (gVisor), `rootlesskit`,
-`slirp4netns`, `fuse-overlayfs`, and a systemd user session.
+`slirp4netns`, `fuse-overlayfs`, and a systemd user session (systemd ≥ 254,
+for `systemd-run --expand-environment=no`).
 
 ```bash
 make images            # build the read-only rootfs images with Docker
