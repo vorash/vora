@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vorash/vora/internal/runtime"
+	"github.com/vorash/vora/internal/ulid"
 )
 
 // ExecRecord is the audit record for a single execution inside a sandbox.
@@ -38,8 +40,12 @@ type ExecRecord struct {
 }
 
 // WriteExecRecord writes an execution record to dir/<execution_id>.json
-// atomically.
+// atomically. Records are append-only: it fails if one already exists for the
+// ID, so a repeated ID can never replace the record of an earlier command.
 func WriteExecRecord(dir string, rec ExecRecord) error {
+	if !ulid.ValidPrefix(rec.ExecutionID, ulid.PrefixExec) {
+		return fmt.Errorf("sandbox: invalid execution id %q", rec.ExecutionID)
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -47,11 +53,24 @@ func WriteExecRecord(dir string, rec ExecRecord) error {
 	if err != nil {
 		return err
 	}
-	tmp := filepath.Join(dir, "."+rec.ExecutionID+".tmp")
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	tmp, err := os.CreateTemp(dir, "."+rec.ExecutionID+".tmp-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, filepath.Join(dir, rec.ExecutionID+".json"))
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	// Unlike rename, link refuses to replace an existing record.
+	return os.Link(tmp.Name(), filepath.Join(dir, rec.ExecutionID+".json"))
 }
 
 // ReadExecRecords returns execution records from dir, oldest first.

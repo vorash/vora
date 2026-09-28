@@ -51,6 +51,7 @@ scan (ADR 015); `TestDiskQuotaBoundsHostWrites` covers the hard path.
 | Devices | minimal `/dev` from Bubblewrap / gVisor OCI spec |
 | cgroup hierarchy | bwrap: transient systemd units. gVisor: delegated subtree under `vora-runner.service` (`Delegate=yes`) |
 | Audit trail | lives outside the workload's mounts (`logs/` is never bound into a sandbox) and survives destroy, TTL expiry, quota enforcement and reconcile, and the API keeps a destroyed sandbox's route so it stays readable; only the retention reaper (`VORA_AUDIT_RETENTION`, off by default) removes it ([ADR 026](../adr/026-audit-retention.md)) |
+| Audit record identity | execution IDs are runner-assigned and validated at the store; records are append-only, so no caller can replace or rewrite another execution's record, in its own or another sandbox |
 | Availability | memory/PID caps prevent host exhaustion; CPU quota bounds utilisation |
 
 ## Residual risks (accepted)

@@ -486,10 +486,11 @@ func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStrea
 	if err != nil {
 		return err
 	}
-	execReq := execRequestFromProto(req.GetExec())
-	if execReq.ExecutionID == "" {
-		execReq.ExecutionID = ulid.NewExec()
+	if req.GetExec().GetExecutionId() != "" {
+		return status.Error(codes.InvalidArgument, "execution_id is assigned by the runner")
 	}
+	execReq := execRequestFromProto(req.GetExec())
+	execReq.ExecutionID = ulid.NewExec()
 
 	started := time.Now().UTC()
 	execCtx, span := telemetry.Start(stream.Context(), "runtime.exec",

@@ -637,6 +637,10 @@ func (s *Server) execSandbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if req.GetExecutionId() != "" {
+		writeError(w, http.StatusBadRequest, "execution_id is assigned by the runner")
+		return
+	}
 	rc, err := s.runnerFor(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
