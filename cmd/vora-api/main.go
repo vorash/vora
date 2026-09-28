@@ -74,6 +74,45 @@ func requireJoinToken(addr, token string) error {
 	return nil
 }
 
+// requireHTTPTLS refuses a plaintext HTTP API on a non-loopback address unless
+// the operator opts in (TLS may be terminated by a proxy in front).
+func requireHTTPTLS(addr string, cfg tlsutil.Config, insecure bool) error {
+	if cfg.Enabled() || insecure {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("http address: %w", err)
+	}
+	if host == "localhost" {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("plaintext HTTP API on %s would send API keys and sandbox I/O in clear: set VORA_API_HTTP_TLS_{CERT,KEY}, bind to loopback behind a TLS proxy, or set VORA_API_HTTP_INSECURE=1", addr)
+}
+
+// minBootstrapKeyLen matches VORA_MASTER_KEY: the bootstrap key is a global
+// admin credential and must not be guessable.
+const minBootstrapKeyLen = 32
+
+func requireBootstrapKey(key string) error {
+	if key != "" && len(key) < minBootstrapKeyLen {
+		return fmt.Errorf("VORA_API_BOOTSTRAP_KEY must be at least %d characters", minBootstrapKeyLen)
+	}
+	return nil
+}
+
+// joinTokenWarning explains the exposure of a registry that authenticates
+// runners with neither a join token nor client certificates. Empty when fine.
+func joinTokenWarning(joinToken string, registryTLS tlsutil.Config) string {
+	if joinToken != "" || registryTLS.CAFile != "" {
+		return ""
+	}
+	return "runner registry has no VORA_API_JOIN_TOKEN and no client CA: any local process can register as a runner and will receive new sandboxes"
+}
+
 func main() {
 	if err := run(); err != nil {
 		slog.Error("vora-api exited with error", "error", err)
@@ -160,10 +199,17 @@ func run() error {
 	if err := requireJoinToken(*grpcFlag, joinToken); err != nil {
 		return err
 	}
+	if warning := joinTokenWarning(joinToken, registryTLS); warning != "" {
+		logger.Warn(warning, "hint", "set VORA_API_JOIN_TOKEN or VORA_API_REGISTRY_TLS_{CERT,KEY,CA}")
+	}
 	if tunnelAddr := os.Getenv("VORA_API_TUNNEL_ADDR"); tunnelAddr != "" {
 		if err := requireJoinToken(tunnelAddr, joinToken); err != nil {
 			return err
 		}
+	}
+
+	if err := requireBootstrapKey(os.Getenv("VORA_API_BOOTSTRAP_KEY")); err != nil {
+		return err
 	}
 
 	// Optional reverse tunnel: lets runners the API cannot dial (NAT) still be
@@ -211,6 +257,15 @@ func run() error {
 	})
 	defer server.Close()
 
+	httpTLS := tlsutil.Config{
+		CertFile: os.Getenv("VORA_API_HTTP_TLS_CERT"),
+		KeyFile:  os.Getenv("VORA_API_HTTP_TLS_KEY"),
+		CAFile:   os.Getenv("VORA_API_HTTP_TLS_CA"),
+	}
+	if err := requireHTTPTLS(*httpFlag, httpTLS, os.Getenv("VORA_API_HTTP_INSECURE") == "1"); err != nil {
+		return err
+	}
+
 	httpLn, err := net.Listen("tcp", *httpFlag)
 	if err != nil {
 		return fmt.Errorf("listen http %s: %w", *httpFlag, err)
@@ -227,11 +282,6 @@ func run() error {
 		ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 	}
 
-	httpTLS := tlsutil.Config{
-		CertFile: os.Getenv("VORA_API_HTTP_TLS_CERT"),
-		KeyFile:  os.Getenv("VORA_API_HTTP_TLS_KEY"),
-		CAFile:   os.Getenv("VORA_API_HTTP_TLS_CA"),
-	}
 	httpServeLn := net.Listener(httpLn)
 	if httpTLS.Enabled() {
 		cfg, err := httpTLS.Server()

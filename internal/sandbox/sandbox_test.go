@@ -150,3 +150,18 @@ func TestTransitionAppliesReason(t *testing.T) {
 		t.Fatal("illegal transition from terminal state should fail")
 	}
 }
+
+func TestStoreCreatesPrivateSandboxDirectory(t *testing.T) {
+	store := NewStore(t.TempDir())
+	id := ulid.NewSandbox()
+	if err := store.Create(&Record{ID: id, State: StateRequested}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(store.Dir(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("sandbox dir mode = %04o, want 0700", got)
+	}
+}

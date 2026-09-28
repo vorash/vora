@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/vorash/vora/internal/cgroup"
 	"github.com/vorash/vora/internal/config"
@@ -367,7 +369,7 @@ func (b *Backend) start(ctx context.Context, hd *handle, opts runOpts, resolvCon
 	// The init is Vora's static binary, copied into the ipc directory (bound at
 	// /vora) so the sandbox never depends on the image having a shell.
 	ws := hd.spec.Workspace
-	if err := os.MkdirAll(ws.IPCDir, 0o755); err != nil {
+	if err := os.MkdirAll(ws.IPCDir, 0o700); err != nil {
 		_ = group.Destroy()
 		hd.group = nil
 		return fmt.Errorf("gvisor: ipc dir: %w", err)
@@ -451,7 +453,17 @@ func (b *Backend) Exec(ctx context.Context, h runtime.Handle, req runtime.ExecRe
 		execCtx, timeoutCancel = context.WithTimeout(ctx, req.Timeout)
 		cancel = timeoutCancel
 	}
-	args := append(b.globalFlags("none"), execArgs(hd.id, req)...)
+	// runsc reports the sandbox PID of the command through -internal-pid-file
+	// (-pid-file is the host PID, which `runsc kill` cannot address), so a
+	// timeout or cancel can kill the command itself: killing only this runsc
+	// client would leave it running inside the sandbox.
+	pidDir, err := os.MkdirTemp(hd.bundleDir, "exec-")
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	pidFile := filepath.Join(pidDir, "pid")
+	args := append(b.globalFlags("none"), execArgsWithPID(hd.id, req, pidFile)...)
 	cmd := exec.CommandContext(execCtx, b.runsc, args...)
 	if len(req.Stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(req.Stdin)
@@ -459,25 +471,44 @@ func (b *Backend) Exec(ctx context.Context, h runtime.Handle, req runtime.ExecRe
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
+		os.RemoveAll(pidDir)
 		return nil, err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		cancel()
+		os.RemoveAll(pidDir)
 		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
 		cancel()
+		os.RemoveAll(pidDir)
 		return nil, err
 	}
 
 	es := &execStream{ctx: execCtx, ch: make(chan runtime.ExecChunk, 16), done: make(chan struct{}), cancel: cancel, cmd: cmd}
+	// The command's stdout/stderr pipes outlive the killed runsc client for as
+	// long as the command runs, so the kill cannot wait for them to drain.
+	go func() {
+		<-execCtx.Done()
+		if !es.finished.Load() {
+			b.killExec(hd.id, pidFile)
+		}
+		os.RemoveAll(pidDir)
+	}()
 	go es.stream(stdout, stderr)
 	return es, nil
 }
 
 func execArgs(id string, req runtime.ExecRequest) []string {
+	return execArgsWithPID(id, req, "")
+}
+
+func execArgsWithPID(id string, req runtime.ExecRequest, pidFile string) []string {
 	args := []string{"exec"}
+	if pidFile != "" {
+		args = append(args, "-internal-pid-file", pidFile)
+	}
 	if req.Cwd != "" {
 		args = append(args, "-cwd", req.Cwd)
 	}
@@ -491,6 +522,34 @@ func execArgs(id string, req runtime.ExecRequest) []string {
 	}
 	args = append(args, "--", id, req.Command)
 	return append(args, req.Args...)
+}
+
+// killExec kills the command a stopped `runsc exec` client started, using the
+// sandbox PID runsc wrote to pidFile. If the client was stopped before it
+// reported a PID there is nothing to kill.
+func (b *Backend) killExec(id, pidFile string) {
+	// runsc writes the file just after the command starts; a cancel that lands
+	// in that window would otherwise find nothing to kill.
+	var data []byte
+	var err error
+	for range 20 {
+		if data, err = os.ReadFile(pidFile); err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err != nil {
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if out, err := b.run(ctx, "kill", "-pid", strconv.Itoa(pid), "--", id, "KILL"); err != nil && !isMissing(out) {
+		b.logger.Warn("kill exec in sandbox failed", "sandbox_id", id, "pid", pid, "error", err, "output", strings.TrimSpace(out))
+	}
 }
 
 // Signal sends a signal to a sandbox.
@@ -622,6 +681,9 @@ type execStream struct {
 	cancel context.CancelFunc
 	cmd    *exec.Cmd
 	once   sync.Once
+	// finished is set once the command has run to completion, so a later
+	// cancel (the consumer closing the stream) does not kill anything.
+	finished atomic.Bool
 }
 
 func (e *execStream) Recv() (runtime.ExecChunk, error) {
@@ -662,6 +724,9 @@ func (e *execStream) stream(stdout, stderr io.Reader) {
 		} else {
 			code = -1
 		}
+	}
+	if e.ctx.Err() == nil {
+		e.finished.Store(true)
 	}
 	reason := runtime.ReasonExited
 	if errors.Is(e.ctx.Err(), context.DeadlineExceeded) {

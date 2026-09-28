@@ -62,19 +62,10 @@ func main() {
 	}
 	a := newAgent(*socket, *grace, logger)
 
-	if err := os.MkdirAll(filepath.Dir(*socket), 0o755); err != nil {
-		logger.Error("create socket dir", "error", err)
-		os.Exit(1)
-	}
-	_ = os.Remove(*socket)
-	lis, err := net.Listen("unix", *socket)
+	lis, err := listenAgent(*socket)
 	if err != nil {
 		logger.Error("listen", "socket", *socket, "error", err)
 		os.Exit(1)
-	}
-	// The socket must be reachable by the runner even across user namespaces.
-	if err := os.Chmod(*socket, 0o666); err != nil {
-		logger.Warn("chmod socket", "error", err)
 	}
 
 	grpcServer := grpc.NewServer(
@@ -104,6 +95,25 @@ func main() {
 		grpcServer.Stop()
 	}
 	os.Exit(0)
+}
+
+// listenAgent opens the agent's control socket. The socket is owned by the
+// runner's own host UID (the sandbox user namespace maps onto it), so only the
+// owner needs access; it must not be reachable by other local users.
+func listenAgent(socket string) (net.Listener, error) {
+	if err := os.MkdirAll(filepath.Dir(socket), 0o700); err != nil {
+		return nil, err
+	}
+	_ = os.Remove(socket)
+	lis, err := net.Listen("unix", socket)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(socket, 0o600); err != nil {
+		lis.Close()
+		return nil, err
+	}
+	return lis, nil
 }
 
 // pause is the gVisor init: it blocks until the sandbox is stopped, reaping

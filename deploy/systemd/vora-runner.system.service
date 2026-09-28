@@ -44,6 +44,8 @@ ProtectKernelTunables=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
 SystemCallArchitectures=native
+# The bwrap launcher clears these before running bwrap (setpriv, util-linux):
+# bwrap aborts when it holds capabilities without being setuid.
 CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN
 AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN
 UMask=0077

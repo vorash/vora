@@ -1,6 +1,7 @@
 package bwrap
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -104,5 +105,16 @@ func TestArgsBindsResolver(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(with, " "), "--ro-bind /state/sbx/resolv.conf /etc/resolv.conf") {
 		t.Fatalf("argv missing the resolv.conf bind: %v", with)
+	}
+}
+
+// The system unit gives the runner ambient CAP_SYS_ADMIN/CAP_NET_ADMIN so
+// nsenter can join a sandbox's netns, and bwrap refuses to run holding
+// capabilities when it is not setuid. The launch must clear them in between.
+func TestNsenterBwrapArgsDropCapabilitiesBeforeBwrap(t *testing.T) {
+	got := nsenterBwrapArgs(4242, "/usr/bin/bwrap", []string{"--unshare-user", "--", "/vora/vora-init"})
+	want := []string{"-t", "4242", "-n", "setpriv", "--ambient-caps=-all", "--inh-caps=-all", "--", "/usr/bin/bwrap", "--unshare-user", "--", "/vora/vora-init"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("nsenter argv = %v\nwant           %v", got, want)
 	}
 }

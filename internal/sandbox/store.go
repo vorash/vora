@@ -60,7 +60,7 @@ func (s *Store) Create(rec *Record) error {
 	if _, err := os.Stat(filepath.Join(dir, configFile)); err == nil {
 		return fmt.Errorf("sandbox: %s already exists", rec.ID)
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("sandbox: create dir: %w", err)
 	}
 	now := time.Now().UTC()
@@ -87,7 +87,7 @@ func (s *Store) write(rec *Record) error {
 		return fmt.Errorf("sandbox: marshal: %w", err)
 	}
 	dir := s.Dir(rec.ID)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("sandbox: create dir: %w", err)
 	}
 	tmp, err := os.CreateTemp(dir, "."+configFile+".tmp-*")

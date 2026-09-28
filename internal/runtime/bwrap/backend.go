@@ -255,7 +255,7 @@ func (b *Backend) startRestricted(ctx context.Context, hd *handle, creds []egres
 // NetworkPrivate get only the namespace and its firewall policy.
 func (b *Backend) startInNetns(ctx context.Context, hd *handle, creds []egress.Credential) error {
 	ws := hd.spec.Workspace
-	if err := os.MkdirAll(ws.IPCDir, 0o755); err != nil {
+	if err := os.MkdirAll(ws.IPCDir, 0o700); err != nil {
 		return fmt.Errorf("bwrap: ipc dir: %w", err)
 	}
 	if ws.ControlSocket != "" {
@@ -349,7 +349,7 @@ func (b *Backend) startInNetns(ctx context.Context, hd *handle, creds []egress.C
 		b.cleanupRestricted(ctx, hd)
 		return err
 	}
-	nsArgs := append([]string{"-t", strconv.Itoa(netns.NetnsPID), "-n", b.bwrapBin}, argv[1:]...)
+	nsArgs := nsenterBwrapArgs(netns.NetnsPID, b.bwrapBin, argv[1:])
 	cmd := exec.CommandContext(sandboxCtx, "nsenter", nsArgs...)
 	closer, err := group.ApplyTo(cmd)
 	if err != nil {
@@ -442,7 +442,7 @@ func waitReadyCmd(ctx context.Context, done <-chan error, client *agentproto.Cli
 // startUnit launches the sandbox as a transient systemd unit (NetworkNone).
 func (b *Backend) startUnit(ctx context.Context, hd *handle) error {
 	ws := hd.spec.Workspace
-	if err := os.MkdirAll(ws.IPCDir, 0o755); err != nil {
+	if err := os.MkdirAll(ws.IPCDir, 0o700); err != nil {
 		return fmt.Errorf("bwrap: ipc dir: %w", err)
 	}
 	// Remove a stale socket from a previous run.
@@ -712,4 +712,15 @@ func envSlice(env map[string]string) []string {
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+// nsenterBwrapArgs builds the `nsenter` argv that launches bwrap inside a
+// sandbox's network namespace. nsenter needs the runner's ambient capabilities
+// (system install: CAP_SYS_ADMIN, CAP_NET_ADMIN) to join the namespace, but
+// bwrap aborts when it holds capabilities without being setuid, and a sandbox
+// launcher has no business keeping them anyway. setpriv clears the ambient and
+// inheritable sets between the two, so bwrap runs with none.
+func nsenterBwrapArgs(netnsPID int, bwrapBin string, bwrapArgs []string) []string {
+	args := []string{"-t", strconv.Itoa(netnsPID), "-n", "setpriv", "--ambient-caps=-all", "--inh-caps=-all", "--", bwrapBin}
+	return append(args, bwrapArgs...)
 }

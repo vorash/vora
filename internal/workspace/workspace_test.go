@@ -114,3 +114,23 @@ func TestCleanLeavesOnlyTombstone(t *testing.T) {
 		}
 	}
 }
+
+// Sandbox directories hold workload data and the agent's control socket. They
+// are only ever used by the runner's own UID, so other local users must not be
+// able to traverse them, whatever the parent directory allows.
+func TestCreateMakesPrivateDirectories(t *testing.T) {
+	m := NewManager(t.TempDir())
+	spec, err := m.Create(m.Paths(testID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{spec.RootDir, spec.WorkspaceDir, spec.HomeDir, spec.IPCDir, m.LogsDir(testID), m.ExecLogDir(testID)} {
+		info, err := os.Stat(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o700 {
+			t.Errorf("%s mode = %04o, want 0700", d, got)
+		}
+	}
+}

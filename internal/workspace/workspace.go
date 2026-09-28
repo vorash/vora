@@ -67,7 +67,7 @@ func (m *Manager) Create(spec runtime.WorkspaceSpec) (runtime.WorkspaceSpec, err
 		if d == "" {
 			continue
 		}
-		if err := os.MkdirAll(d, 0o755); err != nil {
+		if err := os.MkdirAll(d, 0o700); err != nil {
 			return spec, fmt.Errorf("workspace: mkdir %s: %w", d, err)
 		}
 	}
