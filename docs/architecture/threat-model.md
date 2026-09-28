@@ -75,6 +75,7 @@ infallible; the design minimises the trusted surface.
 | Missing audit of allowed egress | allow decisions are persisted before bytes are forwarded; persistence failure or a full JSONL audit log denies the connection (proxy, broker, and DNS). Denial floods are rate-limited and the JSONL log is capped with an `audit_truncated` marker | audit |
 | Credential theft from env/disk | runner secrets never injected into sandbox | credentials |
 | Third-party credential exfiltration | credentials are stored encrypted by `vora-api`, resolved per create, and attached by the gateway broker; the value never reaches the sandbox environment, filesystem, `/proc`, the persisted record, or the audit trail (alias only) | credentials |
+| Credential reflected back by the upstream | the broker forwards only `GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS`; `TRACE`, `TRACK`, `CONNECT` and anything else get 405 and an audited `broker_method_not_allowed` denial before the credential is attached | credentials |
 | Credential replay across hosts | the broker re-originates only to the alias's bound, allowlisted host and never follows a redirect | credentials |
 | Credential exposure on the control-plane channel | brokered create/fork is refused when the selected runner channel is plaintext, unless `VORA_ALLOW_INSECURE_BROKER=1`; the runner refuses both create and fork credentials over plaintext direct and reverse-tunnel endpoints | credentials |
 | Sandbox survives runner death | in-sandbox agent exits when the runner disappears; reconciler reaps orphans | lifecycle |

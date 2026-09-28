@@ -427,3 +427,55 @@ func TestValidateCredential(t *testing.T) {
 		})
 	}
 }
+
+// TRACE makes a server echo the request it received, and the broker has just
+// attached the credential to that request: the sandbox would read the secret
+// out of the response body. Unknown methods get the same refusal.
+func TestBrokerRefusesMethodsThatCanReflectTheCredential(t *testing.T) {
+	up := &upstream{}
+	ts := httptest.NewTLSServer(up.handler())
+	defer ts.Close()
+
+	for _, method := range []string{"TRACE", "TRACK", "CONNECT", "PROPFIND", "trace"} {
+		t.Run(method, func(t *testing.T) {
+			log := &eventLog{}
+			b := newBrokerFor(t, ts, Policy{AllowedDomains: []string{"api.example.com"}}, []Credential{
+				{Alias: "github", Host: "api.example.com", Scheme: SchemeBearer, Value: "secret"},
+			}, log)
+			resp := brokerRequest(t, b, method, "/creds/github/user", nil, nil)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusMethodNotAllowed {
+				t.Fatalf("status = %d, want 405", resp.StatusCode)
+			}
+			if up.count() != 0 {
+				t.Fatalf("upstream was called %d times", up.count())
+			}
+			events := log.all()
+			if len(events) != 1 || events[0].Allowed || events[0].Reason != ReasonBrokerMethodNotAllowed || events[0].Alias != "github" {
+				t.Fatalf("events = %+v, want one audited denial for alias github", events)
+			}
+		})
+	}
+}
+
+func TestBrokerForwardsOrdinaryMethods(t *testing.T) {
+	up := &upstream{}
+	ts := httptest.NewTLSServer(up.handler())
+	defer ts.Close()
+
+	methods := []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
+	log := &eventLog{}
+	b := newBrokerFor(t, ts, Policy{AllowedDomains: []string{"api.example.com"}}, []Credential{
+		{Alias: "github", Host: "api.example.com", Scheme: SchemeBearer, Value: "secret"},
+	}, log)
+	for _, method := range methods {
+		resp := brokerRequest(t, b, method, "/creds/github/user", nil, nil)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("%s status = %d, want 200", method, resp.StatusCode)
+		}
+	}
+	if up.count() != len(methods) {
+		t.Fatalf("upstream calls = %d, want %d", up.count(), len(methods))
+	}
+}

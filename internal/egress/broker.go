@@ -28,9 +28,10 @@ const (
 
 // Broker denial reasons recorded on the audit trail.
 const (
-	ReasonBrokerUnknownAlias   = "broker_unknown_alias"
-	ReasonBrokerHostNotAllowed = "broker_host_not_allowed"
-	ReasonBrokerUpstreamFailed = "broker_upstream_failed"
+	ReasonBrokerUnknownAlias     = "broker_unknown_alias"
+	ReasonBrokerHostNotAllowed   = "broker_host_not_allowed"
+	ReasonBrokerUpstreamFailed   = "broker_upstream_failed"
+	ReasonBrokerMethodNotAllowed = "broker_method_not_allowed"
 )
 
 // Credential is a resolved brokered credential. The value is transient: it is
@@ -214,6 +215,15 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TRACE and friends echo the request, credential included, back to the
+	// sandbox. Only methods with no reflecting semantics are forwarded.
+	if !brokerMethods[r.Method] {
+		b.deny(r.Context(), cred.Host, alias, ReasonBrokerMethodNotAllowed)
+		w.Header().Set("Allow", brokerAllowHeader)
+		http.Error(w, "method not allowed through the credential broker", http.StatusMethodNotAllowed)
+		return
+	}
+
 	// Persist the allow before the credential leaves the host; if the audit
 	// write fails the credential is not attached at all (fail closed).
 	if err := b.allow(cred.Host, alias); err != nil {
@@ -238,6 +248,13 @@ func (b *Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	relayResponse(w, upstream)
 }
+
+var brokerMethods = map[string]bool{
+	http.MethodGet: true, http.MethodHead: true, http.MethodPost: true, http.MethodPut: true,
+	http.MethodPatch: true, http.MethodDelete: true, http.MethodOptions: true,
+}
+
+const brokerAllowHeader = "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"
 
 // roundTrip builds and sends the upstream request with the credential attached.
 func (b *Broker) roundTrip(r *http.Request, cred Credential, rest string) (*http.Response, error) {
