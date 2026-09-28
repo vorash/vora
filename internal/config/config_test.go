@@ -51,21 +51,21 @@ func TestEgressLimitsRejectInvalidValues(t *testing.T) {
 // deleting evidence must be a decision, never a default.
 func TestAuditRetentionDefaultsToKeepForever(t *testing.T) {
 	t.Setenv("VORA_AUDIT_RETENTION", "")
-	cfg, err := Default()
+	d, err := AuditRetentionFromEnv()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AuditRetention != 0 {
-		t.Fatalf("AuditRetention = %s, want 0 (keep forever)", cfg.AuditRetention)
+	if d != 0 {
+		t.Fatalf("AuditRetention = %s, want 0 (keep forever)", d)
 	}
 
 	t.Setenv("VORA_AUDIT_RETENTION", "720h")
-	cfg, err = Default()
+	d, err = AuditRetentionFromEnv()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AuditRetention != 720*time.Hour {
-		t.Fatalf("AuditRetention = %s, want 720h", cfg.AuditRetention)
+	if d != 720*time.Hour {
+		t.Fatalf("AuditRetention = %s, want 720h", d)
 	}
 }
 
@@ -73,9 +73,19 @@ func TestAuditRetentionRejectsInvalidValues(t *testing.T) {
 	for _, v := range []string{"0s", "-1h", "soon"} {
 		t.Run(v, func(t *testing.T) {
 			t.Setenv("VORA_AUDIT_RETENTION", v)
-			if _, err := Default(); err == nil {
+			if _, err := AuditRetentionFromEnv(); err == nil {
 				t.Fatal("expected invalid value to fail")
 			}
 		})
+	}
+}
+
+// VORA_AUDIT_RETENTION is runner configuration, but the CLI also loads
+// Default. A value meant for the runner (or a typo in it) must not break
+// every CLI command in the shell that exported it.
+func TestDefaultIgnoresAuditRetention(t *testing.T) {
+	t.Setenv("VORA_AUDIT_RETENTION", "30d")
+	if _, err := Default(); err != nil {
+		t.Fatalf("Default with an invalid runner-only setting: %v", err)
 	}
 }

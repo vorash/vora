@@ -293,3 +293,66 @@ func TestPruneAuditSkipsExternalAuditStore(t *testing.T) {
 		t.Fatalf("tombstone pruned although audit lives in an external store: %v", err)
 	}
 }
+
+type failingEventAudit struct{ audit.Store }
+
+func (failingEventAudit) AppendEvent(context.Context, string, sandbox.Event) error {
+	return errors.New("disk full")
+}
+
+// A lost lifecycle event, including the DESTROYED transition that marks a
+// tombstone, is as much an audit gap as a lost exec record and must raise the
+// same alertable metric.
+func TestLifecycleEventWriteFailureIsMetered(t *testing.T) {
+	s := auditServer(t)
+	id := startSandbox(t, s)
+	s.SetAudit(failingEventAudit{Store: s.audit})
+	if _, err := s.DestroySandbox(context.Background(), &v1.DestroySandboxRequest{SandboxId: id}); err != nil {
+		t.Fatal(err)
+	}
+	var m dto.Metric
+	if err := s.metrics.AuditWriteFailedTotal.Write(&m); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.GetCounter().GetValue(); got < 1 {
+		t.Fatalf("vora_audit_write_failed_total = %v, want the lost DESTROYED event counted", got)
+	}
+}
+
+// Pruning must not delete a tombstone out from under a destroy that is still
+// running: the destroy would then recreate a partial record with no exec or
+// egress history, which reads like tampering. Pruning re-checks the record
+// under the sandbox lock, after any in-flight destroy has finished.
+func TestPruneAuditRechecksUnderSandboxLock(t *testing.T) {
+	ctx := context.Background()
+	s := auditServer(t)
+	s.cfg.AuditRetention = time.Hour
+	id := startSandbox(t, s)
+	if _, err := s.DestroySandbox(ctx, &v1.DestroySandboxRequest{SandboxId: id}); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, s, id, 48*time.Hour)
+
+	// Stand in for a destroy in progress: hold the lock, and before releasing
+	// it rewrite the record the way a destroy's transition does.
+	unlock := s.lockSandbox(id)
+	done := make(chan error, 1)
+	go func() { done <- s.PruneAudit(ctx) }()
+	time.Sleep(50 * time.Millisecond)
+	rec, err := s.store.Load(id)
+	if err != nil {
+		unlock()
+		t.Fatalf("prune ran while the sandbox lock was held: %v", err)
+	}
+	if err := s.store.Save(rec); err != nil {
+		unlock()
+		t.Fatal(err)
+	}
+	unlock()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.store.Load(id); err != nil {
+		t.Fatalf("prune deleted a tombstone that was rewritten while it waited: %v", err)
+	}
+}

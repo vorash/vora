@@ -42,6 +42,9 @@ import (
 	"github.com/vorash/vora/internal/version"
 )
 
+// auditPruneInterval is how often expired audit tombstones are removed.
+const auditPruneInterval = 10 * time.Minute
+
 // openAudit connects to the Postgres audit store and applies its schema.
 func openAudit(ctx context.Context, dsn string) (*postgres.Store, error) {
 	store, err := postgres.Open(ctx, dsn)
@@ -95,6 +98,9 @@ func run() error {
 
 	cfg, err := config.Default()
 	if err != nil {
+		return err
+	}
+	if cfg.AuditRetention, err = config.AuditRetentionFromEnv(); err != nil {
 		return err
 	}
 	if *socketFlag != "" {
@@ -343,6 +349,19 @@ func run() error {
 				if err := server.EnforceDiskQuota(ctx); err != nil {
 					logger.Warn("disk quota enforcer failed", "error", err)
 				}
+			}
+		}
+	}()
+	// Retention is measured in hours and scans every tombstone, so it runs on
+	// its own slow ticker rather than with the 30s reaper.
+	go func() {
+		ticker := time.NewTicker(auditPruneInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
 				if err := server.PruneAudit(ctx); err != nil {
 					logger.Warn("audit retention failed", "error", err)
 				}

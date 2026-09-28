@@ -203,13 +203,6 @@ func Default() (Config, error) {
 		}
 		c.MaxTTL = d
 	}
-	if v := os.Getenv("VORA_AUDIT_RETENTION"); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil || d <= 0 {
-			return Config{}, fmt.Errorf("invalid VORA_AUDIT_RETENTION %q (want positive duration)", v)
-		}
-		c.AuditRetention = d
-	}
 	if v := os.Getenv("VORA_MAX_SNAPSHOT_BYTES"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || n <= 0 {
@@ -288,6 +281,21 @@ func Default() (Config, error) {
 		c.DefaultTTL = 30 * time.Minute
 	}
 	return c, nil
+}
+
+// AuditRetentionFromEnv parses VORA_AUDIT_RETENTION. It is separate from
+// Default because only the runner uses it: the CLI also calls Default, and a
+// runner-only typo must not break every CLI command.
+func AuditRetentionFromEnv() (time.Duration, error) {
+	v := os.Getenv("VORA_AUDIT_RETENTION")
+	if v == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("invalid VORA_AUDIT_RETENTION %q (want positive duration)", v)
+	}
+	return d, nil
 }
 
 func userStateDir() string {
