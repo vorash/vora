@@ -105,7 +105,7 @@ func TestAPIHTTPMTLS(t *testing.T) {
 	apiBin := buildBinary(t, "vora-api")
 	httpAddr := freeTCPAddr(t)
 	registryAddr := freeTCPAddr(t)
-	const bootstrapKey = "vora_bootstrap_mtls"
+	const bootstrapKey = "vora_bootstrap_mtls_0123456789abcdef"
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

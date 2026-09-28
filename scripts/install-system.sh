@@ -125,10 +125,11 @@ VORA_API_GRPC_ADDR=127.0.0.1:9301
 #VORA_AUDIT_DSN=postgres://user:pass@host:5432/vora
 # Runner registration and the first admin key:
 #VORA_API_JOIN_TOKEN=
-#VORA_API_BOOTSTRAP_KEY=
+#VORA_API_BOOTSTRAP_KEY=   # >=32 characters
 # Credential brokering (>=32 bytes). Required for `vora secrets`:
 #VORA_MASTER_KEY=
-# Public HTTP TLS (reverse proxy or certbot in front is also fine):
+# Public HTTP TLS. A non-loopback bind without TLS is refused unless
+# VORA_API_HTTP_INSECURE=1 (a TLS proxy in front is fine; prefer binding loopback):
 #VORA_API_HTTP_TLS_CERT=/etc/vora/tls/api.crt
 #VORA_API_HTTP_TLS_KEY=/etc/vora/tls/api.key
 # Registry gRPC TLS:

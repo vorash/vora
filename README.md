@@ -463,7 +463,10 @@ vora --api http://127.0.0.1:9300 --api-key "$VORA_API_KEY" sandbox create --imag
 
 Control-plane configuration: `VORA_API_HTTP_ADDR`, `VORA_API_GRPC_ADDR`,
 `VORA_API_DSN` (PostgreSQL; omitted → in-memory), `VORA_API_BOOTSTRAP_KEY`
-(initial admin key), `VORA_API_JOIN_TOKEN` (runner registration), and on the
+(initial admin key, at least 32 characters), `VORA_API_JOIN_TOKEN` (runner
+registration; without it or a registry client CA, `vora-api` warns at startup),
+`VORA_API_HTTP_TLS_{CERT,KEY}` (a non-loopback HTTP bind without TLS is refused
+unless `VORA_API_HTTP_INSECURE=1`), and on the
 runner `VORA_RUNNER_ADDR` (TCP gRPC), `VORA_RUNNER_ADVERTISE_ADDR`,
 `VORA_API_GRPC`, `VORA_API_JOIN_TOKEN`. Runner resource ceilings use
 `VORA_MAX_MEMORY` (bytes), `VORA_MAX_CPU` (millicores), `VORA_MAX_PIDS`,
