@@ -64,6 +64,11 @@ scan (ADR 015); `TestDiskQuotaBoundsHostWrites` covers the hard path.
 - **Disk quota is hard only under an enforcing project quota**
   ([ADR 015](../adr/015-disk-quota.md)). Without one, the periodic usage scan
   bounds the sandbox but not a burst that lands between scans.
+- **Tenant `env` values sit on the bwrap command line.** They are visible in
+  `/proc/<pid>/cmdline` and `ps` to other local users unless `/proc` is mounted
+  with `hidepid`. Keeping env off argv (a `0600` file in the IPC dir applied by
+  `vora-init`) is not done yet; do not share the host with untrusted local
+  users, and prefer credential brokering over env-passed tokens.
 - **Images are trusted** unless `VORA_IMAGE_POLICY=enforce` verifies a
   signature ([ADR 020](../adr/020-image-signing.md)).
 - **The brokered hop inside the netns is plaintext HTTP.** The credential is

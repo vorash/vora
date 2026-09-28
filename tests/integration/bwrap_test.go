@@ -79,6 +79,11 @@ func TestBwrapSandboxLifecycle(t *testing.T) {
 // the backend and its handle, tearing the sandbox down at the end of the test.
 func newBwrapSandbox(t *testing.T) (*bwrap.Backend, runtime.Handle) {
 	t.Helper()
+	return newBwrapSandboxWithEnv(t, nil)
+}
+
+func newBwrapSandboxWithEnv(t *testing.T, env map[string]string) (*bwrap.Backend, runtime.Handle) {
+	t.Helper()
 
 	initBin := buildBinary(t, "vora-init")
 	t.Setenv("VORA_INIT_BINARY", initBin)
@@ -113,6 +118,7 @@ func newBwrapSandbox(t *testing.T) (*bwrap.Backend, runtime.Handle) {
 		Network:   runtime.NetworkPolicy{Mode: runtime.NetworkNone},
 		TTL:       time.Minute,
 		Workspace: ws,
+		Env:       env,
 	}
 
 	ctx := context.Background()
@@ -218,4 +224,20 @@ func run(t *testing.T, backend *bwrap.Backend, h runtime.Handle, command string,
 		out.Write(chunk.Stdout)
 	}
 	return out.String()
+}
+
+// Tenant env values must reach the sandbox byte for byte. systemd expands
+// ${VAR} and $$ in the arguments of a transient service, so an unguarded
+// FOO=${HOME} handed the tenant the host service manager's environment.
+func TestBwrapEnvNotExpanded(t *testing.T) {
+	backend, h := newBwrapSandboxWithEnv(t, map[string]string{
+		"VORA_LEAK": "${HOME}",
+		"VORA_COST": "$$5",
+	})
+	for name, want := range map[string]string{"VORA_LEAK": "${HOME}", "VORA_COST": "$$5"} {
+		got := execStdout(t, backend, h, "/bin/sh", []string{"-c", `printf %s "$` + name + `"`})
+		if got != want {
+			t.Errorf("%s = %q, want %q: the service manager rewrote a tenant env value", name, got, want)
+		}
+	}
 }

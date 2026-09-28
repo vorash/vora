@@ -3,8 +3,10 @@ package cgroup
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
+	"github.com/vorash/vora/internal/config"
 	"github.com/vorash/vora/internal/runtime"
 )
 
@@ -123,5 +125,24 @@ func TestReasonFromSystemd(t *testing.T) {
 		if got := ReasonFromSystemd(c.result, c.st); got != c.want {
 			t.Errorf("ReasonFromSystemd(%q) = %v, want %v", c.result, got, c.want)
 		}
+	}
+}
+
+// systemd expands ${VAR} in the arguments of a transient service, and the
+// sandbox's tenant-controlled env values travel as arguments. Without
+// --expand-environment=no a tenant can read the service manager's environment.
+func TestSystemdRunArgsDisableEnvironmentExpansion(t *testing.T) {
+	s := &systemd{mode: config.SystemdUser}
+	args := s.runArgs(StartRequest{Name: "vora-sbx_x", Argv: []string{"bwrap", "--setenv", "X", "${HOME}"}})
+
+	sep := slices.Index(args, "--")
+	if sep < 0 {
+		t.Fatalf("no -- separator in %v", args)
+	}
+	if !slices.Contains(args[:sep], "--expand-environment=no") {
+		t.Fatalf("systemd-run flags %v lack --expand-environment=no", args[:sep])
+	}
+	if got := args[sep+1:]; !slices.Equal(got, []string{"bwrap", "--setenv", "X", "${HOME}"}) {
+		t.Fatalf("argv was altered: %v", got)
 	}
 }
