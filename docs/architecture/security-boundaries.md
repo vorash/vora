@@ -50,6 +50,7 @@ scan (ADR 015); `TestDiskQuotaBoundsHostWrites` covers the hard path.
 | PID 1 / init | sandbox has its own PID namespace |
 | Devices | minimal `/dev` from Bubblewrap / gVisor OCI spec |
 | cgroup hierarchy | bwrap: transient systemd units. gVisor: delegated subtree under `vora-runner.service` (`Delegate=yes`) |
+| Audit record identity | execution IDs are runner-assigned and validated at the store; records are append-only, so no caller can replace or rewrite another execution's record, in its own or another sandbox |
 | Availability | memory/PID caps prevent host exhaustion; CPU quota bounds utilisation |
 
 ## Residual risks (accepted)
