@@ -104,6 +104,7 @@ VORA_METRICS_ADDR=127.0.0.1:9101
 #VORA_RUNNER_TLS_KEY=/etc/vora/tls/runner.key
 # Set private key ownership to vora:vora with mode 0600.
 #VORA_RUNNER_TLS_CA=/etc/vora/tls/ca.crt
+# The registry client certificate's DNS SAN run_<ULID> is this runner's ID.
 #VORA_API_REGISTRY_TLS_CERT=/etc/vora/tls/registry-client.crt
 #VORA_API_REGISTRY_TLS_KEY=/etc/vora/tls/registry-client.key
 # Set the client key ownership to vora:vora with mode 0600.
