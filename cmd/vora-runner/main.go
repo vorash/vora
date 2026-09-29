@@ -59,6 +59,18 @@ func openAudit(ctx context.Context, dsn string) (*postgres.Store, error) {
 	return store, nil
 }
 
+// defaultRuntimeDir returns the runtime directory a non-root runner should use
+// when XDG_RUNTIME_DIR is unset, or "" to leave it alone. The system unit runs
+// the runner as the vora user but cannot name that user's runtime directory
+// (%U is the service manager's uid, 0). systemd-run --user, the user bus and
+// the rootless containerd socket all live there.
+func defaultRuntimeDir(current string, euid int) string {
+	if current != "" || euid == 0 {
+		return ""
+	}
+	return fmt.Sprintf("/run/user/%d", euid)
+}
+
 // ensurePrivateDir creates dir, or tightens an existing one, to 0700: the
 // runner's state holds workloads' files and control sockets.
 func ensurePrivateDir(dir string) error {
@@ -153,6 +165,11 @@ func run() error {
 	stateFlag := flag.String("state-dir", "", "state directory (overrides VORA_STATE_DIR)")
 	flag.Parse()
 
+	if dir := defaultRuntimeDir(os.Getenv("XDG_RUNTIME_DIR"), os.Geteuid()); dir != "" {
+		if err := os.Setenv("XDG_RUNTIME_DIR", dir); err != nil {
+			return err
+		}
+	}
 	cfg, err := config.Default()
 	if err != nil {
 		return err

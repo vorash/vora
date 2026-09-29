@@ -24,3 +24,25 @@ func TestPrivateDirTightensExistingDirectory(t *testing.T) {
 		t.Fatalf("mode = %04o, want 0700", got)
 	}
 }
+
+// A non-root runner started by the system unit has no XDG_RUNTIME_DIR, and
+// the unit cannot supply the right one. Without it systemd-run --user and the
+// rootless containerd socket are unreachable and no sandbox starts.
+func TestDefaultRuntimeDirForTheSystemUnit(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		current string
+		euid    int
+		want    string
+	}{
+		{"vora user under the system unit", "", 997, "/run/user/997"},
+		{"user session keeps its own", "/run/user/1000", 1000, ""},
+		{"root runner has none", "", 0, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := defaultRuntimeDir(tc.current, tc.euid); got != tc.want {
+				t.Fatalf("defaultRuntimeDir(%q, %d) = %q, want %q", tc.current, tc.euid, got, tc.want)
+			}
+		})
+	}
+}

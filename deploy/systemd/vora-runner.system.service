@@ -24,7 +24,10 @@ StartLimitIntervalSec=0
 Type=simple
 User=vora
 Group=vora
-Environment=VORA_SYSTEMD_MODE=user VORA_STATE_DIR=/var/lib/vora VORA_SOCKET=/run/vora/runner.sock XDG_RUNTIME_DIR=/run/user/%U DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+# No XDG_RUNTIME_DIR here: %U is the service manager's uid (0), not vora's.
+# The runner defaults it to /run/user/<its uid>, where the user bus and the
+# rootless containerd socket live.
+Environment=VORA_SYSTEMD_MODE=user VORA_STATE_DIR=/var/lib/vora VORA_SOCKET=/run/vora/runner.sock
 EnvironmentFile=/etc/vora/runner.env
 ExecStart=/usr/local/bin/vora-runner
 Restart=on-failure
@@ -37,7 +40,9 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths=/var/lib/vora /run/vora
 BindPaths=/run/vora/netns:/run/netns
-ProtectHome=yes
+# read-only, not yes: yes hides /run/user, and with it vora's user bus and
+# rootless containerd socket (connecting to a socket needs no write access).
+ProtectHome=read-only
 PrivateTmp=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
