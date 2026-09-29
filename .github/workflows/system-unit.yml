@@ -4,10 +4,11 @@ name: System unit
 # as a production host runs it: a dedicated vora user, rootless containerd and
 # XFS project quotas on Ubuntu 26.04, as on vora-mini. See
 # scripts/test-system-unit.sh and vorash/vora#102.
+#
+# Main and manual runs only: it takes up to 30 minutes of a full VM.
 on:
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
 
 permissions:
