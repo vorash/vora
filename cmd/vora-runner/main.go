@@ -28,6 +28,7 @@ import (
 	"github.com/vorash/vora/internal/audit/postgres"
 	"github.com/vorash/vora/internal/cgroup"
 	"github.com/vorash/vora/internal/config"
+	vctr "github.com/vorash/vora/internal/containerd"
 	"github.com/vorash/vora/internal/egress"
 	"github.com/vorash/vora/internal/network"
 	runregistry "github.com/vorash/vora/internal/registry"
@@ -57,6 +58,19 @@ func openAudit(ctx context.Context, dsn string) (*postgres.Store, error) {
 		return nil, fmt.Errorf("audit: migration failed: %w", err)
 	}
 	return store, nil
+}
+
+// requireImageStore refuses to start in containerd images mode while the
+// containerd socket is missing. The image resolver picks its store once, at
+// startup; a system runner that came up before the vora user's rootless
+// containerd (the unit cannot be ordered after a user manager's services)
+// would otherwise refuse every image until restarted. Failing lets systemd's
+// Restart= retry until the socket exists.
+func requireImageStore(mode, address string, available func(string) bool) error {
+	if mode != config.ImagesContainerd || available(address) {
+		return nil
+	}
+	return fmt.Errorf("images: VORA_IMAGES_MODE=containerd but no containerd socket at %s", vctr.SocketPath(address))
 }
 
 // defaultRuntimeDir returns the runtime directory a non-root runner should use
@@ -229,6 +243,9 @@ func run() error {
 			logger.Warn("client certificate carries no runner ID DNS SAN; using a new ID for this start, which vora-api rejects when it requires runner identity",
 				"runner_id", runnerID)
 		}
+	}
+	if err := requireImageStore(cfg.ImagesMode, cfg.ContainerdAddress, vctr.Available); err != nil {
+		return err
 	}
 	server := runner.NewServer(cfg, store, registry, runnerID, logger)
 	server.SetMetrics(metrics)

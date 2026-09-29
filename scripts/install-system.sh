@@ -91,7 +91,9 @@ if [[ ! -f "$ETC/runner.env" ]]; then
 # Image store: the vora user's rootless containerd (never the host-root one).
 VORA_CONTAINERD_ADDRESS=$containerd_socket
 VORA_CONTAINERD_NAMESPACE=vora
-VORA_IMAGES_MODE=auto
+# containerd, not auto: the runner then waits (restarts) for the socket at boot
+# instead of falling back to an empty image cache.
+VORA_IMAGES_MODE=containerd
 # Metrics are unauthenticated: keep them on loopback.
 VORA_METRICS_ADDR=127.0.0.1:9101
 # Registration with vora-api (runner dials out):
