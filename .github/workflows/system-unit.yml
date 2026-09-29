@@ -1,0 +1,39 @@
+name: System unit
+
+# Boots the shipped system runner unit (deploy/systemd/vora-runner.system.service)
+# as a production host runs it: a dedicated vora user, rootless containerd and
+# XFS project quotas on Ubuntu 26.04, as on vora-mini. See
+# scripts/test-system-unit.sh and vorash/vora#102.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  system-unit:
+    name: system unit
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Host prerequisites (vora user, rootless containerd, XFS prjquota)
+        run: sudo scripts/test-system-unit.sh setup
+
+      - name: Install the release units
+        run: sudo env "PATH=$PATH" scripts/test-system-unit.sh install
+
+      - name: Sandboxes through the system unit
+        run: sudo scripts/test-system-unit.sh test
+
+      - name: Diagnostics
+        if: failure()
+        run: sudo scripts/test-system-unit.sh diagnose

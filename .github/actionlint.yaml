@@ -1,0 +1,5 @@
+self-hosted-runner:
+  # GitHub-hosted, but newer than actionlint's built-in label list (Ubuntu
+  # 26.04 runners went GA in 2026-09; the system-unit job matches vora-mini).
+  labels:
+    - ubuntu-26.04
