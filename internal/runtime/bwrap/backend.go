@@ -357,10 +357,17 @@ func (b *Backend) startInNetns(ctx context.Context, hd *handle, creds []egress.C
 		return fmt.Errorf("bwrap: cgroup apply: %w", err)
 	}
 	defer closer()
+	stderr, err := captureStderr(cmd)
+	if err != nil {
+		b.cleanupRestricted(ctx, hd)
+		return err
+	}
 	if err := cmd.Start(); err != nil {
+		stderr.abort()
 		b.cleanupRestricted(ctx, hd)
 		return fmt.Errorf("bwrap: start: %w", err)
 	}
+	stderr.started()
 	hd.cmd = cmd
 	hd.done = make(chan error, 1)
 	go func() { hd.done <- cmd.Wait() }()
@@ -372,6 +379,9 @@ func (b *Backend) startInNetns(ctx context.Context, hd *handle, creds []egress.C
 	}
 	hd.client = client
 	if err := waitReadyCmd(ctx, hd.done, client, agentReadyTimeout); err != nil {
+		// bwrap and nsenter report setup failures only on stderr. Keep them in
+		// the runner log (they name host paths, so not in the caller's error).
+		b.logger.Warn("sandbox failed during startup", "sandbox_id", hd.id, "backend", "bwrap", "stderr", stderr.String())
 		b.cleanupRestricted(ctx, hd)
 		return err
 	}
