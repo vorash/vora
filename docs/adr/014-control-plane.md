@@ -20,7 +20,9 @@ Add a separate **`vora-api`** process (`cmd/vora-api`):
 - **Internal surface: gRPC `RunnerRegistry`.** Runners **dial out** to the API
   (`Register`, `Heartbeat`), so they can sit behind NAT. A public registry
   requires mTLS and a join token; the runner ID must match the client
-  certificate's DNS SAN on register and heartbeat. The API records the runner's
+  certificate's DNS SAN on register and heartbeat. The runner reads its ID from
+  that `run_<ULID>` SAN, so the ID is fixed when the certificate is issued and
+  survives restarts (without one it generates an ID per start). The API records the runner's
   advertised gRPC address, backends, and capacity.
 - **Caller auth: static API keys.** `Authorization: Bearer vora_…`; keys are
   stored **SHA-256-hashed** with a tenant and scopes (`admin`, `sandbox`). The

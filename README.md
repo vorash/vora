@@ -484,7 +484,11 @@ enabled per channel with
 `VORA_RUNNER_TLS_{CERT,KEY,CA}` (API→runner). Runner TCP requires all three
 (mTLS); the API client certificate must carry DNS SAN `vora-api` (or the
 `VORA_RUNNER_CLIENT_IDENTITY` override). For local development only, plaintext
-runner TCP requires `VORA_RUNNER_INSECURE=1` and a loopback IP bind. Other
+runner TCP requires `VORA_RUNNER_INSECURE=1` and a loopback IP bind. With a
+registry client CA, the API binds each runner to the `run_<ULID>` DNS SAN of
+its client certificate, and the runner takes its ID from that SAN (one per
+host, stable across restarts); issue each runner's registry and tunnel client
+certificates with the same one. Other
 channels retain their own TLS settings. `VORA_API_TLS_*` is no longer read. A tunnel bound to loopback may use
 `VORA_TUNNEL_INSECURE=1` for local development, but then brokered credentials
 are refused by default.

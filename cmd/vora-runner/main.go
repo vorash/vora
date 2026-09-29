@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
@@ -65,6 +66,53 @@ func ensurePrivateDir(dir string) error {
 		return err
 	}
 	return os.Chmod(dir, 0o700)
+}
+
+// runnerIDFromCerts returns the runner ID carried as a DNS SAN by the registry
+// or tunnel client certificate, or "" when neither carries one. vora-api binds
+// a runner's declared ID to that SAN (V-08), so a runner with a client CA in
+// front of it must use the ID its certificate was issued for rather than a new
+// one each start. More than one ID, or certificates that disagree, is an error.
+func runnerIDFromCerts(paths ...string) (string, error) {
+	id := ""
+	for _, path := range paths {
+		cert, err := readLeafCertificate(path)
+		if err != nil {
+			return "", err
+		}
+		var found []string
+		for _, name := range cert.DNSNames {
+			if ulid.ValidPrefix(name, ulid.PrefixRunner) {
+				found = append(found, name)
+			}
+		}
+		switch {
+		case len(found) > 1:
+			return "", fmt.Errorf("%s carries %d runner IDs as DNS SANs; want at most one", path, len(found))
+		case len(found) == 1 && id != "" && found[0] != id:
+			return "", fmt.Errorf("registry and tunnel client certificates name different runner IDs (%s, %s)", id, found[0])
+		case len(found) == 1:
+			id = found[0]
+		}
+	}
+	return id, nil
+}
+
+func readLeafCertificate(path string) (*x509.Certificate, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read client certificate: %w", err)
+	}
+	for block, rest := pem.Decode(data); block != nil; block, rest = pem.Decode(rest) {
+		if block.Type == "CERTIFICATE" {
+			cert, err := x509.ParseCertificate(block.Bytes)
+			if err != nil {
+				return nil, fmt.Errorf("parse client certificate %s: %w", path, err)
+			}
+			return cert, nil
+		}
+	}
+	return nil, fmt.Errorf("no certificate in %s", path)
 }
 
 func verifyAPIIdentity(cert *x509.Certificate, identity string) error {
@@ -145,7 +193,26 @@ func run() error {
 	store := sandbox.NewStore(cfg.SandboxesDir())
 	registry := runtime.NewRegistry()
 	metrics := telemetry.New()
-	runnerID := ulid.NewRunner()
+	// Only the client certificates of channels in use: VORA_RUNNER_TLS_CERT is
+	// this runner's server certificate and names no runner.
+	var idCerts []string
+	if os.Getenv("VORA_API_GRPC") != "" && os.Getenv("VORA_API_REGISTRY_TLS_CERT") != "" {
+		idCerts = append(idCerts, os.Getenv("VORA_API_REGISTRY_TLS_CERT"))
+	}
+	if os.Getenv("VORA_API_TUNNEL_ADDR") != "" && os.Getenv("VORA_API_TUNNEL_TLS_CERT") != "" {
+		idCerts = append(idCerts, os.Getenv("VORA_API_TUNNEL_TLS_CERT"))
+	}
+	runnerID, err := runnerIDFromCerts(idCerts...)
+	if err != nil {
+		return fmt.Errorf("runner id: %w", err)
+	}
+	if runnerID == "" {
+		runnerID = ulid.NewRunner()
+		if len(idCerts) > 0 {
+			logger.Warn("client certificate carries no runner ID DNS SAN; using a new ID for this start, which vora-api rejects when it requires runner identity",
+				"runner_id", runnerID)
+		}
+	}
 	server := runner.NewServer(cfg, store, registry, runnerID, logger)
 	server.SetMetrics(metrics)
 
