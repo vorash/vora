@@ -194,9 +194,9 @@ func TestEnforceSurfacesCommandFailure(t *testing.T) {
 	}
 }
 
-func TestDetectRequiresRoot(t *testing.T) {
+func TestDetectRequiresCapSysAdmin(t *testing.T) {
 	if got := detect(t.TempDir(), &fakeRunner{}, false); got != ModeAccounting {
-		t.Fatalf("detect(non-root) = %q, want accounting", got)
+		t.Fatalf("detect(without CAP_SYS_ADMIN) = %q, want accounting", got)
 	}
 }
 

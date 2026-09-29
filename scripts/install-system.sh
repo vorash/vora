@@ -34,14 +34,14 @@ done
 
 [[ "$(id -u)" -eq 0 ]] || { echo "error: run as root (sudo)" >&2; exit 1; }
 if ! id -u vora >/dev/null 2>&1; then
-  useradd --system --user-group --home-dir /var/lib/vora --shell /usr/bin/nologin vora
+  useradd --system --user-group --home-dir /var/lib/vora --shell "$(command -v nologin)" vora
 fi
 if ! getent group vora-api-tls >/dev/null; then
   groupadd --system vora-api-tls
 fi
 loginctl enable-linger vora
 vora_uid="$(id -u vora)"
-containerd_socket="/run/user/$vora_uid/containerd-rootless/containerd.sock"
+containerd_socket="/run/user/$vora_uid/containerd/containerd.sock"
 if [[ ! -S "$containerd_socket" ]]; then
   echo "error: rootless containerd for vora is required at $containerd_socket; refusing host-root containerd access" >&2
   exit 1
@@ -88,10 +88,12 @@ if [[ ! -f "$ETC/runner.env" ]]; then
 # Vora runner configuration. See vora/docs/adr and README.
 # Audit trail: PostgreSQL/Supabase DSN, or unset for per-sandbox JSONL.
 #VORA_AUDIT_DSN=postgres://user:pass@host:5432/vora
-# Image store: the system containerd socket (the rootless socket is dev-only).
+# Image store: the vora user's rootless containerd (never the host-root one).
 VORA_CONTAINERD_ADDRESS=$containerd_socket
 VORA_CONTAINERD_NAMESPACE=vora
-VORA_IMAGES_MODE=auto
+# containerd, not auto: the runner then waits (restarts) for the socket at boot
+# instead of falling back to an empty image cache.
+VORA_IMAGES_MODE=containerd
 # Metrics are unauthenticated: keep them on loopback.
 VORA_METRICS_ADDR=127.0.0.1:9101
 # Registration with vora-api (runner dials out):

@@ -8,7 +8,8 @@
 #
 # Requires a dedicated vora system user, a rootless containerd socket owned by
 # that user, and a lingering systemd --user manager for sandbox cgroups.
-# CAP_SYS_ADMIN and CAP_NET_ADMIN are still needed for namespace and nft setup;
+# CAP_SYS_ADMIN and CAP_NET_ADMIN are still needed for namespace and nft setup
+# (and CAP_NET_BIND_SERVICE for the restricted-mode resolver on port 53);
 # this unit does not make a compromised runner harmless.
 [Unit]
 Description=Vora runner
@@ -24,7 +25,10 @@ StartLimitIntervalSec=0
 Type=simple
 User=vora
 Group=vora
-Environment=VORA_SYSTEMD_MODE=user VORA_STATE_DIR=/var/lib/vora VORA_SOCKET=/run/vora/runner.sock XDG_RUNTIME_DIR=/run/user/%U DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+# No XDG_RUNTIME_DIR here: %U is the service manager's uid (0), not vora's.
+# The runner defaults it to /run/user/<its uid>, where the user bus and the
+# rootless containerd socket live.
+Environment=VORA_SYSTEMD_MODE=user VORA_STATE_DIR=/var/lib/vora VORA_SOCKET=/run/vora/runner.sock
 EnvironmentFile=/etc/vora/runner.env
 ExecStart=/usr/local/bin/vora-runner
 Restart=on-failure
@@ -37,17 +41,25 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths=/var/lib/vora /run/vora
 BindPaths=/run/vora/netns:/run/netns
-ProtectHome=yes
+# read-only, not yes: yes hides /run/user, and with it vora's user bus and
+# rootless containerd socket (connecting to a socket needs no write access).
+ProtectHome=read-only
 PrivateTmp=yes
 ProtectKernelModules=yes
-ProtectKernelTunables=yes
+# No ProtectKernelTunables=: its read-only mounts over /proc/sys, /proc/acpi,
+# ... make /proc "too revealing" to mount afresh, so bwrap cannot mount the
+# sandbox's /proc from a user namespace ("Can't mount proc on /newroot/proc").
+# The /proc/sys files stay root-owned 0644 and this unit has no
+# CAP_DAC_OVERRIDE, so vora still cannot write host sysctls.
 RestrictSUIDSGID=yes
 LockPersonality=yes
 SystemCallArchitectures=native
 # The bwrap launcher clears these before running bwrap (setpriv, util-linux):
 # bwrap aborts when it holds capabilities without being setuid.
-CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN
-AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN
+# CAP_NET_BIND_SERVICE: restricted sandboxes' DNS resolver listens on port 53
+# of their gateway address.
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 UMask=0077
 
 # Sandboxes carry their own pids/memory limits; the runner is long-lived and

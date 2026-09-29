@@ -245,8 +245,10 @@ func rootfsDir(mounts []mount.Mount, fallback string) (string, error) {
 		if m.Source == "" {
 			continue
 		}
-		if info, err := os.Stat(m.Source); err == nil && info.IsDir() {
-			return m.Source, nil
+		for _, src := range []string{m.Source, rootlessHostPath(m.Source)} {
+			if info, err := os.Stat(src); src != "" && err == nil && info.IsDir() {
+				return src, nil
+			}
 		}
 	}
 	if err := os.MkdirAll(fallback, 0o755); err != nil {
@@ -256,6 +258,33 @@ func rootfsDir(mounts []mount.Mount, fallback string) (string, error) {
 		return "", fmt.Errorf("images: mount snapshot rootfs: %w", err)
 	}
 	return fallback, nil
+}
+
+// containerdNamespaceRoot is where rootless containerd sees its own data
+// directory: containerd-rootless.sh bind-mounts $XDG_DATA_HOME/containerd there
+// inside its private mount namespace, and reports snapshot paths under it.
+const containerdNamespaceRoot = "/var/lib/containerd/"
+
+// rootlessHostPath maps a snapshot path reported by rootless containerd to the
+// same directory as seen from the host, or "" if src is not under its data
+// root. The runner reaches that containerd through the socket of the user it
+// runs as, so the data root is the runner's own $XDG_DATA_HOME/containerd.
+// Sandboxes start in two mount namespaces (the runner's and the user
+// manager's), so the host path is the one both can use.
+func rootlessHostPath(src string) string {
+	rel, ok := strings.CutPrefix(src, containerdNamespaceRoot)
+	if !ok {
+		return ""
+	}
+	data := os.Getenv("XDG_DATA_HOME")
+	if data == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		data = filepath.Join(home, ".local", "share")
+	}
+	return filepath.Join(data, "containerd", filepath.Clean("/"+rel))
 }
 
 // candidateRefs lists the names a ref may be stored under in containerd.

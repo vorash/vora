@@ -28,6 +28,7 @@ import (
 	"github.com/vorash/vora/internal/audit/postgres"
 	"github.com/vorash/vora/internal/cgroup"
 	"github.com/vorash/vora/internal/config"
+	vctr "github.com/vorash/vora/internal/containerd"
 	"github.com/vorash/vora/internal/egress"
 	"github.com/vorash/vora/internal/network"
 	runregistry "github.com/vorash/vora/internal/registry"
@@ -57,6 +58,31 @@ func openAudit(ctx context.Context, dsn string) (*postgres.Store, error) {
 		return nil, fmt.Errorf("audit: migration failed: %w", err)
 	}
 	return store, nil
+}
+
+// requireImageStore refuses to start in containerd images mode while the
+// containerd socket is missing. The image resolver picks its store once, at
+// startup; a system runner that came up before the vora user's rootless
+// containerd (the unit cannot be ordered after a user manager's services)
+// would otherwise refuse every image until restarted. Failing lets systemd's
+// Restart= retry until the socket exists.
+func requireImageStore(mode, address string, available func(string) bool) error {
+	if mode != config.ImagesContainerd || available(address) {
+		return nil
+	}
+	return fmt.Errorf("images: VORA_IMAGES_MODE=containerd but no containerd socket at %s", vctr.SocketPath(address))
+}
+
+// defaultRuntimeDir returns the runtime directory a non-root runner should use
+// when XDG_RUNTIME_DIR is unset, or "" to leave it alone. The system unit runs
+// the runner as the vora user but cannot name that user's runtime directory
+// (%U is the service manager's uid, 0). systemd-run --user, the user bus and
+// the rootless containerd socket all live there.
+func defaultRuntimeDir(current string, euid int) string {
+	if current != "" || euid == 0 {
+		return ""
+	}
+	return fmt.Sprintf("/run/user/%d", euid)
 }
 
 // ensurePrivateDir creates dir, or tightens an existing one, to 0700: the
@@ -153,6 +179,11 @@ func run() error {
 	stateFlag := flag.String("state-dir", "", "state directory (overrides VORA_STATE_DIR)")
 	flag.Parse()
 
+	if dir := defaultRuntimeDir(os.Getenv("XDG_RUNTIME_DIR"), os.Geteuid()); dir != "" {
+		if err := os.Setenv("XDG_RUNTIME_DIR", dir); err != nil {
+			return err
+		}
+	}
 	cfg, err := config.Default()
 	if err != nil {
 		return err
@@ -212,6 +243,9 @@ func run() error {
 			logger.Warn("client certificate carries no runner ID DNS SAN; using a new ID for this start, which vora-api rejects when it requires runner identity",
 				"runner_id", runnerID)
 		}
+	}
+	if err := requireImageStore(cfg.ImagesMode, cfg.ContainerdAddress, vctr.Available); err != nil {
+		return err
 	}
 	server := runner.NewServer(cfg, store, registry, runnerID, logger)
 	server.SetMetrics(metrics)
