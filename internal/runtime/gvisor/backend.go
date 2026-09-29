@@ -66,11 +66,26 @@ type handle struct {
 
 func (h *handle) ID() string { return h.id }
 
+// requireUID0 refuses to set up gVisor unless the runner is uid 0: host root,
+// or root inside a rootlesskit user namespace (Method 2). The non-root system
+// unit runs the runner as the vora user with ambient capabilities, where runsc
+// is neither Method 2 nor --rootless, so the backend is not offered there
+// rather than failing on every gVisor create.
+func requireUID0(euid int) error {
+	if euid != 0 {
+		return fmt.Errorf("gvisor: runsc needs the runner at uid 0 (root, or inside rootlesskit); running as uid %d", euid)
+	}
+	return nil
+}
+
 // New returns a gVisor backend. subtree may be nil; Start then fails rather
 // than running an unlimited sandbox.
 func New(cfg config.Config, logger *slog.Logger, subtree cgroup.Subtree) (*Backend, error) {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if err := requireUID0(os.Geteuid()); err != nil {
+		return nil, err
 	}
 	runsc, err := resolveRunsc(cfg)
 	if err != nil {
