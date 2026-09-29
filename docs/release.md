@@ -56,11 +56,15 @@ overwriting existing ones) and enables the services. The units **require**
 those env files, so a host that is not configured fails to start rather than
 running with defaults.
 
-Before installation, provision the `vora` system user and a lingering
-`systemd --user` manager, then run rootless containerd as `vora` at
-`/run/user/<vora-uid>/containerd-rootless/containerd.sock`. The installer
-refuses a missing rootless socket rather than granting `vora` access to the
-host-root containerd daemon. For an existing root deployment, stop the runner,
+Before installation, provision the `vora` system user (home `/var/lib/vora`)
+with subordinate uid/gid ranges and a lingering `systemd --user` manager, then
+run rootless containerd as `vora` (`containerd-rootless-setuptool.sh install`
+from nerdctl's `extras/rootless`), which listens at
+`/run/user/<vora-uid>/containerd/containerd.sock`. The installer refuses a
+missing rootless socket rather than granting `vora` access to the host-root
+containerd daemon. `scripts/test-system-unit.sh setup` is the reference for
+these steps; CI runs it on Ubuntu 26.04. For an existing root deployment, stop
+the runner,
 migrate `/var/lib/vora` to `vora:vora` and the images to the rootless daemon,
 and update any preserved `/etc/vora/runner.env`; the installer does not copy
 existing secrets or state automatically. Runner TLS keys must be readable by
@@ -103,7 +107,7 @@ Two things to know:
 
   ```bash
   # Run as vora, against its rootless socket (not /run/containerd/containerd.sock):
-  ctr --address /run/user/<vora-uid>/containerd-rootless/containerd.sock \
+  ctr --address /run/user/<vora-uid>/containerd/containerd.sock \
     --namespace vora images pull \
     --user <github-user>:<PAT with read:packages> \
     ghcr.io/vorash/vora-python@sha256:<digest from the release>
@@ -131,6 +135,14 @@ Two things to know:
 
 ## Pitfalls
 
+- **Chown the state directory before rootless containerd uses it.** With
+  `User=vora`, `StateDirectory=vora` makes systemd chown `/var/lib/vora`
+  recursively whenever its top directory is not already owned by `vora:vora`.
+  Rootless containerd keeps its store under the same tree
+  (`/var/lib/vora/.local/share/containerd`), where files of non-root image
+  users belong to `vora`'s subordinate ids, and a recursive chown rewrites
+  them. Chown the top directory (and migrate old root-owned state) before
+  setting up rootless containerd or starting the unit.
 - **The runner state directory must belong to `vora:vora`.** The system
   runner uses `User=vora`, delegated user cgroups and only CAP_SYS_ADMIN and
   CAP_NET_ADMIN for namespace/network setup. These host capabilities are still
