@@ -17,8 +17,10 @@ gVisor) binds the same pair, so a host-side limit covers both.
 ## Decision
 
 **1. Prefer an ext4/xfs project quota (hard limit).**
-When the sandboxes filesystem is mounted with `prjquota` and the runner is root
-with `chattr` and `setquota` available, each sandbox's writable directories are
+When the sandboxes filesystem is mounted with `prjquota` and the runner holds
+`CAP_SYS_ADMIN` (root, or the `vora` user of the system unit, which has it
+ambient; gating on uid 0 silently disabled this in production, `#102`) with
+`chattr` and `setquota` available, each sandbox's writable directories are
 assigned a project ID with a byte limit. Writes past the limit fail with
 `EDQUOT` at the kernel boundary, so a sandbox that ignores the error still cannot
 overrun the host. The project ID is derived deterministically from the sandbox
@@ -40,7 +42,7 @@ rather than claiming a hard guarantee it does not have. XFS is the verified
 hard-limit filesystem.
 
 **2. Fall back to a periodic usage scan (best-effort).**
-When project quotas are unavailable — an unprivileged runner, a filesystem
+When project quotas are unavailable — a runner without `CAP_SYS_ADMIN`, a filesystem
 without `prjquota`, or a missing tool — the runner's `EnforceDiskQuota` loop
 sums the writable bytes and stops a sandbox over its limit. This path runs on
 every host and also supplies the semantic reason when hard quotas are active.

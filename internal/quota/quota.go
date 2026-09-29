@@ -5,7 +5,7 @@
 // is applied by the filesystem instead, in two layers:
 //
 //   - Project quotas (hard): when the sandboxes filesystem is mounted with
-//     prjquota and the runner can run chattr/setquota, each sandbox's writable
+//     prjquota and the runner can run chattr/setquota (CAP_SYS_ADMIN), each sandbox's writable
 //     directories are assigned a project ID with a byte limit. Writes past the
 //     limit fail with EDQUOT at the kernel boundary, so the host is never
 //     overrun even if the sandbox ignores the error.
@@ -26,6 +26,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // Mode describes how strictly disk limits are enforced on this host.
@@ -68,20 +70,33 @@ type Manager struct {
 // New detects the strongest enforcement available for the sandboxes root.
 func New(root string) *Manager {
 	m := &Manager{root: root, run: execRunner{}}
-	m.mode = detect(root, m.run, os.Geteuid() == 0)
+	m.mode = detect(root, m.run, canSetQuotas())
 	return m
+}
+
+// canSetQuotas reports whether this process holds CAP_SYS_ADMIN, which
+// setting a project quota limit requires. The system unit runs the runner as
+// the vora user with the capability ambient, so a uid check would turn kernel
+// enforcement off exactly where it is deployed.
+func canSetQuotas() bool {
+	hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
+	var data [2]unix.CapUserData
+	if err := unix.Capget(&hdr, &data[0]); err != nil {
+		return false
+	}
+	return data[0].Effective&(1<<unix.CAP_SYS_ADMIN) != 0
 }
 
 // Mode reports whether limits are kernel-enforced on this host.
 func (m *Manager) Mode() Mode { return m.mode }
 
-// detect returns ModeProject only when the runner is root, both tools exist,
+// detect returns ModeProject only when the runner holds CAP_SYS_ADMIN, both tools exist,
 // the filesystem holding root is mounted with prjquota, and a probe shows the
 // kernel actually refuses writes past a project-quota limit. The probe matters:
 // some kernels account project quotas without enforcing them (observed on
 // ext4), and a mount option alone cannot tell the two apart.
-func detect(root string, r Runner, rootUser bool) Mode {
-	if !rootUser {
+func detect(root string, r Runner, privileged bool) Mode {
+	if !privileged {
 		return ModeAccounting
 	}
 	if _, err := r.LookPath("chattr"); err != nil {
