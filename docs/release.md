@@ -73,6 +73,18 @@ existing secrets or state automatically. Runner TLS keys must be readable by
 switching users). The directories `/etc/vora` and `/etc/vora/tls` must be
 traversable, but the key files must remain private.
 
+When migrating a root runner that used gVisor, clear its `runsc` state before
+the recursive chown (#104). `runsc` bind-mounts a network namespace at
+`$root/null-netns`, where `$root` is the runner's `VORA_GVISOR_ROOT`, and a
+runner whose gVisor root was under `/var/lib/vora` stacked one such mount per
+start; `chown -R` fails on these nsfs inodes. With the runner stopped, unmount
+them until none is visible
+(`while mountpoint -q "$root/null-netns"; do umount "$root/null-netns" || break; done`),
+stopping when `umount` fails: a mount made before the `/var/lib/vora` volume
+was mounted stays hidden underneath it and cannot be reached (it is gone after
+the next reboot). Then remove the gVisor state directory. The non-root unit
+does not offer gVisor, so nothing there is needed.
+
 `vora-init` is installed next to `vora-runner` because `resolveInit()` looks
 beside the executable before falling back to `PATH`.
 
