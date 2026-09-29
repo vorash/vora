@@ -144,8 +144,9 @@ Two things to know:
   them. Chown the top directory (and migrate old root-owned state) before
   setting up rootless containerd or starting the unit.
 - **The runner state directory must belong to `vora:vora`.** The system
-  runner uses `User=vora`, delegated user cgroups and only CAP_SYS_ADMIN and
-  CAP_NET_ADMIN for namespace/network setup. These host capabilities are still
+  runner uses `User=vora`, delegated user cgroups and only CAP_SYS_ADMIN,
+  CAP_NET_ADMIN (namespace/network setup) and CAP_NET_BIND_SERVICE (the
+  restricted-mode resolver on port 53). These host capabilities are still
   powerful; this is not a fully rootless runner. The unit confines filesystem
   writes to its state and runtime directories. Never give `vora` access to the
   host-root containerd socket: it would restore host-root authority.

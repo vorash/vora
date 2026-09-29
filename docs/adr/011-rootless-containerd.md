@@ -10,7 +10,8 @@ The system containerd is root-only on the development host, and rootless gVisor
 namespace. The first production plan was a root system service.
 
 V-13 (`vorash/vora#71`) replaced the root system runner: it now runs as a
-dedicated `vora` user with only ambient `CAP_SYS_ADMIN`/`CAP_NET_ADMIN`, and must
+dedicated `vora` user with only ambient `CAP_SYS_ADMIN`/`CAP_NET_ADMIN`
+(`CAP_NET_BIND_SERVICE` was later added for the port-53 resolver), and must
 not reach the host-root containerd socket, which would restore host-root
 authority. It therefore uses the `vora` user's rootless containerd too. That
 unit shipped without ever booting; `#102` records what it needed to work.
@@ -23,8 +24,10 @@ unit shipped without ever booting; `#102` records what it needed to work.
   - `vora-runner` as a **user systemd unit wrapped in `rootlesskit`**
     (`scripts/vora-rootless.sh`), so `runsc` Method 2 works (ADR 008).
 - **Production (system unit, `deploy/systemd/vora-runner.system.service`):**
-  - `vora-runner` runs as the `vora` user with ambient `CAP_SYS_ADMIN` and
-    `CAP_NET_ADMIN`; bwrap is launched with those cleared (V-31);
+  - `vora-runner` runs as the `vora` user with ambient `CAP_SYS_ADMIN`,
+    `CAP_NET_ADMIN` and `CAP_NET_BIND_SERVICE` (restricted sandboxes' resolver
+    listens on port 53 of their gateway); bwrap is launched with those cleared
+    (V-31);
   - images come from `vora`'s rootless containerd at
     `/run/user/<vora-uid>/containerd/containerd.sock`;
   - sandbox cgroups come from `vora`'s lingering user manager

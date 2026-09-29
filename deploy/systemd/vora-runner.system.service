@@ -8,7 +8,8 @@
 #
 # Requires a dedicated vora system user, a rootless containerd socket owned by
 # that user, and a lingering systemd --user manager for sandbox cgroups.
-# CAP_SYS_ADMIN and CAP_NET_ADMIN are still needed for namespace and nft setup;
+# CAP_SYS_ADMIN and CAP_NET_ADMIN are still needed for namespace and nft setup
+# (and CAP_NET_BIND_SERVICE for the restricted-mode resolver on port 53);
 # this unit does not make a compromised runner harmless.
 [Unit]
 Description=Vora runner
@@ -51,8 +52,10 @@ LockPersonality=yes
 SystemCallArchitectures=native
 # The bwrap launcher clears these before running bwrap (setpriv, util-linux):
 # bwrap aborts when it holds capabilities without being setuid.
-CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN
-AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN
+# CAP_NET_BIND_SERVICE: restricted sandboxes' DNS resolver listens on port 53
+# of their gateway address.
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 UMask=0077
 
 # Sandboxes carry their own pids/memory limits; the runner is long-lived and
