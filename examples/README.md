@@ -28,7 +28,8 @@ vora sandbox create --image vora/base && vora sandbox destroy sbx_...   # sanity
 Recipes marked **API** also need the control plane and an API key
 (`vora-api`, `vora keys create`, `VORA_API_KEY`); the release-bot recipe needs
 `VORA_MASTER_KEY` for the secret store. See the [README](../README.md) for
-images and configuration.
+setting up the API and images, and [docs/configuration.md](../docs/configuration.md)
+for every setting.
 
 The JavaScript recipes share one package:
 
