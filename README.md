@@ -73,21 +73,27 @@ runner. Runners dial out to it and register themselves.
 
 ### 1. Start the API and a runner
 
-For local development, both on loopback:
+For local development, both on loopback. The runner started by
+`make install-rootless` lives in its own rootlesskit network namespace and
+can't reach the host's loopback, so stop it and run the binary directly (bwrap
+only; this runner has no gVisor):
 
 ```bash
+systemctl --user stop vora-runner                         # frees its socket and :9101
+
 export VORA_API_BOOTSTRAP_KEY="$(openssl rand -hex 32)"   # initial admin key, never stored
-vora-api &                                                # HTTP :9300, runner registry :9301
+bin/vora-api &                                            # HTTP :9300, runner registry :9301
 
 VORA_API_GRPC=127.0.0.1:9301 \
 VORA_RUNNER_ADDR=127.0.0.1:9200 \
 VORA_RUNNER_INSECURE=1 \
-  vora-runner &                                           # registers, then heartbeats
+  bin/vora-runner &                                       # registers, then heartbeats
 ```
 
 `VORA_RUNNER_INSECURE=1` is accepted on a loopback address only. Anything
 reachable from another host needs TLS and a join token — see
-[docs/configuration.md](docs/configuration.md#tls).
+[docs/configuration.md](docs/configuration.md#tls). On a server, the system
+install runs both as services.
 
 ### 2. Create a tenant key
 
@@ -106,8 +112,9 @@ export VORA_API_KEY="vora_…"
 ```
 
 A tenant key sees only its tenant's sandboxes and snapshots. `admin` keys also
-manage keys, secrets and the runner inventory. `vora keys create` does the same
-from the CLI.
+manage keys and secrets, and a global admin (no tenant) can list runners.
+From the CLI: `vora --api "$API" --api-key "$VORA_API_BOOTSTRAP_KEY" keys create
+--name demo --tenant acme`.
 
 ### 3. Create a sandbox, run code, clean up
 
@@ -150,7 +157,8 @@ curl -s -X DELETE "$API/v1/sandboxes/$SBX" -H "$AUTH"
 
 ### Wire format
 
-The API speaks [protojson](https://protobuf.dev/programming-guides/json/):
+The sandbox, exec, snapshot and audit routes speak
+[protojson](https://protobuf.dev/programming-guides/json/):
 
 - **Field names** are camelCase in responses; requests accept camelCase or
   snake_case.
@@ -166,6 +174,10 @@ The API speaks [protojson](https://protobuf.dev/programming-guides/json/):
 - **An exec stream that ends without an `exit` chunk was killed.** Don't treat
   it as success.
 - **Errors** are `{"error": "…"}` with an HTTP status.
+
+The admin routes (`/v1/keys`, `/v1/secrets`, `/v1/runners`) and the file-write
+response are plain JSON with snake_case names only: send `tenant_id`, not
+`tenantId`.
 
 ### Endpoints
 
@@ -342,6 +354,11 @@ async def main(candidates: list[str]) -> None:
 
         print(await asyncio.gather(*(attempt(c) for c in candidates)))  # [True, False, …]
         await snapshot.remove()
+
+asyncio.run(main([
+    "def slugify(s): return '-'.join(s.lower().replace(',', '').split())",
+    "def slugify(s): return s.lower()",
+]))
 ```
 
 Over HTTP the same steps are `POST /v1/sandboxes/{id}/snapshot`, then
