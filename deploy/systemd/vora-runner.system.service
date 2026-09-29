@@ -46,7 +46,11 @@ BindPaths=/run/vora/netns:/run/netns
 ProtectHome=read-only
 PrivateTmp=yes
 ProtectKernelModules=yes
-ProtectKernelTunables=yes
+# No ProtectKernelTunables=: its read-only mounts over /proc/sys, /proc/acpi,
+# ... make /proc "too revealing" to mount afresh, so bwrap cannot mount the
+# sandbox's /proc from a user namespace ("Can't mount proc on /newroot/proc").
+# The /proc/sys files stay root-owned 0644 and this unit has no
+# CAP_DAC_OVERRIDE, so vora still cannot write host sysctls.
 RestrictSUIDSGID=yes
 LockPersonality=yes
 SystemCallArchitectures=native
