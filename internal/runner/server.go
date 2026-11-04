@@ -409,7 +409,30 @@ func (s *Server) CreateSandbox(ctx context.Context, req *v1.CreateSandboxRequest
 	if err := s.checkSandboxCapacity(spec.TenantID); err != nil {
 		return nil, err
 	}
+	rec, err := s.createRecord(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
 
+	s.logger.Info("sandbox requested",
+		"sandbox_id", rec.ID,
+		"image", spec.Image,
+		"runner_id", s.runnerID,
+		"memory_bytes", spec.Resources.MemoryBytes,
+		"cpu_millis", spec.Resources.CPUMillis,
+		"pids", spec.Resources.Pids,
+		"network", string(spec.Network.Mode),
+		"broker_aliases", spec.Network.BrokerAliases,
+	)
+	if len(creds) > 0 {
+		s.stageBrokerCredentials(rec.ID, creds)
+	}
+	return &v1.CreateSandboxResponse{Sandbox: toProtoSandbox(rec)}, nil
+}
+
+// createRecord persists a validated spec as a REQUESTED record and prepares its
+// workspace and disk quota. The caller holds createMu and has checked capacity.
+func (s *Server) createRecord(ctx context.Context, spec runtime.SandboxSpec) (*sandbox.Record, error) {
 	// Prepare the per-sandbox directories and record the rootfs path. The
 	// image is not required to exist yet; the backend validates it at start.
 	ws := s.workspaces.Paths(spec.ID)
@@ -434,21 +457,7 @@ func (s *Server) CreateSandbox(ctx context.Context, req *v1.CreateSandboxRequest
 		return nil, status.Error(codes.Internal, "failed to prepare workspace")
 	}
 	s.applyDiskQuota(ctx, rec)
-
-	s.logger.Info("sandbox requested",
-		"sandbox_id", rec.ID,
-		"image", spec.Image,
-		"runner_id", s.runnerID,
-		"memory_bytes", spec.Resources.MemoryBytes,
-		"cpu_millis", spec.Resources.CPUMillis,
-		"pids", spec.Resources.Pids,
-		"network", string(spec.Network.Mode),
-		"broker_aliases", spec.Network.BrokerAliases,
-	)
-	if len(creds) > 0 {
-		s.stageBrokerCredentials(rec.ID, creds)
-	}
-	return &v1.CreateSandboxResponse{Sandbox: toProtoSandbox(rec)}, nil
+	return rec, nil
 }
 
 func (s *Server) checkSandboxCapacity(tenant string) error {
@@ -554,10 +563,19 @@ func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) 
 	if rec.State != sandbox.StateRequested {
 		return nil, status.Errorf(codes.FailedPrecondition, "sandbox %s is in state %s", rec.ID, rec.State)
 	}
-	keyID := req.GetActor().GetKeyId()
+	if err := s.startRecord(ctx, rec, req.GetActor().GetKeyId()); err != nil {
+		return nil, err
+	}
+	return toProtoSandbox(rec), nil
+}
+
+// startRecord takes a REQUESTED record to RUNNING: it picks the backend,
+// resolves the image, creates and starts the sandbox with any staged broker
+// credentials, and registers the handle.
+func (s *Server) startRecord(ctx context.Context, rec *sandbox.Record, keyID string) error {
 	backend, err := s.selectBackend(rec.Spec)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	// A sandbox that grants broker aliases must have credentials; losing them
 	// (for example across a runner restart) fails closed rather than starting
@@ -566,33 +584,33 @@ func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) 
 	defer zeroCredentials(creds)
 	if len(rec.Spec.Network.BrokerAliases) > 0 && len(creds) == 0 {
 		s.fail(rec, runtime.ReasonRuntimeFailure, keyID)
-		return nil, status.Error(codes.FailedPrecondition, "broker credentials are unavailable; recreate the sandbox")
+		return status.Error(codes.FailedPrecondition, "broker credentials are unavailable; recreate the sandbox")
 	}
 	// Record the chosen backend so future RPCs and `inspect` are explicit.
 	if rec.Spec.Backend == "" {
 		rec.Spec.Backend = backend.Name()
 	}
 	if !backend.Capabilities().SupportsNetwork(rec.Spec.Network.Mode) {
-		return nil, status.Errorf(codes.InvalidArgument, "backend %s does not support network mode %q", backend.Name(), rec.Spec.Network.Mode)
+		return status.Errorf(codes.InvalidArgument, "backend %s does not support network mode %q", backend.Name(), rec.Spec.Network.Mode)
 	}
 	rootfs, err := s.images.Resolve(ctx, rec.Spec.Image)
 	if err != nil {
 		s.fail(rec, runtime.ReasonRuntimeFailure, keyID)
-		return nil, status.Error(codes.FailedPrecondition, err.Error())
+		return status.Error(codes.FailedPrecondition, err.Error())
 	}
 	if rootfs != rec.Spec.Workspace.RootfsDir {
 		rec.Spec.Workspace.RootfsDir = rootfs
 		if err := s.store.Save(rec); err != nil {
 			s.fail(rec, runtime.ReasonRuntimeFailure, keyID)
-			return nil, status.Error(codes.Internal, "failed to persist resolved rootfs")
+			return status.Error(codes.Internal, "failed to persist resolved rootfs")
 		}
 	}
 
 	if err := s.transition(rec, sandbox.StateScheduling, "", keyID); err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return status.Error(codes.Internal, err.Error())
 	}
 	if err := s.transition(rec, sandbox.StateCreating, "", keyID); err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return status.Error(codes.Internal, err.Error())
 	}
 
 	ctx, span := telemetry.Start(ctx, "runtime.start",
@@ -603,11 +621,11 @@ func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) 
 	h, err := backend.Create(ctx, rec.Spec)
 	if err != nil {
 		s.fail(rec, runtime.ReasonRuntimeFailure, keyID)
-		return nil, status.Errorf(codes.Internal, "create sandbox: %v", err)
+		return status.Errorf(codes.Internal, "create sandbox: %v", err)
 	}
 	if err := s.transition(rec, sandbox.StateStarting, "", keyID); err != nil {
 		_ = backend.Destroy(ctx, h)
-		return nil, status.Error(codes.Internal, err.Error())
+		return status.Error(codes.Internal, err.Error())
 	}
 	var startErr error
 	if len(creds) > 0 {
@@ -615,7 +633,7 @@ func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) 
 		if !ok {
 			_ = backend.Destroy(ctx, h)
 			s.fail(rec, runtime.ReasonRuntimeFailure, keyID)
-			return nil, status.Errorf(codes.InvalidArgument, "backend %s does not support credential brokering", backend.Name())
+			return status.Errorf(codes.InvalidArgument, "backend %s does not support credential brokering", backend.Name())
 		}
 		startErr = ba.StartWithCredentials(ctx, h, creds)
 	} else {
@@ -624,16 +642,16 @@ func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) 
 	if startErr != nil {
 		_ = backend.Destroy(ctx, h)
 		s.fail(rec, runtime.ReasonRuntimeFailure, keyID)
-		return nil, status.Errorf(codes.Internal, "start sandbox: %v", startErr)
+		return status.Errorf(codes.Internal, "start sandbox: %v", startErr)
 	}
 	s.putHandle(rec.ID, backend, h)
 	if err := s.transition(rec, sandbox.StateRunning, "", keyID); err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return status.Error(codes.Internal, err.Error())
 	}
 	s.metrics.SandboxRunning.Inc()
 	s.metrics.RunnerSandboxes.Inc()
 	s.logger.Info("sandbox running", "sandbox_id", rec.ID, "backend", backend.Name())
-	return toProtoSandbox(rec), nil
+	return nil
 }
 
 // ExecSandbox runs a command in a running sandbox and streams its output.
@@ -647,18 +665,25 @@ func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStrea
 	if req.GetExec().GetExecutionId() != "" {
 		return status.Error(codes.InvalidArgument, "execution_id is assigned by the runner")
 	}
-	execReq := execRequestFromProto(req.GetExec())
+	return s.runExec(stream.Context(), req.GetSandboxId(), backend, h, execRequestFromProto(req.GetExec()), req.GetActor().GetKeyId(), stream.Send)
+}
+
+// runExec runs one command in a started sandbox. It mints the execution ID,
+// forwards the backend's chunks through send, and writes exactly one exec
+// record, persisted before the exit chunk is sent. A run that ends without an
+// exit chunk is recorded as a RuntimeFailure and returns an error.
+func (s *Server) runExec(ctx context.Context, sandboxID string, backend runtime.Backend, h runtime.Handle, execReq runtime.ExecRequest, keyID string, send func(*v1.ExecChunk) error) error {
 	execReq.ExecutionID = ulid.NewExec()
 
 	started := time.Now().UTC()
-	execCtx, span := telemetry.Start(stream.Context(), "runtime.exec",
-		attribute.String("sandbox.id", req.GetSandboxId()),
+	execCtx, span := telemetry.Start(ctx, "runtime.exec",
+		attribute.String("sandbox.id", sandboxID),
 		attribute.String("vora.exec.command", execReq.Command))
 	defer span.End()
 	baseline := s.usageBaseline(execCtx, backend, h)
 	es, err := backend.Exec(execCtx, h, execReq)
 	if err != nil {
-		s.recordExec(req.GetSandboxId(), execReq, started, 0, 0, 0, runtime.ReasonRuntimeFailure, 0, 0, req.GetActor().GetKeyId())
+		s.recordExec(sandboxID, execReq, started, 0, 0, 0, runtime.ReasonRuntimeFailure, 0, 0, keyID)
 		s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure)).Inc()
 		return status.Errorf(codes.Internal, "exec: %v", err)
 	}
@@ -673,8 +698,8 @@ func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStrea
 		}
 		if err != nil {
 			if !recorded {
-				cpu, peak := s.usageDelta(stream.Context(), backend, h, baseline)
-				s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure, cpu, peak, req.GetActor().GetKeyId())
+				cpu, peak := s.usageDelta(ctx, backend, h, baseline)
+				s.recordExec(sandboxID, execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure, cpu, peak, keyID)
 				s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure)).Inc()
 			}
 			return status.Errorf(codes.Internal, "exec stream: %v", err)
@@ -686,12 +711,12 @@ func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStrea
 			// moment it sees the exit chunk (the API closes its response right
 			// after forwarding it), so the record must be on disk first. The exit
 			// chunk is final, so the byte totals are complete here.
-			cpu, peak := s.usageDelta(stream.Context(), backend, h, baseline)
-			s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, chunk.Exit.ExitCode, chunk.Exit.Reason, cpu, peak, req.GetActor().GetKeyId())
+			cpu, peak := s.usageDelta(ctx, backend, h, baseline)
+			s.recordExec(sandboxID, execReq, started, stdoutBytes, stderrBytes, chunk.Exit.ExitCode, chunk.Exit.Reason, cpu, peak, keyID)
 			s.metrics.ExecTotal.WithLabelValues("ok").Inc()
 			recorded = true
 		}
-		if err := stream.Send(execChunkToProto(chunk)); err != nil {
+		if err := send(execChunkToProto(chunk)); err != nil {
 			return err
 		}
 	}
@@ -701,8 +726,8 @@ func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStrea
 	}
 	// EOF with no exit record is a killed run (watchdog, timeout, agent
 	// death) — never a silent success.
-	cpu, peak := s.usageDelta(stream.Context(), backend, h, baseline)
-	s.recordExec(req.GetSandboxId(), execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure, cpu, peak, req.GetActor().GetKeyId())
+	cpu, peak := s.usageDelta(ctx, backend, h, baseline)
+	s.recordExec(sandboxID, execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure, cpu, peak, keyID)
 	s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure)).Inc()
 	return status.Error(codes.Internal, "exec stream ended without an exit record (the run was killed)")
 }
