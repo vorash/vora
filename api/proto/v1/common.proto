@@ -114,10 +114,41 @@ message ExecRequest {
   bytes stdin = 7;
 }
 
-// ExecExit reports how an execution finished.
+// PeakScope says what a memory peak covers.
+enum PeakScope {
+  // Not measured: the execution ran unmetered, or the cgroup has no
+  // memory.peak.
+  PEAK_SCOPE_UNSPECIFIED = 0;
+  // The high-water mark since the execution started (memory.peak reset for
+  // the runner's fd, kernel 6.12 and later).
+  PEAK_SCOPE_WINDOW = 1;
+  // The kernel refused the reset, so the peak is the sandbox's lifetime peak.
+  PEAK_SCOPE_LIFETIME = 2;
+}
+
+// ExecUsage is what the sandbox used during one execution's window. The
+// counters are per-execution deltas, never lifetime totals. The window is the
+// sandbox's cgroup, not the process: concurrent executions in one sandbox have
+// overlapping windows, and each counts the others' usage. memory_peak_bytes
+// includes the sandbox's resident baseline (its init, and on gVisor the
+// sentry and gofer).
+message ExecUsage {
+  int64 cpu_millis = 1;
+  int64 memory_peak_bytes = 2;
+  PeakScope memory_peak_scope = 3;
+  int64 oom_kills = 4;
+  int64 pids_limit_hits = 5;
+}
+
+// ExecExit reports how an execution finished. reason is OOM_KILLED when the
+// execution's window counted an OOM kill, and PIDS_LIMIT_EXCEEDED when it
+// failed after hitting the pids limit; TIMEOUT_EXCEEDED is never overridden.
 message ExecExit {
   int32 exit_code = 1;
   ExitReason reason = 2;
+  ExecUsage usage = 3;
+  // execution_id is the id of this execution's audit record.
+  string execution_id = 4;
 }
 
 // ExecChunk is one streamed unit of exec output.

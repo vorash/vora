@@ -115,13 +115,21 @@ message SandboxExec {
   ExitReason reason = 8;
   int64 stdout_bytes = 9;
   int64 stderr_bytes = 10;
-  // cpu_millis is the CPU consumed during this execution.
+  // cpu_millis is the CPU the sandbox consumed during this execution.
   int64 cpu_millis = 11;
-  // memory_peak_bytes is the cgroup memory.peak at the end of the execution.
+  // memory_peak_bytes is the sandbox's memory peak during this execution's
+  // window; memory_peak_scope says whether the kernel could scope it to the
+  // window or it is the lifetime peak. The window is the sandbox's cgroup, so
+  // concurrent executions in one sandbox have overlapping windows.
   int64 memory_peak_bytes = 12;
   // egress_allowed/denied count restricted-network decisions in the window.
   int64 egress_allowed = 13;
   int64 egress_denied = 14;
+  PeakScope memory_peak_scope = 15;
+  // oom_kills and pids_limit_hits are per-execution deltas of the sandbox
+  // cgroup's counters.
+  int64 oom_kills = 16;
+  int64 pids_limit_hits = 17;
 }
 
 message GetSandboxEgressRequest {
