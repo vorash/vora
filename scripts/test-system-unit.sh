@@ -49,8 +49,14 @@ as_vora() {
     PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin "$@")
 }
 
+# A second runner on the same host, as vora, with its own state, socket,
+# metrics port and runtime directory: the two-runner layout docs/release.md
+# describes, both allocating in the host network namespace (vorash/vora#110).
+SOCKET_B=/run/vora-b/runner.sock
+
 # stdin from /dev/null: `vora exec` forwards piped stdin to the sandbox.
-cli() { timeout 180 vora --socket "$SOCKET" "$@" </dev/null; }
+# RUNNER_SOCKET selects the second runner.
+cli() { timeout 180 vora --socket "${RUNNER_SOCKET:-$SOCKET}" "$@" </dev/null; }
 
 fetch_pinned() {
   local name="$1" sum="$2"
@@ -121,13 +127,33 @@ install_unit() {
   wait_socket
 }
 
-wait_socket() {
+wait_socket() { wait_runner vora-runner.service "$SOCKET"; }
+
+wait_runner() {
+  local unit="$1" socket="$2"
   for _ in $(seq 60); do
-    [[ -S "$SOCKET" ]] && systemctl is-active --quiet vora-runner.service && return 0
+    [[ -S "$socket" ]] && systemctl is-active --quiet "$unit" && return 0
     sleep 1
   done
-  echo "error: vora-runner did not come up" >&2
+  echo "error: $unit did not come up" >&2
   return 1
+}
+
+start_runner_b() {
+  sed -e 's|VORA_STATE_DIR=/var/lib/vora |VORA_STATE_DIR=/var/lib/vora/runner-b |' \
+      -e "s|VORA_SOCKET=$SOCKET|VORA_SOCKET=$SOCKET_B|" \
+      -e 's|^EnvironmentFile=.*|EnvironmentFile=/etc/vora/runner-b.env|' \
+      -e 's|^ReadWritePaths=.*|ReadWritePaths=/var/lib/vora /run/vora-b|' \
+      -e 's|^BindPaths=.*|BindPaths=/run/vora-b/netns:/run/netns|' \
+      -e 's|^RuntimeDirectory=.*|RuntimeDirectory=vora-b vora-b/netns|' \
+      /etc/systemd/system/vora-runner.service >/etc/systemd/system/vora-runner-b.service
+  grep -q "VORA_STATE_DIR=/var/lib/vora/runner-b .*VORA_SOCKET=$SOCKET_B" /etc/systemd/system/vora-runner-b.service || {
+    echo "error: vora-runner-b.service did not get its own state dir and socket" >&2; return 1; }
+  sed 's|^VORA_METRICS_ADDR=.*|VORA_METRICS_ADDR=127.0.0.1:9102|' /etc/vora/runner.env >/etc/vora/runner-b.env
+  chmod 0600 /etc/vora/runner-b.env
+  systemctl daemon-reload
+  systemctl start vora-runner-b.service
+  wait_runner vora-runner-b.service "$SOCKET_B"
 }
 
 fail=0
@@ -217,6 +243,51 @@ egress_policy() {
   return "$rc"
 }
 
+# The 10.x addresses a sandbox holds, read from inside it.
+sandbox_addrs() {
+  cli exec "$1" -- sh -c "grep -B1 '32 host' /proc/net/fib_trie | grep -o '10\.[0-9.]*' | sort -u"
+}
+
+# Each live sandbox's host veth carries the sandbox id as its alias.
+veth_labelled() {
+  local id
+  for id in "$@"; do
+    ip -j link show | grep -q "\"ifalias\":\"$id\"" || return 1
+  done
+}
+
+# Two runners allocate in the host network namespace side by side: every
+# sandbox works, the same tenant lands in a different /24 on each runner, and
+# destroying one runner's sandboxes or restarting it leaves the other's intact.
+two_runners_coexist() {
+  local a_full a_priv b_full b_priv a_net b_net rc=0
+  start_runner_b || return 1
+  a_full="$(create "${IMAGES[0]}" full)" && [[ -n "$a_full" ]] || rc=1
+  a_priv="$(create "${IMAGES[0]}" private)" && [[ -n "$a_priv" ]] || rc=1
+  b_full="$(RUNNER_SOCKET=$SOCKET_B create "${IMAGES[0]}" full)" && [[ -n "$b_full" ]] || rc=1
+  b_priv="$(RUNNER_SOCKET=$SOCKET_B create "${IMAGES[0]}" private)" && [[ -n "$b_priv" ]] || rc=1
+  if [[ "$rc" -eq 0 ]]; then
+    cli exec "$a_full" -- echo ok | grep -qx ok || rc=1
+    cli exec "$a_priv" -- echo ok | grep -qx ok || rc=1
+    RUNNER_SOCKET=$SOCKET_B cli exec "$b_full" -- echo ok | grep -qx ok || rc=1
+    RUNNER_SOCKET=$SOCKET_B cli exec "$b_priv" -- echo ok | grep -qx ok || rc=1
+    veth_labelled "$a_full" "$a_priv" "$b_full" "$b_priv" || { echo "a sandbox veth is missing its owner label" >&2; rc=1; }
+    # Both runners used --tenant ci and must still hold different /24s.
+    a_net="$(sandbox_addrs "$a_priv" | cut -d. -f1-3)"
+    b_net="$(RUNNER_SOCKET=$SOCKET_B sandbox_addrs "$b_priv" | cut -d. -f1-3)"
+    [[ -n "$a_net" && -n "$b_net" && "$a_net" != "$b_net" ]] || { echo "tenant /24: A ${a_net:-?} B ${b_net:-?}" >&2; rc=1; }
+    cli sandbox destroy "$a_full" >/dev/null || rc=1
+    cli sandbox destroy "$a_priv" >/dev/null || rc=1
+    systemctl restart vora-runner.service && wait_socket || rc=1
+    RUNNER_SOCKET=$SOCKET_B cli exec "$b_full" -- echo ok | grep -qx ok || { echo "runner B's full sandbox broke" >&2; rc=1; }
+    RUNNER_SOCKET=$SOCKET_B cli exec "$b_priv" -- echo ok | grep -qx ok || { echo "runner B's private sandbox broke" >&2; rc=1; }
+    RUNNER_SOCKET=$SOCKET_B cli sandbox destroy "$b_full" >/dev/null || rc=1
+    RUNNER_SOCKET=$SOCKET_B cli sandbox destroy "$b_priv" >/dev/null || rc=1
+  fi
+  systemctl stop vora-runner-b.service || rc=1
+  return "$rc"
+}
+
 journal() { journalctl -u vora-runner.service --no-pager -o cat; }
 
 # At boot the system runner can start before vora's rootless containerd, which
@@ -261,6 +332,7 @@ test_unit() {
   done
   check "runner holds only its three capabilities" runner_capabilities
   check "netns sandbox holds no capabilities" sandbox_has_no_capabilities
+  check "two runners share the host network namespace" two_runners_coexist
   check "egress: full reaches the internet, restricted only its allowlist" egress_policy
   check "runner reports project-quota mode" grep -qx 'vora_disk_quota_enforced 1' <(curl -fsS http://127.0.0.1:9101/metrics)
   check "disk quota is kernel-enforced" quota_enforced
@@ -276,6 +348,8 @@ diagnose() {
   uid="$(vora_uid 2>/dev/null)"
   echo "==> vora-runner journal"; journal | tail -200
   echo "==> vora-runner unit"; systemctl status vora-runner.service --no-pager
+  echo "==> vora-runner-b journal"; journalctl -u vora-runner-b.service --no-pager -o cat | tail -100
+  echo "==> host links"; ip -j link show | grep -o '"ifname":"vora-[^"]*"\|"ifalias":"[^"]*"' | paste - - || true
   echo "==> vora user manager journal"; journalctl _UID="$uid" --no-pager -o short | tail -150
   echo "==> rootless containerd"; journalctl --no-pager -o cat _UID="$uid" _SYSTEMD_USER_UNIT=containerd.service | tail -60
   as_vora systemctl --user status containerd --no-pager 2>&1
