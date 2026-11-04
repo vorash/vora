@@ -128,6 +128,40 @@ describe("exec", () => {
     expect(seen[1]).toEqual({ type: "exit", exitCode: 0 });
   });
 
+  it("carries the exec's usage and execution id on the exit chunk", async () => {
+    // The exact protojson the API sends: int64 as strings, the scope by name.
+    const exit = {
+      exitCode: 137,
+      reason: "OOM_KILLED",
+      executionId: "exe_01M6M3D3FRG49JM5BK3MD9Q0WY",
+      usage: {
+        cpuMillis: "120",
+        memoryPeakBytes: "67108864",
+        memoryPeakScope: "PEAK_SCOPE_WINDOW",
+        oomKills: "1",
+        pidsLimitHits: "2",
+      },
+    };
+    const api = await boot((request) => (request.url.endsWith("/exec") ? { ndjson: [{ exit }] } : undefined));
+    const vora = new Vora({ baseUrl: api.baseUrl });
+    const sandbox = await vora.sandboxes.get("sbx_x");
+
+    const seen: ExecChunk[] = [];
+    for await (const chunk of sandbox.streamExec({ command: "true" })) {
+      seen.push(chunk);
+    }
+
+    expect(seen).toEqual([
+      {
+        type: "exit",
+        exitCode: 137,
+        reason: "OOM_KILLED",
+        executionId: "exe_01M6M3D3FRG49JM5BK3MD9Q0WY",
+        usage: { cpuMillis: 120, memoryPeakBytes: 64 * 1024 * 1024, memoryPeakScope: "PEAK_SCOPE_WINDOW", oomKills: 1, pidsLimitHits: 2 },
+      },
+    ]);
+  });
+
   it("passes stdin, cwd, env and timeout through", async () => {
     const api = await boot((request) => (request.url.endsWith("/exec") ? { ndjson: [{ exit: { exitCode: 0 } }] } : undefined));
     const vora = new Vora({ baseUrl: api.baseUrl });
@@ -228,14 +262,40 @@ describe("observability", () => {
   it("parses exec records", async () => {
     const api = await boot((request) =>
       request.url.endsWith("/execs")
-        ? { json: { execs: [{ executionId: "exec_1", command: "id", exitCode: 0, cpuMillis: "12", egressDenied: "2" }] } }
+        ? {
+            json: {
+              execs: [
+                {
+                  executionId: "exec_1",
+                  command: "id",
+                  exitCode: 0,
+                  cpuMillis: "12",
+                  egressDenied: "2",
+                  memoryPeakBytes: "4096",
+                  memoryPeakScope: "PEAK_SCOPE_LIFETIME",
+                  oomKills: "1",
+                  pidsLimitHits: "3",
+                },
+              ],
+            },
+          }
         : undefined,
     );
     const vora = new Vora({ baseUrl: api.baseUrl });
     const sandbox = await vora.sandboxes.get("sbx_x");
 
     const execs = await sandbox.execs();
-    expect(execs[0]).toMatchObject({ executionId: "exec_1", command: "id", exitCode: 0, cpuMillis: 12, egressDenied: 2 });
+    expect(execs[0]).toMatchObject({
+      executionId: "exec_1",
+      command: "id",
+      exitCode: 0,
+      cpuMillis: 12,
+      egressDenied: 2,
+      memoryPeakBytes: 4096,
+      memoryPeakScope: "PEAK_SCOPE_LIFETIME",
+      oomKills: 1,
+      pidsLimitHits: 3,
+    });
   });
 
   it("parses egress decisions", async () => {

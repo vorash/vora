@@ -32,6 +32,13 @@ export type ExitReason =
   | "RUNTIME_FAILURE"
   | "DISK_QUOTA_EXCEEDED";
 
+/**
+ * What a memory peak covers: only this exec (`PEAK_SCOPE_WINDOW`), or the
+ * sandbox's lifetime because the kernel could not reset it before the exec
+ * (`PEAK_SCOPE_LIFETIME`, Linux before 6.12). Absent when not measured.
+ */
+export type PeakScope = "PEAK_SCOPE_UNSPECIFIED" | "PEAK_SCOPE_WINDOW" | "PEAK_SCOPE_LIFETIME";
+
 /** Lower-case aliases accepted wherever a `NetworkMode` is. */
 export type NetworkShorthand = "none" | "restricted" | "full" | "private";
 
@@ -107,9 +114,13 @@ export interface SandboxExec {
   stdoutBytes?: number;
   stderrBytes?: number;
   cpuMillis?: number;
+  /** The peak during this exec's window; `memoryPeakScope` says which window. */
   memoryPeakBytes?: number;
   egressAllowed?: number;
   egressDenied?: number;
+  memoryPeakScope?: PeakScope;
+  oomKills?: number;
+  pidsLimitHits?: number;
 }
 
 export interface SandboxEgress {
@@ -133,11 +144,24 @@ export interface SnapshotInfo {
   createdAtUnixMs?: number;
 }
 
-/** One unit of streamed exec output. */
+/**
+ * What the sandbox used during one exec. The counters are per-exec deltas. The
+ * window is the whole sandbox, so concurrent execs in one sandbox have
+ * overlapping windows and count each other's usage.
+ */
+export interface ExecUsage {
+  cpuMillis?: number;
+  memoryPeakBytes?: number;
+  memoryPeakScope?: PeakScope;
+  oomKills?: number;
+  pidsLimitHits?: number;
+}
+
+/** One unit of streamed exec output. The exit chunk names the exec's audit record and its usage. */
 export type ExecChunk =
   | { type: "stdout"; data: Uint8Array }
   | { type: "stderr"; data: Uint8Array }
-  | { type: "exit"; exitCode: number; reason?: ExitReason };
+  | { type: "exit"; exitCode: number; reason?: ExitReason; executionId?: string; usage?: ExecUsage };
 
 export interface ExecResult {
   stdout: string;
@@ -385,7 +409,24 @@ export function decodeSandboxExec(raw: unknown): SandboxExec {
   assign(exec, "memoryPeakBytes", asNumber(source.memoryPeakBytes));
   assign(exec, "egressAllowed", asNumber(source.egressAllowed));
   assign(exec, "egressDenied", asNumber(source.egressDenied));
+  assign(exec, "memoryPeakScope", asString(source.memoryPeakScope) as PeakScope | undefined);
+  assign(exec, "oomKills", asNumber(source.oomKills));
+  assign(exec, "pidsLimitHits", asNumber(source.pidsLimitHits));
   return exec;
+}
+
+function decodeExecUsage(raw: unknown): ExecUsage | undefined {
+  const source = asObject(raw);
+  if (source === undefined) {
+    return undefined;
+  }
+  const usage: ExecUsage = {};
+  assign(usage, "cpuMillis", asNumber(source.cpuMillis));
+  assign(usage, "memoryPeakBytes", asNumber(source.memoryPeakBytes));
+  assign(usage, "memoryPeakScope", asString(source.memoryPeakScope) as PeakScope | undefined);
+  assign(usage, "oomKills", asNumber(source.oomKills));
+  assign(usage, "pidsLimitHits", asNumber(source.pidsLimitHits));
+  return usage;
 }
 
 export function decodeSandboxEgress(raw: unknown): SandboxEgress {
@@ -421,6 +462,8 @@ export function decodeExecChunk(raw: unknown): ExecChunk | undefined {
     if (reason !== undefined) {
       chunk.reason = reason;
     }
+    assign(chunk, "executionId", asString(exit.executionId));
+    assign(chunk, "usage", decodeExecUsage(exit.usage));
     return chunk;
   }
   return undefined;
