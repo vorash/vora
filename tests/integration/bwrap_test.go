@@ -450,7 +450,7 @@ func TestBwrapOOMManySmall(t *testing.T) {
 	u, err := m.Stop(ctx)
 	t.Logf("hogs: exit %+v, usage %+v (meter error %v), output %q", exit, u, err, out.String())
 	if exit == nil {
-		t.Fatalf("hog exec ended without an exit chunk: the OOM killer took the agent")
+		t.Fatalf("hog exec ended without an exit chunk: the OOM took the sandbox down, not just a hog")
 	}
 	if u.OOMKills < 1 {
 		t.Fatalf("usage oom_kills = %d, want >= 1: the hogs never reached the limit, so this proved nothing", u.OOMKills)
