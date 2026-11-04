@@ -2,7 +2,12 @@ package network
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/vorash/vora/internal/runtime"
@@ -18,23 +23,220 @@ func TestManagerRejectsNonCanonicalIDs(t *testing.T) {
 	}
 }
 
-func TestAllocatorFailsBeforeSubnetWrap(t *testing.T) {
-	m := NewManager(t.TempDir(), ManagerConfig{}, nil)
-	m.next = 16384
-	if _, err := m.Create(context.Background(), ulid.NewSandbox(), Policy{Mode: runtime.NetworkFull}); err == nil {
-		t.Fatal("wrapped subnet index can reuse a live sandbox address")
+// testRunner is one runner process: a manager with its own state directory on
+// a host it may share with other runners.
+type testRunner struct {
+	t        *testing.T
+	m        *Manager
+	stateDir string
+}
+
+func newTestRunner(t *testing.T, h host) *testRunner {
+	dir := t.TempDir()
+	return &testRunner{t: t, m: newManager(dir, ManagerConfig{}, slog.New(slog.NewTextHandler(io.Discard, nil)), h), stateDir: dir}
+}
+
+// restart is the runner process coming back on the same state directory.
+func (r *testRunner) restart(h host) *testRunner {
+	return &testRunner{t: r.t, m: newManager(r.stateDir, ManagerConfig{}, slog.New(slog.NewTextHandler(io.Discard, nil)), h), stateDir: r.stateDir}
+}
+
+func (r *testRunner) create(pol Policy) *Net {
+	r.t.Helper()
+	n, err := r.m.Create(context.Background(), ulid.NewSandbox(), pol)
+	if err != nil {
+		r.t.Fatalf("Create(%s): %v", pol.Mode, err)
+	}
+	return n
+}
+
+func (r *testRunner) destroy(n *Net) {
+	r.t.Helper()
+	if err := r.m.Destroy(context.Background(), n.ID); err != nil {
+		r.t.Fatalf("Destroy(%s): %v", n.ID, err)
 	}
 }
 
+func (r *testRunner) stateFiles() []string {
+	files, _ := filepath.Glob(filepath.Join(r.stateDir, "netns", "*.json"))
+	return files
+}
+
+func restricted() Policy           { return Policy{Mode: runtime.NetworkRestricted} }
+func full() Policy                 { return Policy{Mode: runtime.NetworkFull} }
+func private(tenant string) Policy { return Policy{Mode: runtime.NetworkPrivate, TenantID: tenant} }
+
+func expectAddrs(t *testing.T, n *Net, iface, gateway, sandbox, cidr string) {
+	t.Helper()
+	if n.iface != iface || n.GatewayIP != gateway || n.SandboxIP != sandbox || n.SandboxCIDR != cidr {
+		t.Errorf("%s: got %s %s %s %s; want %s %s %s %s", n.Mode,
+			n.iface, n.GatewayIP, n.SandboxIP, n.SandboxCIDR, iface, gateway, sandbox, cidr)
+	}
+}
+
+// A single fresh runner keeps the names and addresses ADR 012 and ADR 016
+// document, so existing deployments and docs stay valid.
+func TestFreshRunnerKeepsDocumentedNamesAndAddresses(t *testing.T) {
+	r := newTestRunner(t, newFakeHost())
+	expectAddrs(t, r.create(restricted()), "vora-h0", "10.7.0.1", "10.7.0.2", "10.7.0.1/30")
+	expectAddrs(t, r.create(full()), "vora-h1", "10.7.0.5", "10.7.0.6", "10.7.0.5/30")
+	expectAddrs(t, r.create(private("a")), "vora-h2", "10.9.0.1", "10.9.0.2", "10.9.0.0/24")
+	expectAddrs(t, r.create(private("a")), "vora-h3", "10.9.0.5", "10.9.0.6", "10.9.0.0/24")
+	expectAddrs(t, r.create(private("b")), "vora-h4", "10.9.1.1", "10.9.1.2", "10.9.1.0/24")
+}
+
+// Two runners in one network namespace never hand out the same interface,
+// gateway or tenant /24, even for the same tenant id on both.
+func TestRunnersSharingAHostNeverCollide(t *testing.T) {
+	h := newFakeHost()
+	a, b := newTestRunner(t, h), newTestRunner(t, h)
+	nets := []*Net{
+		a.create(restricted()), b.create(restricted()),
+		a.create(full()), b.create(full()),
+		a.create(private("tenant")), b.create(private("tenant")),
+	}
+	ifaces, gateways := map[string]bool{}, map[string]bool{}
+	for _, n := range nets {
+		if ifaces[n.iface] {
+			t.Errorf("interface %s handed out twice", n.iface)
+		}
+		if gateways[n.GatewayIP] {
+			t.Errorf("gateway %s handed out twice", n.GatewayIP)
+		}
+		ifaces[n.iface], gateways[n.GatewayIP] = true, true
+	}
+	if ca, cb := nets[4].SandboxCIDR, nets[5].SandboxCIDR; ca == cb {
+		t.Errorf("tenant /24 %s shared across runners: a private sandbox on one runner could reach another runner's tenant", ca)
+	}
+	if h.linkCount() != len(nets) {
+		t.Errorf("host has %d links for %d sandboxes", h.linkCount(), len(nets))
+	}
+}
+
+// A create that fails after claiming its interface removes only that
+// interface, and one that fails before claiming removes nothing.
+func TestFailedCreateLeavesOtherRunnersInterfaces(t *testing.T) {
+	h := newFakeHost()
+	a, b := newTestRunner(t, h), newTestRunner(t, h)
+	live := a.create(restricted())
+	livePrivate := a.create(private("tenant"))
+
+	h.runErr = errors.New("ip addr add: boom")
+	if _, err := b.m.Create(context.Background(), ulid.NewSandbox(), private("other")); err == nil {
+		t.Fatal("Create succeeded although plumbing failed")
+	}
+	h.runErr = nil
+	h.claimErr = errors.New("ip link add: Operation not permitted")
+	if _, err := b.m.Create(context.Background(), ulid.NewSandbox(), restricted()); err == nil {
+		t.Fatal("Create succeeded although the claim failed")
+	}
+	h.claimErr = nil
+
+	for _, n := range []*Net{live, livePrivate} {
+		if owner, ok := h.owner(n.iface); !ok || owner != n.ID {
+			t.Errorf("%s: runner A's interface gone or relabelled after runner B's failed create (owner %q, present %v)", n.iface, owner, ok)
+		}
+	}
+	if h.linkCount() != 2 {
+		t.Errorf("host has %d links, want runner A's 2: a failed create left its own behind", h.linkCount())
+	}
+	if h.hasTable(tenantTablePrefix + "1") {
+		t.Error("runner B's failed private create kept its tenant /24 claim")
+	}
+	if !h.hasTable(tenantTablePrefix + "0") {
+		t.Error("runner A's tenant /24 claim was released by runner B's failure")
+	}
+	if files := b.stateFiles(); len(files) != 0 {
+		t.Errorf("runner B recorded state for failed creates: %v", files)
+	}
+}
+
+// A restarted runner reaps what its previous process owned and nothing else,
+// even when another runner has since claimed one of its old interface names.
+func TestRestartReapsOnlyWhatThisRunnerOwns(t *testing.T) {
+	h := newFakeHost()
+	a := newTestRunner(t, h)
+	aRestricted := a.create(restricted())
+	aPrivate := a.create(private("tenant"))
+	// Runner A dies. The restricted sandbox's namespace dies with it, so its
+	// pair vanishes; the private sandbox's namespace outlives the runner.
+	h.vanish(aRestricted.iface)
+
+	b := newTestRunner(t, h)
+	bNet := b.create(restricted())
+	if bNet.iface != aRestricted.iface {
+		t.Fatalf("runner B claimed %s, test needs it to reuse %s", bNet.iface, aRestricted.iface)
+	}
+
+	a2 := a.restart(h)
+	if owner, ok := h.owner(bNet.iface); !ok || owner != bNet.ID {
+		t.Errorf("runner A's restart removed runner B's live interface %s (owner %q, present %v)", bNet.iface, owner, ok)
+	}
+	if _, ok := h.owner(aPrivate.iface); ok {
+		t.Errorf("runner A's restart left its own leftover %s", aPrivate.iface)
+	}
+	if h.hasTable(tenantTablePrefix + "0") {
+		t.Error("runner A's restart left its tenant /24 claimed")
+	}
+	if files := a2.stateFiles(); len(files) != 0 {
+		t.Errorf("stale state survived the restart: %v", files)
+	}
+	// The reclaimed /24 is free for the restarted runner.
+	expectAddrs(t, a2.create(private("tenant")), "vora-h1", "10.9.0.1", "10.9.0.2", "10.9.0.0/24")
+}
+
+// A tenant's /24 is held while any of its sandboxes lives and returned with
+// the last one, so the 256-tenant space is not consumed by tenant churn.
+func TestTenantClaimReleasedWithLastSandbox(t *testing.T) {
+	h := newFakeHost()
+	r := newTestRunner(t, h)
+	first, second := r.create(private("tenant")), r.create(private("tenant"))
+	r.destroy(first)
+	if !h.hasTable(tenantTablePrefix + "0") {
+		t.Fatal("tenant /24 released while a sandbox still uses it")
+	}
+	r.destroy(second)
+	if h.hasTable(tenantTablePrefix + "0") {
+		t.Fatal("tenant /24 kept after its last sandbox")
+	}
+	for i := 0; i < maxPrivateTenants+1; i++ {
+		r.destroy(r.create(private(fmt.Sprintf("tenant-%d", i))))
+	}
+	r.create(private("another"))
+}
+
 func TestPrivateHostSlotIsReusable(t *testing.T) {
-	m := NewManager(t.TempDir(), ManagerConfig{}, nil)
-	m.tenantHosts["tenant"] = maxPrivateHostsPerTenant
-	m.releaseTenantHost(&Net{Mode: runtime.NetworkPrivate, TenantID: "tenant", hostSlot: 7})
-	m.mu.Lock()
-	slot, ok := m.allocateTenantHost("tenant")
-	m.mu.Unlock()
-	if !ok || slot != 7 {
-		t.Fatalf("freed slot unavailable: slot=%d ok=%v", slot, ok)
+	r := newTestRunner(t, newFakeHost())
+	nets := make([]*Net, maxPrivateHostsPerTenant)
+	for i := range nets {
+		nets[i] = r.create(private("tenant"))
+	}
+	if _, err := r.m.Create(context.Background(), ulid.NewSandbox(), private("tenant")); err == nil {
+		t.Fatal("65th sandbox fit in a /24 of 64 /30s")
+	}
+	r.destroy(nets[7])
+	if n := r.create(private("tenant")); n.SandboxIP != nets[7].SandboxIP {
+		t.Fatalf("freed slot %s not reused, got %s", nets[7].SandboxIP, n.SandboxIP)
+	}
+}
+
+// Indexes wrap, so a long-lived runner is not exhausted after 16384 sandboxes;
+// only a host with every index live refuses a create.
+func TestIndexWrapsAndFailsOnlyWhenAllHeld(t *testing.T) {
+	h := newFakeHost()
+	r := newTestRunner(t, h)
+	r.m.next = maxIndexes - 1
+	expectAddrs(t, r.create(restricted()), "vora-h16383", "10.7.255.253", "10.7.255.254", "10.7.255.253/30")
+	expectAddrs(t, r.create(restricted()), "vora-h0", "10.7.0.1", "10.7.0.2", "10.7.0.1/30")
+
+	for i := 0; i < maxIndexes; i++ {
+		h.links[fmt.Sprintf("vora-h%d", i)] = "someone-else"
+	}
+	if _, err := r.m.Create(context.Background(), ulid.NewSandbox(), restricted()); err == nil {
+		t.Fatal("Create succeeded with every index held")
+	}
+	if h.linkCount() != maxIndexes {
+		t.Fatalf("failed create changed the host: %d links", h.linkCount())
 	}
 }
 
