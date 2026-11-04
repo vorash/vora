@@ -325,6 +325,12 @@ signal, and one that failed after hitting the pids limit reports
 carry the same reason and fields (`memoryPeakScope`, `oomKills`,
 `pidsLimitHits`).
 
+On Bubblewrap an OOM kill ends the exec, not the sandbox. The processes an
+exec starts are always the OOM killer's first choice, ahead of the sandbox's
+init, so the kernel kills one of them. The exec still ends with an exit chunk
+that reports `OOM_KILLED` and its usage, the sandbox accepts the next exec,
+and `stats` keeps reporting memory and CPU.
+
 `memoryPeakBytes` in an exec record used to be the sandbox's lifetime peak at
 the moment the exec finished. It now means the peak during that exec's window,
 as `memoryPeakScope` states. Records written before this change have no scope.
