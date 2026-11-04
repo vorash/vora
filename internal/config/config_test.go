@@ -1,6 +1,7 @@
 package config
 
 import (
+	"slices"
 	"testing"
 	"time"
 )
@@ -87,5 +88,78 @@ func TestDefaultIgnoresAuditRetention(t *testing.T) {
 	t.Setenv("VORA_AUDIT_RETENTION", "30d")
 	if _, err := Default(); err != nil {
 		t.Fatalf("Default with an invalid runner-only setting: %v", err)
+	}
+}
+
+// Unset or blank VORA_BACKENDS keeps the runner registering every backend
+// that starts, so existing deployments are unchanged.
+func TestParseBackendsEmptyAllowsEverything(t *testing.T) {
+	for _, v := range []string{"", "  "} {
+		set, err := ParseBackends(v)
+		if err != nil {
+			t.Fatalf("ParseBackends(%q): %v", v, err)
+		}
+		if set.Explicit() || !set.Allows(BackendBwrap) || !set.Allows(BackendGvisor) {
+			t.Fatalf("ParseBackends(%q) = %v, want the unrestricted set", v, set.Names())
+		}
+	}
+}
+
+// A root runner next to a non-root bwrap runner lists only gvisor, so vora-api
+// never places a bwrap sandbox on it.
+func TestParseBackendsListAllowsOnlyItsMembers(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  []string
+	}{
+		{"gvisor", []string{BackendGvisor}},
+		{" gvisor ", []string{BackendGvisor}},
+		{"gvisor, bwrap", []string{BackendBwrap, BackendGvisor}},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			set, err := ParseBackends(tc.value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !set.Explicit() {
+				t.Fatal("a listed value must be explicit, so a failing backend is fatal")
+			}
+			if got := set.Names(); !slices.Equal(got, tc.want) {
+				t.Fatalf("Names() = %v, want %v", got, tc.want)
+			}
+			for _, name := range []string{BackendBwrap, BackendGvisor} {
+				if set.Allows(name) != slices.Contains(tc.want, name) {
+					t.Fatalf("Allows(%q) = %v", name, set.Allows(name))
+				}
+			}
+		})
+	}
+}
+
+func TestParseBackendsRejectsInvalidLists(t *testing.T) {
+	for _, v := range []string{
+		"runc",          // unknown backend
+		"gVisor",        // names are case-sensitive
+		"gvisor,",       // empty entry
+		"bwrap,,gvisor", // empty entry
+		"bwrap,bwrap",   // duplicate
+	} {
+		t.Run(v, func(t *testing.T) {
+			if set, err := ParseBackends(v); err == nil {
+				t.Fatalf("ParseBackends(%q) = %v, want an error", v, set.Names())
+			}
+		})
+	}
+}
+
+// VORA_BACKENDS is runner-only, like VORA_AUDIT_RETENTION: a typo in it must
+// not break CLI commands that load Default.
+func TestDefaultIgnoresBackends(t *testing.T) {
+	t.Setenv("VORA_BACKENDS", "runc")
+	if _, err := Default(); err != nil {
+		t.Fatalf("Default with an invalid runner-only setting: %v", err)
+	}
+	if _, err := BackendsFromEnv(); err == nil {
+		t.Fatal("BackendsFromEnv accepted an unknown backend")
 	}
 }
