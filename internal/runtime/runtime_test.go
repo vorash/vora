@@ -159,3 +159,33 @@ func TestValidateNetworkModeCombinations(t *testing.T) {
 		})
 	}
 }
+
+// TestUsageReasonPrecedence pins which cause an exec's exit reports. The agent
+// only sees a signal or an exit code; the cgroup counters say why, and the
+// order decides which one a caller is told.
+func TestUsageReasonPrecedence(t *testing.T) {
+	cases := []struct {
+		name     string
+		usage    Usage
+		reported ExitReason
+		code     int
+		want     ExitReason
+	}{
+		{"timeout beats an oom kill", Usage{OOMKills: 1}, ReasonTimeout, 137, ReasonTimeout},
+		{"timeout beats a pids hit", Usage{PidsLimitHits: 1}, ReasonTimeout, 1, ReasonTimeout},
+		{"oom kill turns an exit into OOMKilled", Usage{OOMKills: 1}, ReasonExited, 137, ReasonOOMKilled},
+		{"oom kill beats a pids hit", Usage{OOMKills: 1, PidsLimitHits: 3}, ReasonExited, 1, ReasonOOMKilled},
+		{"oom kill counts even on exit 0", Usage{OOMKills: 2}, ReasonExited, 0, ReasonOOMKilled},
+		{"pids hit with a failure is PidsLimit", Usage{PidsLimitHits: 1}, ReasonExited, 1, ReasonPidsLimit},
+		{"pids hit with success stays Exited", Usage{PidsLimitHits: 1}, ReasonExited, 0, ReasonExited},
+		{"no counters keeps the reported reason", Usage{}, ReasonRuntimeFailure, 0, ReasonRuntimeFailure},
+		{"no counters keeps Exited", Usage{CPUMillis: 10, MemoryPeak: 1 << 20}, ReasonExited, 3, ReasonExited},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.usage.Reason(tc.reported, tc.code); got != tc.want {
+				t.Fatalf("%+v.Reason(%q, %d) = %q, want %q", tc.usage, tc.reported, tc.code, got, tc.want)
+			}
+		})
+	}
+}
