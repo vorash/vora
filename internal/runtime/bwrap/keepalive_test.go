@@ -174,8 +174,15 @@ func TestKeepaliveFailureLeavesTheSandbox(t *testing.T) {
 	_, sibling, _ := readySandbox(t, b, "sbx_sibling")
 	stopAgent()
 
+	deadline := time.Now().Add(5 * time.Second)
+	for log.count("keepalive ping failed") == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("runner never logged the unreachable agent")
+		}
+		time.Sleep(testKeepalive)
+	}
 	before := sibling.pings.Load()
-	waitPings(t, sibling, before+10)
+	waitPings(t, sibling, before+20)
 	if n := log.count("keepalive ping failed"); n != 1 {
 		t.Fatalf("runner logged %d keepalive failures for one outage, want 1", n)
 	}
