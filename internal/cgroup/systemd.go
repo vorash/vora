@@ -64,6 +64,12 @@ func (s *systemd) runArgs(req StartRequest) []string {
 		"--property=TasksMax="+strconv.FormatInt(req.Limits.Pids, 10),
 		"--property=CPUQuota="+cpuQuota(req.Limits.CPUMillis),
 		"--property=KillMode=control-group",
+		// The default OOMPolicy=stop stops the whole sandbox when the kernel
+		// kills any one process in it. With continue only the kernel's victim
+		// dies (vora-init makes that the exec's workload), so the unit, its
+		// cgroup counters and the agent stay up for the next exec
+		// (vorash/vora#108).
+		"--property=OOMPolicy=continue",
 	)
 	if req.WorkingDirectory != "" {
 		args = append(args, "--property=WorkingDirectory="+req.WorkingDirectory)

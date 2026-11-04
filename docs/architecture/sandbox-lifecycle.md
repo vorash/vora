@@ -100,6 +100,13 @@ termination reasons are read from the sandbox cgroup:
 | `PolicyViolation` | reserved for v0.3 |
 | `RuntimeFailure` | backend/agent error |
 
+An OOM kill ends the exec, not the sandbox. The unit runs with
+`OOMPolicy=continue`, so systemd does not stop it when the kernel kills a
+process in it, and vora-init starts every exec with `oom_score_adj` 1000, so
+the kernel's single victim is a workload process, never the agent. The exec
+reports `OOMKilled` with its usage on its exit chunk, the cgroup keeps its
+counters for `stats`, and the sandbox accepts the next exec.
+
 ## TTL and reconciliation
 
 - A reaper goroutine expires RUNNING sandboxes whose TTL elapsed → `EXPIRED`,

@@ -637,9 +637,11 @@ func (b *Backend) Signal(ctx context.Context, h runtime.Handle, sig int32) error
 	return hd.client.Signal(ctx, sig)
 }
 
-// Stats reads resource usage from the sandbox cgroup. After an OOM the cgroup
-// files may already be gone; systemd's Result=oom-kill is retained on the
-// failed unit and is mapped onto OOMKills.
+// Stats reads resource usage from the sandbox cgroup. An OOM in an exec leaves
+// the unit running (OOMPolicy=continue), so the cgroup keeps its counters.
+// Once a unit has died its cgroup files are gone. systemd records
+// Result=oom-kill only on a unit its OOMPolicy stopped (one started without
+// OOMPolicy=continue), and that is mapped onto OOMKills.
 func (b *Backend) Stats(ctx context.Context, h runtime.Handle) (*runtime.Stats, error) {
 	hd, err := b.handle(h)
 	if err != nil {
@@ -691,9 +693,10 @@ func (b *Backend) Meter(ctx context.Context, h runtime.Handle) (runtime.UsageMet
 // windowMeter adapts a cgroup window to runtime.UsageMeter.
 type windowMeter struct {
 	w *cgroup.Window
-	// unit is set when the window is on a systemd unit's cgroup. An OOM kill
-	// stops that unit and removes the cgroup, counters included, but systemd
-	// keeps Result=oom-kill on the failed unit.
+	// unit is set when the window is on a systemd unit's cgroup. An OOM in an
+	// exec leaves the unit running (OOMPolicy=continue). A unit that died has
+	// lost its cgroup, counters included; one its OOMPolicy stopped (started
+	// without OOMPolicy=continue) keeps Result=oom-kill.
 	unit *cgroup.Unit
 }
 

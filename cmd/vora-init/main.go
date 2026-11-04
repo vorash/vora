@@ -46,6 +46,12 @@ func main() {
 		pause()
 		return
 	}
+	// Each exec starts as `vora-init workload <path> <argv...>`; see
+	// workloadCommand. It runs before seccomp.Install because the filter is
+	// already inherited from the agent.
+	if len(os.Args) > 3 && os.Args[1] == workloadArg {
+		runWorkload(os.Args[2], os.Args[3:])
+	}
 
 	socket := flag.String("socket", "/run/vora/control.sock", "control socket path inside the sandbox")
 	grace := flag.Duration("grace", 20*time.Second, "exit if the runner has not contacted us for this long")
@@ -252,8 +258,7 @@ func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.Exe
 	if cwd == "" {
 		cwd = "/workspace"
 	}
-	cmd := exec.Command(command, req.GetArgs()...)
-	cmd.Dir = cwd
+	cmd := workloadCommand(command, req.GetArgs(), cwd)
 	cmd.Env = append(os.Environ(), req.GetEnv()...)
 	if len(req.GetStdin()) > 0 {
 		cmd.Stdin = bytes.NewReader(req.GetStdin())

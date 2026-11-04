@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,10 +15,16 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
+	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/cgroup"
 	"github.com/vorash/vora/internal/config"
+	"github.com/vorash/vora/internal/runner"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/runtime/bwrap"
+	"github.com/vorash/vora/internal/sandbox"
 	"github.com/vorash/vora/internal/ulid"
 	"github.com/vorash/vora/internal/workspace"
 )
@@ -120,6 +127,11 @@ func newBwrapSandbox(t *testing.T) (*bwrap.Backend, runtime.Handle) {
 
 func newBwrapSandboxWithEnv(t *testing.T, env map[string]string) (*bwrap.Backend, runtime.Handle) {
 	t.Helper()
+	return newBwrapSandboxWith(t, env, runtime.ResourceLimits{CPUMillis: 1000, MemoryBytes: 256 << 20, Pids: 64})
+}
+
+func newBwrapSandboxWith(t *testing.T, env map[string]string, limits runtime.ResourceLimits) (*bwrap.Backend, runtime.Handle) {
+	t.Helper()
 
 	initBin := buildBinary(t, "vora-init")
 	t.Setenv("VORA_INIT_BINARY", initBin)
@@ -150,7 +162,7 @@ func newBwrapSandboxWithEnv(t *testing.T, env map[string]string) (*bwrap.Backend
 	spec := runtime.SandboxSpec{
 		ID:        id,
 		Image:     "base",
-		Resources: runtime.ResourceLimits{CPUMillis: 1000, MemoryBytes: 256 << 20, Pids: 64},
+		Resources: limits,
 		Network:   runtime.NetworkPolicy{Mode: runtime.NetworkNone},
 		TTL:       time.Minute,
 		Workspace: ws,
@@ -324,6 +336,231 @@ func TestBwrapEnvNotExpanded(t *testing.T) {
 		got := execStdout(t, backend, h, "/bin/sh", []string{"-c", `printf %s "$` + name + `"`})
 		if got != want {
 			t.Errorf("%s = %q, want %q: the service manager rewrote a tenant env value", name, got, want)
+		}
+	}
+}
+
+// An OOM in an exec must end that exec, not the sandbox (vorash/vora#108).
+// systemd's default OOMPolicy=stop stopped the unit on the first kill, so the
+// exec had no exit chunk, the next exec found no agent and stats lost
+// everything but oom_kills. Driven through the runner, which derives the
+// reason from the exec's usage window.
+func TestBwrapOOMExecSurvives(t *testing.T) {
+	const limit = 128 << 20
+	client := newBwrapRunner(t)
+	id := newRunnerSandbox(t, client, &v1.ResourceLimits{CpuMillis: 1000, MemoryBytes: limit, Pids: 64})
+
+	exit, out, err := execExit(client, id, "/usr/bin/python3", "-c", "x = b'x' * (512 << 20)")
+	if exit == nil {
+		t.Fatalf("OOM exec ended without an exit chunk (stream error %v, output %q): the sandbox died with it", err, out)
+	}
+	u := exit.GetUsage()
+	t.Logf("OOM exec: exit code %d, reason %v, usage %+v, output %q", exit.GetExitCode(), exit.GetReason(), u, out)
+	if exit.GetReason() != v1.ExitReason_OOM_KILLED {
+		t.Fatalf("reason = %v, want OOM_KILLED", exit.GetReason())
+	}
+	if u.GetOomKills() < 1 {
+		t.Fatalf("usage oom_kills = %d, want >= 1", u.GetOomKills())
+	}
+	if peak := u.GetMemoryPeakBytes(); peak < limit*8/10 || peak > limit*12/10 {
+		t.Fatalf("usage memory_peak_bytes = %d, want within 20%% of the %d limit", peak, limit)
+	}
+
+	if got := strings.TrimSpace(execViaRunner(t, client, id, "/bin/echo", "ok")); got != "ok" {
+		t.Fatalf("exec after the OOM = %q, want ok", got)
+	}
+
+	st, err := client.StatsSandbox(context.Background(), &v1.StatsSandboxRequest{SandboxId: id})
+	if err != nil {
+		t.Fatalf("StatsSandbox: %v", err)
+	}
+	t.Logf("stats after the OOM: %+v", st)
+	if st.GetMemoryBytes() <= 0 || st.GetCpuMillis() <= 0 || st.GetOomKills() < 1 {
+		t.Fatalf("stats after the OOM = %+v, want memory, cpu and oom_kills all set", st)
+	}
+	if st.GetMemoryPeakBytes() < limit*8/10 {
+		t.Fatalf("stats memory_peak_bytes = %d, want the OOM exec's peak near the %d limit", st.GetMemoryPeakBytes(), limit)
+	}
+}
+
+// manySmallHogs starts processes that each hold an eighth of vora-init's RSS
+// until together they ask for twice the limit, then kills its own process
+// group. Every hog is smaller than the agent, so without the workload's raised
+// oom_score_adj the kernel would pick vora-init and end the sandbox. $1 is the
+// limit in KiB.
+const manySmallHogs = `
+init=
+for d in /proc/[0-9]*; do
+	[ "$(cat "$d/comm" 2>/dev/null)" = vora-init ] && init=${d#/proc/} && break
+done
+rss=$(awk '/^VmRSS:/ {print $2}' "/proc/$init/status")
+kib=$((rss / 8))
+n=$((2 * $1 / kib))
+echo "vora-init pid $init rss $rss KiB; starting $n hogs of $kib KiB"
+i=0
+while [ "$i" -lt "$n" ]; do
+	dd if=/dev/zero bs="${kib}k" count=1 2>/dev/null &
+	i=$((i + 1))
+done | sleep 30 >/dev/null &
+sleep 5
+alive=0
+for d in /proc/[0-9]*; do
+	[ "$(cat "$d/comm" 2>/dev/null)" = dd ] && alive=$((alive + 1))
+done
+echo "$alive of $n hogs alive; vora-init rss now $(awk '/^VmRSS:/ {print $2}' "/proc/$init/status") KiB"
+kill -KILL 0
+`
+
+// A workload of many processes, each smaller than vora-init, must not get the
+// agent OOM-killed: with OOMPolicy=continue the kernel kills only the process
+// with the highest badness, and the sandbox has to survive that choice.
+func TestBwrapOOMManySmall(t *testing.T) {
+	const limit = 64 << 20
+	backend, h := newBwrapSandboxWith(t, nil, runtime.ResourceLimits{CPUMillis: 1000, MemoryBytes: limit, Pids: 512})
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	m, err := backend.Meter(ctx, h)
+	if err != nil {
+		t.Fatalf("Meter: %v", err)
+	}
+	stream, err := backend.Exec(ctx, h, runtime.ExecRequest{
+		ExecutionID: "exe_hogs",
+		Command:     "/bin/sh",
+		Args:        []string{"-c", manySmallHogs, "sh", strconv.Itoa(limit >> 10)},
+		Cwd:         "/workspace",
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	var (
+		out  strings.Builder
+		exit *runtime.ExecResult
+	)
+	for exit == nil {
+		chunk, err := stream.Recv()
+		if err != nil {
+			break
+		}
+		out.Write(chunk.Stdout)
+		out.Write(chunk.Stderr)
+		exit = chunk.Exit
+	}
+	stream.Close()
+	u, err := m.Stop(ctx)
+	t.Logf("hogs: exit %+v, usage %+v (meter error %v), output %q", exit, u, err, out.String())
+	if exit == nil {
+		t.Fatalf("hog exec ended without an exit chunk: the OOM took the sandbox down, not just a hog")
+	}
+	if u.OOMKills < 1 {
+		t.Fatalf("usage oom_kills = %d, want >= 1: the hogs never reached the limit, so this proved nothing", u.OOMKills)
+	}
+	if got := strings.TrimSpace(run(t, backend, h, "/bin/echo", []string{"ok"})); got != "ok" {
+		t.Fatalf("exec after the OOM = %q, want ok", got)
+	}
+}
+
+// newBwrapRunner serves a runner with the bwrap backend on a unix socket and
+// returns a client for it.
+func newBwrapRunner(t *testing.T) v1.RunnerServiceClient {
+	t.Helper()
+	initBin := buildBinary(t, "vora-init")
+	t.Setenv("VORA_INIT_BINARY", initBin)
+
+	cgroups, err := cgroup.New(config.Config{SystemdMode: config.SystemdUser})
+	if err != nil {
+		t.Skipf("systemd user manager unavailable: %v", err)
+	}
+	rootfs := imageRootfs(t, "base")
+	realImages := filepath.Dir(filepath.Dir(filepath.Dir(rootfs))) // .../images
+
+	stateDir := t.TempDir()
+	if err := os.Symlink(realImages, filepath.Join(stateDir, "images")); err != nil {
+		t.Fatalf("symlink images: %v", err)
+	}
+	cfg := config.Config{StateDir: stateDir, SystemdMode: config.SystemdUser, DefaultTTL: time.Minute}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	backend, err := bwrap.New(cfg, cgroups, logger)
+	if err != nil {
+		t.Fatalf("bwrap backend: %v", err)
+	}
+	registry := runtime.NewRegistry()
+	if err := registry.Register(backend); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	srv := runner.NewServer(cfg, sandbox.NewStore(cfg.SandboxesDir()), registry, ulid.NewRunner(), logger)
+
+	lis, err := net.Listen("unix", filepath.Join(t.TempDir(), "runner.sock"))
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	grpcServer := grpc.NewServer()
+	v1.RegisterRunnerServiceServer(grpcServer, srv)
+	go func() { _ = grpcServer.Serve(lis) }()
+	t.Cleanup(grpcServer.Stop)
+
+	conn, err := grpc.NewClient("unix://"+lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return v1.NewRunnerServiceClient(conn)
+}
+
+// newRunnerSandbox creates and starts a network-none sandbox on the base
+// image and destroys it at the end of the test.
+func newRunnerSandbox(t *testing.T, client v1.RunnerServiceClient, limits *v1.ResourceLimits) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	created, err := client.CreateSandbox(ctx, &v1.CreateSandboxRequest{Spec: &v1.SandboxSpec{
+		Image:      "vora/base",
+		Resources:  limits,
+		Network:    &v1.NetworkPolicy{Mode: v1.NetworkMode_NETWORK_NONE},
+		TtlSeconds: 120,
+	}})
+	if err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+	id := created.GetSandbox().GetId()
+	t.Cleanup(func() {
+		_, _ = client.DestroySandbox(context.Background(), &v1.DestroySandboxRequest{SandboxId: id})
+	})
+	if _, err := client.StartSandbox(ctx, &v1.StartSandboxRequest{SandboxId: id}); err != nil {
+		t.Fatalf("StartSandbox: %v", err)
+	}
+	return id
+}
+
+// execExit runs a command through the runner and returns its exit chunk, nil
+// when the stream ended without one, along with its output and the error that
+// ended the stream.
+func execExit(client v1.RunnerServiceClient, id, command string, args ...string) (*v1.ExecExit, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	stream, err := client.ExecSandbox(ctx, &v1.ExecSandboxRequest{
+		SandboxId: id,
+		Exec:      &v1.ExecRequest{Command: command, Args: args, Cwd: "/workspace"},
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	var (
+		out  strings.Builder
+		exit *v1.ExecExit
+	)
+	for {
+		chunk, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return exit, out.String(), nil
+		}
+		if err != nil {
+			return exit, out.String(), err
+		}
+		out.Write(chunk.GetStderr())
+		out.Write(chunk.GetStdout())
+		if e := chunk.GetExit(); e != nil {
+			exit = e
 		}
 	}
 }
