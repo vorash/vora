@@ -72,6 +72,8 @@ const (
 	// tenantTablePrefix names the empty nftables table that claims a tenant
 	// /24 for one runner.
 	tenantTablePrefix = "vora_tenant_"
+	// ownerPrefix prefixes the ULID that labels one runner's claims.
+	ownerPrefix = "own"
 )
 
 // privateDestinations are the ranges a sandbox must never reach unless its mode
@@ -190,6 +192,11 @@ type Manager struct {
 	ports    servicePorts
 	stateDir string
 	host     host
+	// owner labels this runner's tenant /24 claims. It lives in the state
+	// directory so a restarted runner releases its own claims and nobody
+	// else's, even after a reboot that wiped the kernel objects but not the
+	// state files.
+	owner string
 
 	mu sync.Mutex
 	// next and nextTenant are hints for where to start the next claim. The
@@ -225,8 +232,38 @@ func newManager(stateDir string, mc ManagerConfig, logger *slog.Logger, h host) 
 		tenants:  map[string]*tenantNet{},
 	}
 	_ = os.MkdirAll(m.stateDir, 0o755)
+	m.owner = loadOwner(filepath.Join(m.stateDir, "owner"), logger)
 	m.reapLeftovers()
 	return m
+}
+
+// loadOwner reads the runner's claim label, minting one on first start. A
+// label that cannot be persisted is still used, so claims stay labelled; the
+// next process then cannot match them and leaves them in place, which is the
+// safe side.
+func loadOwner(path string, logger *slog.Logger) string {
+	if data, err := os.ReadFile(path); err == nil && isOwner(strings.TrimSpace(string(data))) {
+		return strings.TrimSpace(string(data))
+	}
+	owner := ulid.New(ownerPrefix)
+	if err := os.WriteFile(path, []byte(owner+"\n"), 0o644); err != nil {
+		logger.Warn("cannot persist network owner label; leftovers of this process will not be reaped", "path", path, "error", err)
+	}
+	return owner
+}
+
+// isOwner accepts own_<ULID>, which is also a valid nftables chain name.
+func isOwner(s string) bool {
+	rest, ok := strings.CutPrefix(s, ownerPrefix+"_")
+	if !ok || len(rest) != 26 {
+		return false
+	}
+	for _, r := range rest {
+		if !(r >= '0' && r <= '9' || r >= 'A' && r <= 'Z') {
+			return false
+		}
+	}
+	return true
 }
 
 // Create prepares a network namespace for a sandbox. It is idempotent.
@@ -345,7 +382,7 @@ func (m *Manager) allocatePrivate(ctx context.Context, tenant string) (*tenantNe
 		if _, ok := m.tenants[tenant]; ok {
 			// Another Create claimed a /24 for this tenant meanwhile.
 			m.mu.Unlock()
-			_ = m.host.releaseTable(ctx, t.table())
+			_ = m.host.releaseTable(ctx, t.table(), m.owner)
 			continue
 		}
 		m.tenants[tenant] = t
@@ -359,7 +396,7 @@ func (m *Manager) allocatePrivate(ctx context.Context, tenant string) (*tenantNe
 func (m *Manager) claimTenant(ctx context.Context, start uint32) (*tenantNet, error) {
 	for tries := uint32(0); tries < maxPrivateTenants; tries++ {
 		t := &tenantNet{index: (start + tries) % maxPrivateTenants}
-		err := m.host.claimTable(ctx, t.table())
+		err := m.host.claimTable(ctx, t.table(), m.owner)
 		if errors.Is(err, errExists) {
 			continue
 		}
@@ -389,7 +426,7 @@ func (m *Manager) release(n *Net) {
 	}
 	m.mu.Unlock()
 	if last {
-		_ = m.host.releaseTable(ctx, n.tenant.table())
+		_ = m.host.releaseTable(ctx, n.tenant.table(), m.owner)
 	}
 }
 
@@ -531,8 +568,9 @@ func (m *Manager) loadState(id string) (netState, error) {
 }
 
 // reapLeftovers removes networks recorded by a previous process, then the
-// tenant /24 claims those networks were using. Only tables this runner's
-// state names are released; a /24 another runner holds is not ours to free.
+// tenant /24 claims those networks were using. A table named in stale state
+// may by now be another runner's, so it is released only if it carries this
+// runner's label.
 func (m *Manager) reapLeftovers() {
 	entries, err := os.ReadDir(m.stateDir)
 	if err != nil {
@@ -564,7 +602,9 @@ func (m *Manager) reapLeftovers() {
 		m.logger.Warn("reaped leftover sandbox network", "sandbox_id", id)
 	}
 	for table := range tenantTables {
-		_ = m.host.releaseTable(ctx, table)
+		if err := m.host.releaseTable(ctx, table, m.owner); errors.Is(err, errForeign) {
+			m.logger.Warn("leaving tenant table owned by another runner", "table", table)
+		}
 	}
 }
 

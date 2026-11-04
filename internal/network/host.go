@@ -16,9 +16,9 @@ import (
 // runner, another runner in the same network namespace, or a leftover.
 var errExists = errors.New("network: name already in use")
 
-// errForeign reports that a link exists but carries another owner's label, so
-// the caller must leave it alone.
-var errForeign = errors.New("network: link owned by another sandbox")
+// errForeign reports that a link or table exists but carries another owner's
+// label, so the caller must leave it alone.
+var errForeign = errors.New("network: object owned by someone else")
 
 // host is the kernel surface the manager allocates through. Runners sharing a
 // network namespace do not coordinate with each other, so the kernel is the
@@ -35,8 +35,12 @@ type host interface {
 	// releaseLink deletes iface when its label is owner. A missing link is not
 	// an error; a link with another label is errForeign.
 	releaseLink(ctx context.Context, iface, owner string) error
-	claimTable(ctx context.Context, name string) error
-	releaseTable(ctx context.Context, name string) error
+	// claimTable creates an empty inet nftables table labelled with owner, in
+	// one transaction.
+	claimTable(ctx context.Context, name, owner string) error
+	// releaseTable deletes the table when its label is owner, with the same
+	// contract as releaseLink.
+	releaseTable(ctx context.Context, name, owner string) error
 	// run executes a command in the runner's network namespace.
 	run(ctx context.Context, name string, args ...string) error
 	// nft loads a ruleset in the network namespace of pid, or the runner's
@@ -130,12 +134,33 @@ func (shellHost) releaseLink(ctx context.Context, iface, owner string) error {
 	return run(ctx, "ip", "link", "del", iface)
 }
 
-func (shellHost) claimTable(ctx context.Context, name string) error {
-	return asExists(run(ctx, "nft", "create", "table", "inet", name))
+// The owner label is a regular chain, which has no hook and so no effect on
+// traffic. A chain works on every nftables version; a table comment does not.
+func (h shellHost) claimTable(ctx context.Context, name, owner string) error {
+	return asExists(h.nft(ctx, 0, fmt.Sprintf("create table inet %s\nadd chain inet %s %s\n", name, name, owner)))
 }
 
-func (shellHost) releaseTable(ctx context.Context, name string) error {
-	return run(ctx, "nft", "delete", "table", "inet", name)
+func (shellHost) releaseTable(ctx context.Context, name, owner string) error {
+	out, err := exec.CommandContext(ctx, "nft", "-j", "list", "table", "inet", name).Output()
+	if err != nil {
+		return nil
+	}
+	var listing struct {
+		Objects []struct {
+			Chain *struct {
+				Name string `json:"name"`
+			} `json:"chain"`
+		} `json:"nftables"`
+	}
+	if err := json.Unmarshal(out, &listing); err != nil {
+		return fmt.Errorf("network: nft -j list table %s: unexpected output %q", name, out)
+	}
+	for _, o := range listing.Objects {
+		if o.Chain != nil && o.Chain.Name == owner {
+			return run(ctx, "nft", "delete", "table", "inet", name)
+		}
+	}
+	return errForeign
 }
 
 func (shellHost) run(ctx context.Context, name string, args ...string) error {

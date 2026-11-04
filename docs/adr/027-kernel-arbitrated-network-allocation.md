@@ -35,13 +35,17 @@ private-mode tenant `/24` is claimed with `nft create table inet
 vora_tenant_<t>`, an empty table that exists only to be owned; host slots
 inside an owned `/24` are the runner's to allocate in memory.
 
-**2. Every host veth carries its sandbox id as its alias, and a release
-deletes only a link whose alias matches.** This holds for a failed create,
-`Destroy` and the startup reap, so a runner can never remove a link it did
-not claim, including one that reused a name from its own stale state. The
-alias is set with `ip link set` right after the claim: the kernel applies
-`IFLA_IFALIAS` only on `RTM_SETLINK`, so an alias passed to `ip link add` is
-dropped without an error.
+**2. Every claim carries its owner's label, and a release checks it.** A host
+veth carries its sandbox id as its alias; a tenant table holds a hookless
+chain named with the runner's owner token, a ULID minted once into
+`<state>/netns/owner`. A release deletes a link or table only when the label
+matches. This holds for a failed create, `Destroy` and the startup reap, so a
+runner can never remove what it did not claim, including a name its stale
+state records that another runner claimed after a reboot wiped the kernel
+objects but not the state files. The alias is set with `ip link set` right
+after the claim: the kernel applies `IFLA_IFALIAS` only on `RTM_SETLINK`, so
+an alias passed to `ip link add` is dropped without an error. The chain is
+created in the same `nft -f` transaction as the table.
 
 **3. The peer is born inside the sandbox namespace.** The holder is observed
 to have left the runner's namespace before the claim, and `netns <pid>` on the

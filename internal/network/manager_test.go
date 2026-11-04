@@ -185,6 +185,36 @@ func TestRestartReapsOnlyWhatThisRunnerOwns(t *testing.T) {
 	expectAddrs(t, a2.create(private("tenant")), "vora-h1", "10.9.0.1", "10.9.0.2", "10.9.0.0/24")
 }
 
+// After a reboot the state files survive but no kernel object does. A runner
+// that starts late must not release a tenant /24 another runner claimed in the
+// meantime under a name its stale state happens to record.
+func TestRestartAfterRebootLeavesOtherRunnersClaims(t *testing.T) {
+	h := newFakeHost()
+	a := newTestRunner(t, h)
+	aPrivate := a.create(private("tenant"))
+	h.reboot()
+
+	b := newTestRunner(t, h)
+	bPrivate := b.create(private("other"))
+	if bPrivate.iface != aPrivate.iface || bPrivate.SandboxCIDR != aPrivate.SandboxCIDR {
+		t.Fatalf("runner B got %s %s, test needs it to reuse %s %s", bPrivate.iface, bPrivate.SandboxCIDR, aPrivate.iface, aPrivate.SandboxCIDR)
+	}
+
+	a2 := a.restart(h)
+	if !h.hasTable(tenantTablePrefix + "0") {
+		t.Fatal("runner A's restart released the tenant /24 runner B now holds: the next claimant would share B's tenant network")
+	}
+	if owner, ok := h.owner(bPrivate.iface); !ok || owner != bPrivate.ID {
+		t.Errorf("runner A's restart removed runner B's interface (owner %q, present %v)", owner, ok)
+	}
+	if files := a2.stateFiles(); len(files) != 0 {
+		t.Errorf("stale state survived the restart: %v", files)
+	}
+	if n := a2.create(private("tenant")); n.SandboxCIDR == bPrivate.SandboxCIDR {
+		t.Errorf("runner A's new tenant shares %s with runner B's tenant", n.SandboxCIDR)
+	}
+}
+
 // A tenant's /24 is held while any of its sandboxes lives and returned with
 // the last one, so the 256-tenant space is not consumed by tenant churn.
 func TestTenantClaimReleasedWithLastSandbox(t *testing.T) {

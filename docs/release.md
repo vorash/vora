@@ -96,7 +96,9 @@ two runners must not share state: give the root runner its own
 interfaces and subnets in the host network namespace and claim them from the
 kernel ([ADR 027](adr/027-kernel-arbitrated-network-allocation.md)), so
 networked sandboxes on both runners coexist; the `System unit` workflow
-checks this with a second runner unit.
+checks this with a second runner unit. Upgrade both runners together: a
+runner on v0.10.1 or older still deletes the interface it failed to create,
+which may be the other runner's.
 
 `vora-init` is installed next to `vora-runner` because `resolveInit()` looks
 beside the executable before falling back to `PATH`.
