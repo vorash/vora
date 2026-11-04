@@ -237,3 +237,39 @@ func TestAgentRoundTrip(t *testing.T) {
 		t.Fatal("handler did not receive Shutdown")
 	}
 }
+
+// The runner dials before vora-init has bound the control socket, so its first
+// Ping always fails. The agent must be reachable within a poll interval of the
+// socket appearing, not after gRPC's default 1 s reconnect backoff (#114).
+func TestAgentReadySoonAfterSocketAppears(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "control.sock")
+	client, err := Dial(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := client.Ping(ctx); err == nil {
+		t.Fatal("Ping succeeded before the agent was listening")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	lis, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	v1.RegisterAgentServiceServer(server, NewServer(&fakeHandler{}))
+	go func() { _ = server.Serve(lis) }()
+	defer server.Stop()
+
+	if err := client.WaitReady(ctx, 3*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("agent ready %s after the first dial; the socket appeared after 50ms", elapsed)
+	}
+}
