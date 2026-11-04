@@ -62,6 +62,8 @@ type fakeExecStream struct {
 	i       int
 	release chan struct{}
 	once    sync.Once
+	// recvErr, when set, is returned after the chunks instead of EOF.
+	recvErr error
 }
 
 func (f *fakeExecStream) Recv() (runtime.ExecChunk, error) {
@@ -69,6 +71,9 @@ func (f *fakeExecStream) Recv() (runtime.ExecChunk, error) {
 		c := f.chunks[f.i]
 		f.i++
 		return c, nil
+	}
+	if f.recvErr != nil {
+		return runtime.ExecChunk{}, f.recvErr
 	}
 	<-f.release
 	return runtime.ExecChunk{}, io.EOF
@@ -79,7 +84,11 @@ func (f *fakeExecStream) Close() error {
 	return nil
 }
 
-type fakeExecBackend struct{ stream *fakeExecStream }
+type fakeExecBackend struct {
+	stream *fakeExecStream
+	// execErr, when set, fails Exec before any chunk.
+	execErr error
+}
 
 func (b *fakeExecBackend) Name() string { return "fake" }
 func (b *fakeExecBackend) Capabilities() runtime.Capabilities {
@@ -90,6 +99,9 @@ func (b *fakeExecBackend) Create(_ context.Context, spec runtime.SandboxSpec) (r
 }
 func (b *fakeExecBackend) Start(context.Context, runtime.Handle) error { return nil }
 func (b *fakeExecBackend) Exec(context.Context, runtime.Handle, runtime.ExecRequest) (runtime.ExecStream, error) {
+	if b.execErr != nil {
+		return nil, b.execErr
+	}
 	return b.stream, nil
 }
 func (b *fakeExecBackend) Signal(context.Context, runtime.Handle, int32) error { return nil }
