@@ -13,6 +13,7 @@ install writes templates for them to `/etc/vora/*.env`
 | `VORA_SYSTEMD_MODE` | `user` or `system` — which systemd manager runs sandbox units |
 | `VORA_METRICS_ADDR` | Prometheus metrics and `/healthz` (default `127.0.0.1:9101`) |
 | `VORA_INIT_BINARY` | Path to `vora-init`, the in-sandbox PID 1 |
+| `VORA_BACKENDS` | Comma-separated isolation backends to register (`bwrap`, `gvisor`). Unset registers every backend that starts and skips the rest; set, a listed backend that fails to start stops the runner. Unknown names and duplicates are errors |
 | `VORA_GVISOR_PLATFORM` | `kvm` or `systrap` |
 | `VORA_GVISOR_ROOT`, `VORA_RUNSC` | `runsc` state root and binary |
 | `VORA_CONTAINERD_ADDRESS` | containerd socket |

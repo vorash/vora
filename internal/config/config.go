@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -40,7 +42,9 @@ type Config struct {
 	MaxTTL                time.Duration
 	// AuditRetention is how long a finished sandbox's local audit trail is
 	// kept. Zero keeps it forever.
-	AuditRetention   time.Duration
+	AuditRetention time.Duration
+	// Backends limits which isolation backends the runner registers.
+	Backends         BackendSet
 	DefaultDiskBytes int64
 	MaxDiskBytes     int64
 	// MaxSnapshotBytes caps one on-disk snapshot archive.
@@ -296,6 +300,69 @@ func AuditRetentionFromEnv() (time.Duration, error) {
 		return 0, fmt.Errorf("invalid VORA_AUDIT_RETENTION %q (want positive duration)", v)
 	}
 	return d, nil
+}
+
+// Isolation backend names accepted by VORA_BACKENDS. They match the backends'
+// runtime.Backend Name().
+const (
+	BackendBwrap  = "bwrap"
+	BackendGvisor = "gvisor"
+)
+
+// BackendSet is the VORA_BACKENDS allowlist. The zero value allows every
+// backend, and a backend that fails to start is skipped. A parsed list allows
+// only its members, and each of them must start.
+type BackendSet struct {
+	names map[string]bool
+}
+
+// Explicit reports whether the operator listed backends.
+func (s BackendSet) Explicit() bool { return s.names != nil }
+
+// Allows reports whether the runner may register the named backend.
+func (s BackendSet) Allows(name string) bool { return s.names == nil || s.names[name] }
+
+// Names returns the listed backends in sorted order, or nil for the zero value.
+func (s BackendSet) Names() []string {
+	if s.names == nil {
+		return nil
+	}
+	out := make([]string, 0, len(s.names))
+	for name := range s.names {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ParseBackends parses a comma-separated VORA_BACKENDS value. An empty value
+// is the zero set. Empty entries, duplicates and unknown names are errors:
+// each is more likely a typo than a deliberate choice.
+func ParseBackends(v string) (BackendSet, error) {
+	if strings.TrimSpace(v) == "" {
+		return BackendSet{}, nil
+	}
+	names := map[string]bool{}
+	for _, raw := range strings.Split(v, ",") {
+		name := strings.TrimSpace(raw)
+		switch {
+		case name == "":
+			return BackendSet{}, fmt.Errorf("invalid VORA_BACKENDS %q: empty entry", v)
+		case name != BackendBwrap && name != BackendGvisor:
+			return BackendSet{}, fmt.Errorf("invalid VORA_BACKENDS %q: unknown backend %q (want %q or %q)",
+				v, name, BackendBwrap, BackendGvisor)
+		case names[name]:
+			return BackendSet{}, fmt.Errorf("invalid VORA_BACKENDS %q: %q listed twice", v, name)
+		}
+		names[name] = true
+	}
+	return BackendSet{names: names}, nil
+}
+
+// BackendsFromEnv parses VORA_BACKENDS. Like AuditRetentionFromEnv it is
+// separate from Default, so a runner-only typo cannot break the CLI.
+func BackendsFromEnv() (BackendSet, error) {
+	return ParseBackends(os.Getenv("VORA_BACKENDS"))
 }
 
 func userStateDir() string {

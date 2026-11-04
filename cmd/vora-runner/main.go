@@ -191,6 +191,9 @@ func run() error {
 	if cfg.AuditRetention, err = config.AuditRetentionFromEnv(); err != nil {
 		return err
 	}
+	if cfg.Backends, err = config.BackendsFromEnv(); err != nil {
+		return err
+	}
 	if *socketFlag != "" {
 		cfg.SocketPath = *socketFlag
 	}
@@ -266,7 +269,10 @@ func run() error {
 		logger.Info("audit store: postgres")
 	}
 
-	manager := registerBackends(cfg, registry, logger, server.RecordEgress)
+	manager, err := registerBackends(cfg, registry, logger, server.RecordEgress)
+	if err != nil {
+		return err
+	}
 	if manager != nil {
 		server.SetCgroups(manager)
 	}
@@ -521,15 +527,9 @@ func run() error {
 	return nil
 }
 
-// registerBackends registers the isolation backends available on this host.
-// A missing backend is not fatal: the runner still serves create/get/list, and
-// start returns a clear error.
-func registerBackends(cfg config.Config, registry *runtime.Registry, logger *slog.Logger, egressSink func(egress.Event) error) cgroup.Manager {
-	manager, err := cgroup.New(cfg)
-	if err != nil {
-		logger.Warn("cgroup manager unavailable; bwrap sandboxes cannot be started", "error", err)
-	}
-
+// registerBackends registers the isolation backends cfg.Backends selects. It
+// returns the cgroup manager when bwrap was selected and systemd is usable.
+func registerBackends(cfg config.Config, registry *runtime.Registry, logger *slog.Logger, egressSink func(egress.Event) error) (cgroup.Manager, error) {
 	subtree, err := cgroup.NewSubtree()
 	if err != nil {
 		logger.Warn("cgroup subtree unavailable; sandbox resource limits cannot be enforced", "error", err)
@@ -541,35 +541,77 @@ func registerBackends(cfg config.Config, registry *runtime.Registry, logger *slo
 		BrokerPort: cfg.EgressBrokerPort,
 	}, logger)
 
-	if manager != nil {
-		if backend, err := bwrap.New(cfg, manager, logger); err != nil {
-			logger.Warn("bubblewrap backend unavailable", "error", err)
-		} else {
+	var manager cgroup.Manager
+	builders := []backendBuilder{
+		{config.BackendBwrap, func() (runtime.Backend, error) {
+			m, err := cgroup.New(cfg)
+			if err != nil {
+				return nil, fmt.Errorf("cgroup manager unavailable: %w", err)
+			}
+			manager = m
+			backend, err := bwrap.New(cfg, m, logger)
+			if err != nil {
+				return nil, err
+			}
 			if subtree != nil {
 				backend.EnableNetns(subtree, networks, egressSink)
 			}
-			if err := registry.Register(backend); err != nil {
-				logger.Warn("register backend failed", "backend", backend.Name(), "error", err)
-			} else {
-				logger.Info("registered runtime backend", "backend", backend.Name(), "network_modes", backend.Capabilities().NetworkModes)
+			return backend, nil
+		}},
+		{config.BackendGvisor, func() (runtime.Backend, error) {
+			backend, err := gvisor.New(cfg, logger, subtree)
+			if err != nil {
+				return nil, err
 			}
+			if subtree != nil {
+				backend.EnableNetns(networks, egressSink)
+			}
+			return backend, nil
+		}},
+	}
+	err = registerSelected(registry, cfg.Backends, builders, logger)
+	return manager, err
+}
+
+// backendBuilder constructs one isolation backend. registerSelected calls
+// build only for a selected backend, so an unselected one's host setup never
+// runs.
+type backendBuilder struct {
+	name  string
+	build func() (runtime.Backend, error)
+}
+
+// registerSelected builds and registers, in order, each backend that want
+// allows; the first registered becomes the default. Without an allowlist a
+// backend that fails is skipped: the runner still serves create/get/list, and
+// start returns a clear error. With one, a listed backend that fails is an
+// error, so the runner exits rather than register with vora-api without it.
+func registerSelected(reg *runtime.Registry, want config.BackendSet, builders []backendBuilder, logger *slog.Logger) error {
+	for _, b := range builders {
+		if !want.Allows(b.name) {
+			logger.Info("runtime backend not selected by VORA_BACKENDS", "backend", b.name)
+			continue
+		}
+		backend, err := b.build()
+		if err == nil {
+			err = reg.Register(backend)
+		}
+		if err != nil {
+			if want.Explicit() {
+				return fmt.Errorf("backend %s, listed in VORA_BACKENDS, failed to start: %w", b.name, err)
+			}
+			logger.Warn("runtime backend unavailable", "backend", b.name, "error", err)
+			continue
+		}
+		caps := backend.Capabilities()
+		logger.Info("registered runtime backend", "backend", b.name, "network_modes", caps.NetworkModes, "limits", caps.EnforcesResourceLimits)
+	}
+	for _, name := range want.Names() {
+		if _, ok := reg.Get(name); !ok {
+			return fmt.Errorf("VORA_BACKENDS lists %s, but this runner has no such backend", name)
 		}
 	}
-
-	if backend, err := gvisor.New(cfg, logger, subtree); err != nil {
-		logger.Warn("gvisor backend unavailable", "error", err)
-	} else {
-		if subtree != nil {
-			backend.EnableNetns(networks, egressSink)
-		}
-		if err := registry.Register(backend); err != nil {
-			logger.Warn("register backend failed", "backend", backend.Name(), "error", err)
-		} else {
-			logger.Info("registered runtime backend", "backend", backend.Name(), "limits", backend.Capabilities().EnforcesResourceLimits)
-		}
-	}
-
-	return manager
+	return nil
 }
 
 // removeStaleSocket removes a leftover socket file if no process is listening.

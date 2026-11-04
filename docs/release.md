@@ -85,6 +85,18 @@ was mounted stays hidden underneath it and cannot be reached (it is gone after
 the next reboot). Then remove the gVisor state directory. The non-root unit
 does not offer gVisor, so nothing there is needed.
 
+To offer gVisor on such a host, run a second runner as root with
+`VORA_BACKENDS=gvisor`, and set `VORA_BACKENDS=bwrap` on the non-root runner.
+vora-api places each sandbox on a runner that advertises its backend, so bwrap
+work stays on the non-root runner, and a listed backend that fails to start
+stops its runner instead of leaving it registered without that backend. The
+two runners must not share state: give the root runner its own
+`VORA_STATE_DIR`, `VORA_SOCKET`, `VORA_METRICS_ADDR`, `VORA_GVISOR_ROOT`,
+`VORA_RUNNER_ADDR` and client certificate. Each runner numbers its sandbox
+interfaces (`vora-h<n>`) and `10.7.0.0/16` subnets from zero in the host
+network namespace, so networked sandboxes on both runners at once are not
+yet verified to coexist.
+
 `vora-init` is installed next to `vora-runner` because `resolveInit()` looks
 beside the executable before falling back to `PATH`.
 
