@@ -79,10 +79,12 @@ This is required because Bubblewrap cannot join an existing sandbox. gVisor
 
 ### Die-with-runner
 
-The runner holds an attach stream to each agent. If it drops, `vora-init` starts
-a grace timer and then exits, which tears down the sandbox. This preserves
-`--die-with-parent` semantics even though, under systemd services, the sandbox's
-parent is systemd rather than the runner.
+The runner pings each ready agent every 5 s, from the moment it answers until
+the sandbox is stopped or the runner shuts down. `vora-init` exits when no RPC
+or open stream has reached it for its grace (20 s), which tears down the
+sandbox. An idle sandbox therefore stays up while its runner lives. This
+preserves `--die-with-parent` semantics even though, under systemd services, the
+sandbox's parent is systemd rather than the runner.
 
 ## Resource limits and termination reasons
 

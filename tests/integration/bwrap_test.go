@@ -75,6 +75,42 @@ func TestBwrapSandboxLifecycle(t *testing.T) {
 	}
 }
 
+// idlePastGrace outlasts vora-init's watchdog grace. The runner does not pass
+// --grace, so the agent runs with its 20 s default.
+const idlePastGrace = 30 * time.Second
+
+// A client may leave a sandbox idle between calls for longer than vora-init's
+// watchdog grace. The runner must keep it alive, so the next exec still finds
+// the agent (vorash/vora#113).
+func TestBwrapIdleOutlivesGrace(t *testing.T) {
+	backend, h := newBwrapSandbox(t)
+	time.Sleep(idlePastGrace)
+	if out := strings.TrimSpace(run(t, backend, h, "/bin/echo", []string{"alive"})); out != "alive" {
+		t.Fatalf("exec after %s idle = %q, want alive", idlePastGrace, out)
+	}
+}
+
+// The keepalive must not defeat the watchdog's purpose: once the runner stops
+// (Close), nothing pings the agent, and the sandbox ends itself.
+func TestBwrapExitsWithoutRunner(t *testing.T) {
+	backend, h := newBwrapSandbox(t)
+	if err := backend.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	time.Sleep(idlePastGrace)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	stream, err := backend.Exec(ctx, h, runtime.ExecRequest{ExecutionID: "exe_test", Command: "/bin/echo", Args: []string{"alive"}, Cwd: "/workspace"})
+	if err == nil {
+		defer stream.Close()
+		_, err = stream.Recv()
+	}
+	if err == nil {
+		t.Fatalf("exec reached the agent %s after the runner stopped pinging; the watchdog did not end the sandbox", idlePastGrace)
+	}
+}
+
 // newBwrapSandbox starts a bwrap sandbox on the cached base image and returns
 // the backend and its handle, tearing the sandbox down at the end of the test.
 func newBwrapSandbox(t *testing.T) (*bwrap.Backend, runtime.Handle) {
