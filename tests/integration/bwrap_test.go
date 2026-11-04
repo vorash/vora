@@ -262,6 +262,56 @@ func run(t *testing.T, backend *bwrap.Backend, h runtime.Handle, command string,
 	return out.String()
 }
 
+// An exec's usage covers that exec, not the sandbox's history: a small exec
+// after a large one must report the smaller peak. Before kernel 6.12
+// memory.peak cannot be reset per fd, so the meter reports the lifetime peak
+// and must say so rather than pass it off as the exec's.
+func TestBwrapExecPeakWindow(t *testing.T) {
+	backend, h := newBwrapSandbox(t)
+
+	big := meteredRun(t, backend, h, "/usr/bin/python3", []string{"-c", "x = bytearray(64 * 1024 * 1024)"})
+	small := meteredRun(t, backend, h, "/bin/true", nil)
+	kernel, _ := os.ReadFile("/proc/sys/kernel/osrelease")
+	t.Logf("kernel %s: big exec %+v, small exec %+v", strings.TrimSpace(string(kernel)), big, small)
+
+	if big.MemoryPeak < 64<<20 {
+		t.Fatalf("big exec peak = %d, want at least the 64 MiB it allocated", big.MemoryPeak)
+	}
+	switch small.PeakScope {
+	case runtime.PeakWindow:
+		if big.PeakScope != runtime.PeakWindow {
+			t.Fatalf("scopes big=%d small=%d, want both WINDOW on one kernel", big.PeakScope, small.PeakScope)
+		}
+		if small.MemoryPeak >= big.MemoryPeak {
+			t.Fatalf("small exec peak %d >= big exec peak %d: the window did not reset", small.MemoryPeak, big.MemoryPeak)
+		}
+	case runtime.PeakLifetime:
+		// A lifetime peak never goes down; if it did, it was not the lifetime one.
+		if small.MemoryPeak < big.MemoryPeak {
+			t.Fatalf("LIFETIME peak fell from %d to %d", big.MemoryPeak, small.MemoryPeak)
+		}
+		t.Logf("memory.peak is not resettable on this kernel; scope LIFETIME reported")
+	default:
+		t.Fatalf("peak scope = %d, want WINDOW or LIFETIME on a cgroup v2 host", small.PeakScope)
+	}
+}
+
+// meteredRun runs one command inside a usage window and returns the usage.
+func meteredRun(t *testing.T, backend *bwrap.Backend, h runtime.Handle, command string, args []string) runtime.Usage {
+	t.Helper()
+	ctx := context.Background()
+	m, err := backend.Meter(ctx, h)
+	if err != nil {
+		t.Fatalf("Meter: %v", err)
+	}
+	run(t, backend, h, command, args)
+	u, err := m.Stop(ctx)
+	if err != nil {
+		t.Fatalf("meter Stop: %v", err)
+	}
+	return u
+}
+
 // Tenant env values must reach the sandbox byte for byte. systemd expands
 // ${VAR} and $$ in the arguments of a transient service, so an unguarded
 // FOO=${HOME} handed the tenant the host service manager's environment.
