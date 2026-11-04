@@ -54,10 +54,11 @@ fails before any namespace is created.
   resolver, so peers are addressed directly (or by the caller's own discovery).
 - One `NetworkPrivate` tenant is capped at 64 concurrent sandboxes (64 /30s in
   a /24) and the tenant space at 256. Exceeding either fails the create loudly.
-- The tenant index is assigned per runner and not persisted; after a restart all
-  leftovers are reaped and the index space is reused. Two runners serving the
-  same tenant do not share an L2 or routing domain, so peers must be on the same
-  runner.
+- The tenant /24 is claimed per runner from the kernel and released with the
+  tenant's last sandbox on that runner (ADR 027 supersedes the in-memory
+  index); a restart reaps the leftovers and releases their claims. Two runners
+  serving the same tenant hold different /24s and do not share a routing
+  domain, so peers must be on the same runner.
 - `NetworkFull` needs `net.ipv4.ip_forward` in the runner's network namespace,
   which `EnableForwarding` sets; a host that forbids it fails the start.
 - gVisor still supports only `NetworkNone` (issue #18), so these modes are

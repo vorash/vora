@@ -92,10 +92,13 @@ work stays on the non-root runner, and a listed backend that fails to start
 stops its runner instead of leaving it registered without that backend. The
 two runners must not share state: give the root runner its own
 `VORA_STATE_DIR`, `VORA_SOCKET`, `VORA_METRICS_ADDR`, `VORA_GVISOR_ROOT`,
-`VORA_RUNNER_ADDR` and client certificate. Each runner numbers its sandbox
-interfaces (`vora-h<n>`) and `10.7.0.0/16` subnets from zero in the host
-network namespace, so networked sandboxes on both runners at once are not
-yet verified to coexist.
+`VORA_RUNNER_ADDR` and client certificate. Both runners allocate sandbox
+interfaces and subnets in the host network namespace and claim them from the
+kernel ([ADR 027](adr/027-kernel-arbitrated-network-allocation.md)), so
+networked sandboxes on both runners coexist; the `System unit` workflow
+checks this with a second runner unit. Upgrade both runners together: a
+runner on v0.10.1 or older still deletes the interface it failed to create,
+which may be the other runner's.
 
 `vora-init` is installed next to `vora-runner` because `resolveInit()` looks
 beside the executable before falling back to `PATH`.

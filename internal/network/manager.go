@@ -19,16 +19,23 @@
 //
 // Everything here is rootless: the runner runs as uid 0 inside its rootlesskit
 // user namespace and owns the namespaces it creates.
+//
+// Several runners may share one network namespace (vorash/vora#110). They do
+// not coordinate, so every name that must be unique across them is claimed
+// from the kernel: the host veth name, whose index also fixes the sandbox /30,
+// and an nftables table per private-mode tenant /24. A claim that finds the
+// name taken moves on to the next index, and a release only removes a link
+// that carries this sandbox's owner label.
 package network
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -53,12 +60,20 @@ const (
 	holderCmd      = "sleep"
 	holderArg      = "infinity"
 
-	// maxPrivateHostsPerTenant bounds the per-tenant /24 space (10.9.0.0/16).
+	// maxIndexes bounds the veth indexes, and with them the /30s in
+	// 10.7.0.0/16.
+	maxIndexes = 16384
+	// maxPrivateTenants bounds the per-tenant /24 space (10.9.0.0/16).
 	maxPrivateTenants = 256
-	// maxPrivateHostsPerTenant bounds the tenants per /24. Each sandbox gets
-	// its own /30 inside the tenant's /24, so the runner owns a unique gateway
-	// address per veth; 64 /30s fit in one /24.
+	// maxPrivateHostsPerTenant bounds the sandboxes per tenant /24. Each
+	// sandbox gets its own /30 inside the tenant's /24, so the runner owns a
+	// unique gateway address per veth; 64 /30s fit in one /24.
 	maxPrivateHostsPerTenant = 64
+	// tenantTablePrefix names the empty nftables table that claims a tenant
+	// /24 for one runner.
+	tenantTablePrefix = "vora_tenant_"
+	// ownerPrefix prefixes the ULID that labels one runner's claims.
+	ownerPrefix = "own"
 )
 
 // privateDestinations are the ranges a sandbox must never reach unless its mode
@@ -106,7 +121,43 @@ type Net struct {
 
 	iface    string
 	hostSlot uint32
-	holder   *exec.Cmd
+	tenant   *tenantNet
+	holder   netnsHolder
+}
+
+// tenantNet is one runner's claim on a private-mode /24. The table claim makes
+// the /24 exclusively this runner's, so host slots inside it are allocated in
+// memory. The claim is released with the tenant's last sandbox.
+type tenantNet struct {
+	index    uint32
+	live     uint32
+	nextHost uint32
+	free     []uint32
+}
+
+func (t *tenantNet) table() string {
+	return tenantTablePrefix + strconv.FormatUint(uint64(t.index), 10)
+}
+
+func (t *tenantNet) allocHost() (uint32, bool) {
+	var slot uint32
+	switch {
+	case len(t.free) > 0:
+		slot = t.free[len(t.free)-1]
+		t.free = t.free[:len(t.free)-1]
+	case t.nextHost < maxPrivateHostsPerTenant:
+		slot = t.nextHost
+		t.nextHost++
+	default:
+		return 0, false
+	}
+	t.live++
+	return slot, true
+}
+
+func (t *tenantNet) freeHost(slot uint32) {
+	t.free = append(t.free, slot)
+	t.live--
 }
 
 // NetnsPath is the netns path for nsenter.
@@ -140,19 +191,29 @@ type Manager struct {
 	logger   *slog.Logger
 	ports    servicePorts
 	stateDir string
+	host     host
+	// owner labels this runner's tenant /24 claims. It lives in the state
+	// directory so a restarted runner releases its own claims and nobody
+	// else's, even after a reboot that wiped the kernel objects but not the
+	// state files.
+	owner string
 
-	mu          sync.Mutex
-	next        uint32
-	nets        map[string]*Net
-	tenantIndex map[string]uint32
-	tenantHosts map[string]uint32
-	freeHosts   map[string][]uint32
-	nextTenant  uint32
+	mu sync.Mutex
+	// next and nextTenant are hints for where to start the next claim. The
+	// kernel decides whether an index is free.
+	next       uint32
+	nextTenant uint32
+	nets       map[string]*Net
+	tenants    map[string]*tenantNet
 }
 
 // NewManager returns a manager and reaps any networks left behind by a
 // previous runner process (fail-closed restart).
 func NewManager(stateDir string, mc ManagerConfig, logger *slog.Logger) *Manager {
+	return newManager(stateDir, mc, logger, shellHost{})
+}
+
+func newManager(stateDir string, mc ManagerConfig, logger *slog.Logger, h host) *Manager {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -163,17 +224,46 @@ func NewManager(stateDir string, mc ManagerConfig, logger *slog.Logger) *Manager
 		mc.BrokerPort = DefaultBrokerPort
 	}
 	m := &Manager{
-		logger:      logger,
-		ports:       servicePorts{proxy: mc.ProxyPort, broker: mc.BrokerPort, dns: DefaultDNSPort},
-		stateDir:    filepath.Join(stateDir, "netns"),
-		nets:        map[string]*Net{},
-		tenantIndex: map[string]uint32{},
-		tenantHosts: map[string]uint32{},
-		freeHosts:   map[string][]uint32{},
+		logger:   logger,
+		ports:    servicePorts{proxy: mc.ProxyPort, broker: mc.BrokerPort, dns: DefaultDNSPort},
+		stateDir: filepath.Join(stateDir, "netns"),
+		host:     h,
+		nets:     map[string]*Net{},
+		tenants:  map[string]*tenantNet{},
 	}
 	_ = os.MkdirAll(m.stateDir, 0o755)
+	m.owner = loadOwner(filepath.Join(m.stateDir, "owner"), logger)
 	m.reapLeftovers()
 	return m
+}
+
+// loadOwner reads the runner's claim label, minting one on first start. A
+// label that cannot be persisted is still used, so claims stay labelled; the
+// next process then cannot match them and leaves them in place, which is the
+// safe side.
+func loadOwner(path string, logger *slog.Logger) string {
+	if data, err := os.ReadFile(path); err == nil && isOwner(strings.TrimSpace(string(data))) {
+		return strings.TrimSpace(string(data))
+	}
+	owner := ulid.New(ownerPrefix)
+	if err := os.WriteFile(path, []byte(owner+"\n"), 0o644); err != nil {
+		logger.Warn("cannot persist network owner label; leftovers of this process will not be reaped", "path", path, "error", err)
+	}
+	return owner
+}
+
+// isOwner accepts own_<ULID>, which is also a valid nftables chain name.
+func isOwner(s string) bool {
+	rest, ok := strings.CutPrefix(s, ownerPrefix+"_")
+	if !ok || len(rest) != 26 {
+		return false
+	}
+	for _, r := range rest {
+		if !(r >= '0' && r <= '9' || r >= 'A' && r <= 'Z') {
+			return false
+		}
+	}
+	return true
 }
 
 // Create prepares a network namespace for a sandbox. It is idempotent.
@@ -187,73 +277,157 @@ func (m *Manager) Create(ctx context.Context, id string, pol Policy) (*Net, erro
 		return nil, fmt.Errorf("network: mode %q does not use a namespace", pol.Mode)
 	}
 
+	if pol.Mode == runtime.NetworkPrivate && pol.TenantID == "" {
+		return nil, fmt.Errorf("network: %q requires a tenant", pol.Mode)
+	}
+
 	m.mu.Lock()
 	if n, ok := m.nets[id]; ok {
 		m.mu.Unlock()
 		return n, nil
 	}
-	if m.next >= 16384 {
-		m.mu.Unlock()
-		return nil, fmt.Errorf("network: subnet space exhausted")
-	}
-	idx := m.next
+	m.mu.Unlock()
 	enforcement := pol.Enforcement
 	if enforcement == "" {
 		enforcement = EnforceSandbox
 	}
 	n := &Net{ID: id, Mode: pol.Mode, Enforcement: enforcement, TenantID: pol.TenantID, ProxyPort: m.ports.proxy}
-	if pol.Mode == runtime.NetworkPrivate {
-		if pol.TenantID == "" {
-			m.mu.Unlock()
-			return nil, fmt.Errorf("network: %q requires a tenant", pol.Mode)
-		}
-		tIdx, ok := m.tenantIndex[pol.TenantID]
-		if !ok {
-			if m.nextTenant >= maxPrivateTenants {
-				m.mu.Unlock()
-				return nil, fmt.Errorf("network: tenant space exhausted")
-			}
-			tIdx = m.nextTenant
-			m.nextTenant++
-			m.tenantIndex[pol.TenantID] = tIdx
-		}
-		host, ok := m.allocateTenantHost(pol.TenantID)
-		if !ok {
-			m.mu.Unlock()
-			return nil, fmt.Errorf("network: tenant %s has too many sandboxes", pol.TenantID)
-		}
-		n.hostSlot = host
-		n.GatewayIP, n.SandboxIP, n.SandboxCIDR = tenantAddresses(tIdx, host)
-	} else {
-		gw, sb := subnetFor(idx)
-		n.GatewayIP, n.SandboxIP, n.SandboxCIDR = gw, sb, gw+"/30"
-	}
-	m.next++
-	n.iface = ifacePrefix + strconv.FormatUint(uint64(idx), 10)
-	m.mu.Unlock()
 
-	holder := exec.Command("unshare", "--net", holderCmd, holderArg)
-	if err := holder.Start(); err != nil {
+	holder, err := m.host.holdNetns()
+	if err != nil {
 		return nil, fmt.Errorf("network: start netns holder: %w", err)
 	}
 	n.holder = holder
-	n.NetnsPID = holder.Process.Pid
+	n.NetnsPID = holder.pid()
 
-	if err := m.setup(ctx, n); err != nil {
-		m.teardown(n)
-		m.mu.Lock()
-		if n.Mode == runtime.NetworkPrivate {
-			m.releaseTenantHost(n)
-		}
-		m.mu.Unlock()
+	if err := m.allocate(ctx, n); err != nil {
+		m.release(n)
 		return nil, err
 	}
+	// Persisted before the namespace is plumbed, so a crash from here on is
+	// reaped by the next process.
 	m.writeState(n)
+	if err := m.setup(ctx, n); err != nil {
+		m.release(n)
+		m.removeState(id)
+		return nil, err
+	}
 	m.mu.Lock()
 	m.nets[id] = n
 	m.mu.Unlock()
 	m.logger.Info("network ready", "sandbox_id", id, "mode", string(n.Mode), "gateway", n.GatewayIP, "sandbox_ip", n.SandboxIP)
 	return n, nil
+}
+
+// allocate claims the names n needs from the kernel: a tenant /24 first for
+// NetworkPrivate, then the veth index. Addresses follow from the claims.
+func (m *Manager) allocate(ctx context.Context, n *Net) error {
+	if n.Mode == runtime.NetworkPrivate {
+		t, slot, err := m.allocatePrivate(ctx, n.TenantID)
+		if err != nil {
+			return err
+		}
+		n.tenant, n.hostSlot = t, slot
+		n.GatewayIP, n.SandboxIP, n.SandboxCIDR = tenantAddresses(t.index, slot)
+	}
+	m.mu.Lock()
+	start := m.next
+	m.mu.Unlock()
+	for tries := uint32(0); tries < maxIndexes; tries++ {
+		idx := (start + tries) % maxIndexes
+		iface := ifacePrefix + strconv.FormatUint(uint64(idx), 10)
+		err := m.host.claimLink(ctx, iface, peerPrefix+strconv.FormatUint(uint64(idx), 10), n.NetnsPID, n.ID)
+		if errors.Is(err, errExists) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		n.iface = iface
+		if n.Mode != runtime.NetworkPrivate {
+			gw, sb := subnetFor(idx)
+			n.GatewayIP, n.SandboxIP, n.SandboxCIDR = gw, sb, gw+"/30"
+		}
+		m.mu.Lock()
+		m.next = (idx + 1) % maxIndexes
+		m.mu.Unlock()
+		return nil
+	}
+	return fmt.Errorf("network: subnet space exhausted")
+}
+
+// allocatePrivate returns the tenant's /24 and a free host slot in it,
+// claiming a /24 from the kernel when this runner holds none for the tenant.
+// Lookup and slot allocation happen under one lock so a concurrent release of
+// the tenant's last sandbox cannot free the /24 underneath a new one.
+func (m *Manager) allocatePrivate(ctx context.Context, tenant string) (*tenantNet, uint32, error) {
+	for {
+		m.mu.Lock()
+		if t, ok := m.tenants[tenant]; ok {
+			slot, ok := t.allocHost()
+			m.mu.Unlock()
+			if !ok {
+				return nil, 0, fmt.Errorf("network: tenant %s has too many sandboxes", tenant)
+			}
+			return t, slot, nil
+		}
+		start := m.nextTenant
+		m.mu.Unlock()
+
+		t, err := m.claimTenant(ctx, start)
+		if err != nil {
+			return nil, 0, err
+		}
+		m.mu.Lock()
+		if _, ok := m.tenants[tenant]; ok {
+			// Another Create claimed a /24 for this tenant meanwhile.
+			m.mu.Unlock()
+			_ = m.host.releaseTable(ctx, t.table(), m.owner)
+			continue
+		}
+		m.tenants[tenant] = t
+		m.nextTenant = (t.index + 1) % maxPrivateTenants
+		slot, _ := t.allocHost()
+		m.mu.Unlock()
+		return t, slot, nil
+	}
+}
+
+func (m *Manager) claimTenant(ctx context.Context, start uint32) (*tenantNet, error) {
+	for tries := uint32(0); tries < maxPrivateTenants; tries++ {
+		t := &tenantNet{index: (start + tries) % maxPrivateTenants}
+		err := m.host.claimTable(ctx, t.table(), m.owner)
+		if errors.Is(err, errExists) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		return t, nil
+	}
+	return nil, fmt.Errorf("network: tenant space exhausted")
+}
+
+// release undoes whatever Create had done for n so far: the kernel objects it
+// claimed, the holder, and the tenant slot. A link n never claimed is left
+// alone, so a failed claim can never touch another runner's interface.
+func (m *Manager) release(n *Net) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	m.teardown(ctx, n)
+	if n.tenant == nil {
+		return
+	}
+	m.mu.Lock()
+	n.tenant.freeHost(n.hostSlot)
+	last := n.tenant.live == 0
+	if last {
+		delete(m.tenants, n.TenantID)
+	}
+	m.mu.Unlock()
+	if last {
+		_ = m.host.releaseTable(ctx, n.tenant.table(), m.owner)
+	}
 }
 
 // Destroy tears down a sandbox network.
@@ -266,40 +440,15 @@ func (m *Manager) Destroy(_ context.Context, id string) error {
 	delete(m.nets, id)
 	m.mu.Unlock()
 	if !ok {
-		if st, err := m.loadState(id); err == nil {
-			n = st
+		st, err := m.loadState(id)
+		if err != nil {
+			return nil
 		}
+		n = st.net()
 	}
-	if n == nil {
-		return nil
-	}
-	m.teardown(n)
+	m.release(n)
 	m.removeState(id)
-	if ok && n.Mode == runtime.NetworkPrivate {
-		m.mu.Lock()
-		m.releaseTenantHost(n)
-		m.mu.Unlock()
-	}
 	return nil
-}
-
-func (m *Manager) allocateTenantHost(tenant string) (uint32, bool) {
-	free := m.freeHosts[tenant]
-	if len(free) > 0 {
-		slot := free[len(free)-1]
-		m.freeHosts[tenant] = free[:len(free)-1]
-		return slot, true
-	}
-	slot := m.tenantHosts[tenant]
-	if slot >= maxPrivateHostsPerTenant {
-		return 0, false
-	}
-	m.tenantHosts[tenant]++
-	return slot, true
-}
-
-func (m *Manager) releaseTenantHost(n *Net) {
-	m.freeHosts[n.TenantID] = append(m.freeHosts[n.TenantID], n.hostSlot)
 }
 
 // List returns the ids this manager created.
@@ -313,18 +462,12 @@ func (m *Manager) List() []string {
 	return ids
 }
 
+// setup plumbs the veth pair allocate claimed and loads the mode's rules.
 func (m *Manager) setup(ctx context.Context, n *Net) error {
-	pid := strconv.Itoa(n.NetnsPID)
-	if err := run(ctx, "ip", "link", "add", n.iface, "type", "veth", "peer", "name", n.peerIface()); err != nil {
+	if err := m.host.run(ctx, "ip", "addr", "add", n.GatewayIP+"/30", "dev", n.iface); err != nil {
 		return err
 	}
-	if err := run(ctx, "ip", "link", "set", n.peerIface(), "netns", pid); err != nil {
-		return err
-	}
-	if err := run(ctx, "ip", "addr", "add", n.GatewayIP+"/30", "dev", n.iface); err != nil {
-		return err
-	}
-	if err := run(ctx, "ip", "link", "set", n.iface, "up"); err != nil {
+	if err := m.host.run(ctx, "ip", "link", "set", n.iface, "up"); err != nil {
 		return err
 	}
 	// For a shared per-tenant /24 the sandbox still uses a /30 veth to its own
@@ -337,7 +480,7 @@ func (m *Manager) setup(ctx context.Context, n *Net) error {
 		{"ip", "route", "add", "default", "via", n.GatewayIP},
 	}
 	for _, s := range steps {
-		if err := runIn(ctx, n.NetnsPID, s[0], s[1:]...); err != nil {
+		if err := m.runIn(ctx, n.NetnsPID, s[0], s[1:]...); err != nil {
 			return err
 		}
 	}
@@ -345,72 +488,46 @@ func (m *Manager) setup(ctx context.Context, n *Net) error {
 		// gVisor: policy lives in the runner netns, on the inbound frames from
 		// the sandbox veth. No forwarding is needed; non-DNAT'd traffic is
 		// dropped in the forward chain.
-		if err := applyRules(ctx, runnerRestrictedRules(n, m.ports)); err != nil {
-			return err
-		}
-		return nil
+		return m.host.nft(ctx, 0, runnerRestrictedRules(n, m.ports))
 	}
-	if err := m.applyInNetns(ctx, n.NetnsPID, sandboxRules(n, m.ports)); err != nil {
+	if err := m.host.nft(ctx, n.NetnsPID, sandboxRules(n, m.ports)); err != nil {
 		return err
 	}
 	if rules := runnerRules(n); rules != "" {
-		if err := applyRules(ctx, rules); err != nil {
+		if err := m.host.nft(ctx, 0, rules); err != nil {
 			return err
 		}
-		if err := enableForwarding(); err != nil {
+		if err := m.host.enableForwarding(); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// applyInNetns loads an nftables ruleset inside the sandbox network namespace.
-func (m *Manager) applyInNetns(ctx context.Context, pid int, rules string) error {
-	cmd := exec.CommandContext(ctx, "nsenter", "-t", strconv.Itoa(pid), "-n", "nft", "-f", "-")
-	cmd.Stdin = strings.NewReader(rules)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("network: nft: %w: %s", err, out)
-	}
-	return nil
+func (m *Manager) runIn(ctx context.Context, pid int, name string, args ...string) error {
+	full := append([]string{"-t", strconv.Itoa(pid), "-n", name}, args...)
+	return m.host.run(ctx, "nsenter", full...)
 }
 
-// applyRules loads an nftables ruleset in the runner's own network namespace.
-func applyRules(ctx context.Context, rules string) error {
-	cmd := exec.CommandContext(ctx, "nft", "-f", "-")
-	cmd.Stdin = strings.NewReader(rules)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("network: nft: %w: %s", err, out)
+// teardown removes the kernel objects n owns. The link goes first, while the
+// holder still pins its name: once the holder dies the pair may vanish and
+// another runner may claim the name. Only a link labelled with n's id is
+// deleted, so a link n never claimed, or one re-claimed by another sandbox
+// since this state was written, is left alone.
+func (m *Manager) teardown(ctx context.Context, n *Net) {
+	if n.iface != "" {
+		if err := m.host.releaseLink(ctx, n.iface, n.ID); errors.Is(err, errForeign) {
+			m.logger.Warn("leaving interface owned by another sandbox", "sandbox_id", n.ID, "iface", n.iface)
+		}
 	}
-	return nil
-}
-
-// enableForwarding turns on IPv4 forwarding in the runner's network namespace.
-// It is required for NetworkFull (NAT to the uplink) and NetworkPrivate
-// (routing between a tenant's sandboxes).
-func enableForwarding() error {
-	const path = "/proc/sys/net/ipv4/ip_forward"
-	if data, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(data)) == "1" {
-		return nil
+	if n.holder != nil {
+		n.holder.kill()
 	}
-	if err := os.WriteFile(path, []byte("1\n"), 0o644); err != nil {
-		return fmt.Errorf("network: enable ip_forward: %w", err)
-	}
-	return nil
-}
-
-func (m *Manager) teardown(n *Net) {
-	if n.holder != nil && n.holder.Process != nil {
-		_ = n.holder.Process.Kill()
-		_, _ = n.holder.Process.Wait()
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = run(ctx, "ip", "link", "del", n.iface)
 	// Runner-side tables are named per sandbox so removing one cannot disturb
 	// another sandbox's forwarding or NAT.
-	_ = run(ctx, "nft", "delete", "table", "ip", fwdTable(n.ID))
-	_ = run(ctx, "nft", "delete", "table", "ip", natTable(n.ID))
-	_ = run(ctx, "nft", "delete", "table", "inet", filtTable(n.ID))
+	_ = m.host.run(ctx, "nft", "delete", "table", "ip", fwdTable(n.ID))
+	_ = m.host.run(ctx, "nft", "delete", "table", "ip", natTable(n.ID))
+	_ = m.host.run(ctx, "nft", "delete", "table", "inet", filtTable(n.ID))
 }
 
 func (n *Net) peerIface() string {
@@ -424,6 +541,9 @@ func (m *Manager) writeState(n *Net) {
 		NetnsPID: n.NetnsPID, GatewayIP: n.GatewayIP, SandboxIP: n.SandboxIP,
 		SandboxCIDR: n.SandboxCIDR, ProxyPort: n.ProxyPort, Iface: n.iface,
 	}
+	if n.tenant != nil {
+		st.TenantTable = n.tenant.table()
+	}
 	data, err := json.Marshal(st)
 	if err != nil {
 		return
@@ -435,54 +555,57 @@ func (m *Manager) removeState(id string) {
 	_ = os.Remove(filepath.Join(m.stateDir, id+".json"))
 }
 
-func (m *Manager) loadState(id string) (*Net, error) {
+func (m *Manager) loadState(id string) (netState, error) {
+	var st netState
 	data, err := os.ReadFile(filepath.Join(m.stateDir, id+".json"))
 	if err != nil {
-		return nil, err
+		return st, err
 	}
-	var st netState
 	if err := json.Unmarshal(data, &st); err != nil {
-		return nil, err
+		return st, err
 	}
-	return st.net(), nil
+	return st, nil
 }
 
-// reapLeftovers removes networks recorded by a previous process.
+// reapLeftovers removes networks recorded by a previous process, then the
+// tenant /24 claims those networks were using. A table named in stale state
+// may by now be another runner's, so it is released only if it carries this
+// runner's label.
 func (m *Manager) reapLeftovers() {
 	entries, err := os.ReadDir(m.stateDir)
 	if err != nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tenantTables := map[string]bool{}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
 		id := strings.TrimSuffix(e.Name(), ".json")
-		n, err := m.loadState(id)
+		st, err := m.loadState(id)
 		if err != nil {
 			_ = os.Remove(filepath.Join(m.stateDir, e.Name()))
 			continue
 		}
-		if holderAlive(n.NetnsPID) {
-			if p, err := os.FindProcess(n.NetnsPID); err == nil {
+		if holderAlive(st.NetnsPID) {
+			if p, err := os.FindProcess(st.NetnsPID); err == nil {
 				_ = p.Kill()
 			}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		m.teardownContext(ctx, n)
-		cancel()
+		m.teardown(ctx, st.net())
+		if st.TenantTable != "" {
+			tenantTables[st.TenantTable] = true
+		}
 		m.removeState(id)
 		m.logger.Warn("reaped leftover sandbox network", "sandbox_id", id)
 	}
-}
-
-// teardownContext is teardown with a caller-supplied context, used by the
-// startup reaper. The holder is already killed by the caller.
-func (m *Manager) teardownContext(ctx context.Context, n *Net) {
-	_ = run(ctx, "ip", "link", "del", n.iface)
-	_ = run(ctx, "nft", "delete", "table", "ip", fwdTable(n.ID))
-	_ = run(ctx, "nft", "delete", "table", "ip", natTable(n.ID))
-	_ = run(ctx, "nft", "delete", "table", "inet", filtTable(n.ID))
+	for table := range tenantTables {
+		if err := m.host.releaseTable(ctx, table, m.owner); errors.Is(err, errForeign) {
+			m.logger.Warn("leaving tenant table owned by another runner", "table", table)
+		}
+	}
 }
 
 // holderAlive reports whether pid is still the netns holder we started, not a
@@ -511,6 +634,10 @@ type netState struct {
 	SandboxCIDR string `json:"sandbox_cidr,omitempty"`
 	ProxyPort   string `json:"proxy_port"`
 	Iface       string `json:"iface"`
+	// TenantTable is the nftables table that claims this network's tenant
+	// /24. Absent in state written before claims existed, so a reap of such
+	// state frees no table.
+	TenantTable string `json:"tenant_table,omitempty"`
 }
 
 func (s netState) net() *Net {
@@ -717,17 +844,4 @@ func tenantAddresses(tenantIndex, host uint32) (gateway, sandbox, cidr string) {
 	gw := net.IPv4(10, 9, t, base)
 	sb := net.IPv4(10, 9, t, base+1)
 	return gw.String(), sb.String(), fmt.Sprintf("10.9.%d.0/24", t)
-}
-
-func run(ctx context.Context, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("network: %s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-func runIn(ctx context.Context, pid int, name string, args ...string) error {
-	full := append([]string{"-t", strconv.Itoa(pid), "-n", name}, args...)
-	return run(ctx, "nsenter", full...)
 }
