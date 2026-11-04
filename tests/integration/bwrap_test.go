@@ -82,7 +82,7 @@ const idlePastGrace = 30 * time.Second
 // A client may leave a sandbox idle between calls for longer than vora-init's
 // watchdog grace. The runner must keep it alive, so the next exec still finds
 // the agent (vorash/vora#113).
-func TestBwrapIdleSandboxOutlivesWatchdog(t *testing.T) {
+func TestBwrapIdleOutlivesGrace(t *testing.T) {
 	backend, h := newBwrapSandbox(t)
 	time.Sleep(idlePastGrace)
 	if out := strings.TrimSpace(run(t, backend, h, "/bin/echo", []string{"alive"})); out != "alive" {
