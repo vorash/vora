@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
@@ -124,9 +125,21 @@ func Dial(socket string) (*Client, error) {
 		}
 		return connection, nil
 	}
+	// The runner dials before vora-init binds the socket, so the first attempt
+	// always fails, and the default 1 s backoff delayed every start (#114).
+	// MinConnectTimeout must be set: grpc uses zero as the attempt deadline.
 	conn, err := grpc.NewClient("unix://"+socket,
 		grpc.WithContextDialer(dial),
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff: backoff.Config{
+				BaseDelay:  10 * time.Millisecond,
+				Multiplier: backoff.DefaultConfig.Multiplier,
+				Jitter:     backoff.DefaultConfig.Jitter,
+				MaxDelay:   100 * time.Millisecond,
+			},
+			MinConnectTimeout: 20 * time.Second,
+		}))
 	if err != nil {
 		return nil, fmt.Errorf("agentproto: dial %s: %w", socket, err)
 	}
