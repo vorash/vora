@@ -38,7 +38,10 @@ inside an owned `/24` are the runner's to allocate in memory.
 **2. Every host veth carries its sandbox id as its alias, and a release
 deletes only a link whose alias matches.** This holds for a failed create,
 `Destroy` and the startup reap, so a runner can never remove a link it did
-not claim, including one that reused a name from its own stale state.
+not claim, including one that reused a name from its own stale state. The
+alias is set with `ip link set` right after the claim: the kernel applies
+`IFLA_IFALIAS` only on `RTM_SETLINK`, so an alias passed to `ip link add` is
+dropped without an error.
 
 **3. The peer is born inside the sandbox namespace.** The holder is observed
 to have left the runner's namespace before the claim, and `netns <pid>` on the
@@ -76,8 +79,10 @@ without root.
 - Interfaces created by a runner older than this decision carry no alias, so an
   upgraded runner's reap leaves them in place (and logs it); they still die
   with their holder, which the reap kills.
-- A crash between `ip link add` and the state write leaks that index on this
-  boot. The window is one exec.
+- A crash between `ip link add` and the alias write leaves an unlabelled link
+  that no release will delete; it still dies with its holder. A crash between
+  the claim and the state write leaks that index on this boot. Each window is
+  one exec.
 - Conntrack entries from a masqueraded sandbox can outlive it and meet a later
   sandbox at the same `/30`; this predates the change and is unchanged by it.
 - `scripts/test-system-unit.sh` starts a second runner unit and checks that

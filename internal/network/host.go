@@ -29,13 +29,12 @@ type host interface {
 	// holdNetns starts a process whose only job is to keep a fresh network
 	// namespace alive.
 	holdNetns() (netnsHolder, error)
-	// claimLink creates the veth pair iface/peer, labels iface with owner and
-	// places peer inside the network namespace of pid, in one operation.
+	// claimLink creates the veth pair iface/peer with peer inside the network
+	// namespace of pid, then labels iface with owner.
 	claimLink(ctx context.Context, iface, peer string, pid int, owner string) error
 	// releaseLink deletes iface when its label is owner. A missing link is not
 	// an error; a link with another label is errForeign.
 	releaseLink(ctx context.Context, iface, owner string) error
-	// claimTable creates an empty inet nftables table.
 	claimTable(ctx context.Context, name string) error
 	releaseTable(ctx context.Context, name string) error
 	// run executes a command in the runner's network namespace.
@@ -101,8 +100,17 @@ func waitNetns(pid int) error {
 }
 
 func (shellHost) claimLink(ctx context.Context, iface, peer string, pid int, owner string) error {
-	return asExists(run(ctx, "ip", "link", "add", iface, "alias", owner, "type", "veth",
-		"peer", "name", peer, "netns", strconv.Itoa(pid)))
+	if err := asExists(run(ctx, "ip", "link", "add", iface, "type", "veth",
+		"peer", "name", peer, "netns", strconv.Itoa(pid))); err != nil {
+		return err
+	}
+	// The kernel applies IFLA_IFALIAS only on RTM_SETLINK, so an alias given
+	// to `ip link add` is dropped silently; the label needs its own call.
+	if err := run(ctx, "ip", "link", "set", "dev", iface, "alias", owner); err != nil {
+		_ = run(ctx, "ip", "link", "del", iface)
+		return err
+	}
+	return nil
 }
 
 func (shellHost) releaseLink(ctx context.Context, iface, owner string) error {
