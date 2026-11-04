@@ -76,6 +76,9 @@ func (f *fakeBackend) Signal(context.Context, Handle, int32) error { return ErrU
 func (f *fakeBackend) Stats(context.Context, Handle) (*Stats, error) {
 	return nil, ErrUnsupported
 }
+func (f *fakeBackend) Meter(context.Context, Handle) (UsageMeter, error) {
+	return nil, ErrUnsupported
+}
 func (f *fakeBackend) Stop(context.Context, Handle) error    { return ErrUnsupported }
 func (f *fakeBackend) Destroy(context.Context, Handle) error { return ErrUnsupported }
 

@@ -288,6 +288,10 @@ type Backend interface {
 	Signal(ctx context.Context, h Handle, sig int32) error
 	// Stats returns resource usage for the sandbox.
 	Stats(ctx context.Context, h Handle) (*Stats, error)
+	// Meter opens a usage window on a running sandbox. The runner opens one
+	// around every exec, so an exec record describes that exec rather than
+	// the sandbox's lifetime.
+	Meter(ctx context.Context, h Handle) (UsageMeter, error)
 	// Stop gracefully stops the sandbox, then kills it.
 	Stop(ctx context.Context, h Handle) error
 	// Destroy releases all resources for the sandbox.

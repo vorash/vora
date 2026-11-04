@@ -58,6 +58,9 @@ func (b *brokerBackend) Signal(context.Context, runtime.Handle, int32) error { r
 func (b *brokerBackend) Stats(context.Context, runtime.Handle) (*runtime.Stats, error) {
 	return &runtime.Stats{}, nil
 }
+func (b *brokerBackend) Meter(context.Context, runtime.Handle) (runtime.UsageMeter, error) {
+	return &fakeMeter{}, nil
+}
 func (b *brokerBackend) Stop(context.Context, runtime.Handle) error    { return nil }
 func (b *brokerBackend) Destroy(context.Context, runtime.Handle) error { return nil }
 
