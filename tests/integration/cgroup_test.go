@@ -112,7 +112,12 @@ func TestSystemdUnitLimitsAndTeardown(t *testing.T) {
 	t.Fatal("unit did not stop")
 }
 
-func TestSystemdOOMKilled(t *testing.T) {
+// An OOM kill must take only the process the kernel chose, not the unit. With
+// systemd's default OOMPolicy=stop the unit was stopped and its cgroup
+// removed, so a sandbox died with its exec and lost its counters
+// (vorash/vora#108). systemd records no Result=oom-kill under
+// OOMPolicy=continue; memory.events is where the kill shows.
+func TestSystemdOOMKeepsUnit(t *testing.T) {
 	m := newCgroupManager(t)
 	python, err := exec.LookPath("python3")
 	if err != nil {
@@ -122,29 +127,36 @@ func TestSystemdOOMKilled(t *testing.T) {
 	defer cleanupUnit(t, m, name)
 	ctx := context.Background()
 
+	const limit = 64 << 20
 	u, err := m.Start(ctx, cgroup.StartRequest{
 		Name:   name,
-		Limits: runtime.ResourceLimits{CPUMillis: 1000, MemoryBytes: 64 << 20, Pids: 64},
-		Argv:   []string{python, "-c", "x = bytearray(400 * 1024 * 1024)"},
+		Limits: runtime.ResourceLimits{CPUMillis: 1000, MemoryBytes: limit, Pids: 64},
+		// The shell stands in for the sandbox's init: it outlives the hog.
+		Argv: []string{"/bin/sh", "-c", python + ` -c "x = bytearray(400 * 1024 * 1024)"; exec sleep 30`},
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
+	var st *runtime.Stats
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		active, _ := u.Active(ctx)
-		if !active {
+		if st, err = u.Stats(ctx); err == nil && st.OOMKills > 0 {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	result, err := u.Result(ctx)
-	if err != nil {
-		t.Fatalf("Result: %v", err)
+	if st == nil || st.OOMKills == 0 {
+		t.Fatalf("no OOM kill counted (stats %+v, err %v)", st, err)
 	}
-	if got := cgroup.ReasonFromSystemd(result, nil); got != runtime.ReasonOOMKilled {
-		t.Fatalf("ReasonFromSystemd(%q) = %v, want OOMKilled", result, got)
+	// systemd acts on the OOM event asynchronously; give a stop time to land.
+	time.Sleep(time.Second)
+	if active, _ := u.Active(ctx); !active {
+		result, _ := u.Result(ctx)
+		t.Fatalf("unit stopped after the OOM kill (result %q); only the hog should have died", result)
+	}
+	if st.MemoryPeak < limit*8/10 {
+		t.Fatalf("memory peak = %d, want near the %d limit", st.MemoryPeak, limit)
 	}
 }
 
