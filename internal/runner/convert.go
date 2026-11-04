@@ -231,6 +231,34 @@ func execChunkToProto(c runtime.ExecChunk) *v1.ExecChunk {
 	}
 }
 
+// execExitToProto builds the exit chunk a client sees: the reason derived
+// from the exec's usage, the usage itself, and the id of its audit record.
+func execExitToProto(code int, reason runtime.ExitReason, u runtime.Usage, executionID string) *v1.ExecChunk {
+	return &v1.ExecChunk{Payload: &v1.ExecChunk_Exit{Exit: &v1.ExecExit{
+		ExitCode: int32(code),
+		Reason:   reasonToProto(reason),
+		Usage: &v1.ExecUsage{
+			CpuMillis:       u.CPUMillis,
+			MemoryPeakBytes: u.MemoryPeak,
+			MemoryPeakScope: peakScopeToProto(u.PeakScope),
+			OomKills:        u.OOMKills,
+			PidsLimitHits:   u.PidsLimitHits,
+		},
+		ExecutionId: executionID,
+	}}}
+}
+
+func peakScopeToProto(s runtime.PeakScope) v1.PeakScope {
+	switch s {
+	case runtime.PeakWindow:
+		return v1.PeakScope_PEAK_SCOPE_WINDOW
+	case runtime.PeakLifetime:
+		return v1.PeakScope_PEAK_SCOPE_LIFETIME
+	default:
+		return v1.PeakScope_PEAK_SCOPE_UNSPECIFIED
+	}
+}
+
 func eventsToProto(events []sandbox.Event) []*v1.SandboxEvent {
 	out := make([]*v1.SandboxEvent, 0, len(events))
 	for _, e := range events {
@@ -262,6 +290,9 @@ func execsToProto(execs []sandbox.ExecRecord) []*v1.SandboxExec {
 			StderrBytes:      e.StderrBytes,
 			CpuMillis:        e.CPUMillis,
 			MemoryPeakBytes:  e.MemoryPeakBytes,
+			MemoryPeakScope:  peakScopeToProto(e.MemoryPeakScope),
+			OomKills:         e.OOMKills,
+			PidsLimitHits:    e.PidsLimitHits,
 			EgressAllowed:    e.EgressAllowed,
 			EgressDenied:     e.EgressDenied,
 		})

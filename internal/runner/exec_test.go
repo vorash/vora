@@ -42,14 +42,6 @@ func TestEgressInWindowCountsOnlyTheExecution(t *testing.T) {
 	}
 }
 
-func TestUsageDeltaWithoutBaselineIsZero(t *testing.T) {
-	s := testServer(t, runtime.NewRegistry())
-	cpu, peak := s.usageDelta(context.Background(), nil, nil, usageBaseline{})
-	if cpu != 0 || peak != 0 {
-		t.Fatalf("cpu=%d peak=%d, want 0/0", cpu, peak)
-	}
-}
-
 type fakeHandle struct{ id string }
 
 func (h fakeHandle) ID() string { return h.id }

@@ -27,12 +27,20 @@ type ExecRecord struct {
 	Reason      runtime.ExitReason `json:"reason"`
 	StdoutBytes int64              `json:"stdout_bytes"`
 	StderrBytes int64              `json:"stderr_bytes"`
-	// CPUMillis is the CPU consumed during this execution (the cgroup
-	// cpu.stat usage delta across it).
+	// CPUMillis is the CPU the sandbox consumed during this execution (the
+	// cgroup cpu.stat usage delta across its window).
 	CPUMillis int64 `json:"cpu_millis,omitempty"`
-	// MemoryPeakBytes is the sandbox cgroup's memory.peak at the end of the
-	// execution: a high-water mark, not a per-execution sample.
-	MemoryPeakBytes int64 `json:"memory_peak_bytes,omitempty"`
+	// MemoryPeakBytes is the sandbox's memory peak during this execution's
+	// window. MemoryPeakScope says whether the kernel could scope it to the
+	// window or it is the lifetime peak. Records written before usage windows
+	// hold the lifetime peak at exit with no scope.
+	MemoryPeakBytes int64             `json:"memory_peak_bytes,omitempty"`
+	MemoryPeakScope runtime.PeakScope `json:"memory_peak_scope,omitempty"`
+	// OOMKills and PidsLimitHits are the cgroup's counter deltas across the
+	// window. Windows are per sandbox, so concurrent executions in one sandbox
+	// count each other's usage.
+	OOMKills      int64 `json:"oom_kills,omitempty"`
+	PidsLimitHits int64 `json:"pids_limit_hits,omitempty"`
 	// EgressAllowed and EgressDenied count the restricted-network policy
 	// decisions that fell inside this execution's window.
 	EgressAllowed int64 `json:"egress_allowed,omitempty"`
