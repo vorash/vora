@@ -392,6 +392,51 @@ func TestExecStreamsNDJSON(t *testing.T) {
 	}
 }
 
+// The SDKs parse the exit line's usage and execution id by their protojson
+// names, int64s as strings and the scope as its enum name. This pins that
+// shape at the HTTP boundary, so a re-encoding in the API cannot drop or
+// rename them unnoticed.
+func TestExecExitLineCarriesUsageAndID(t *testing.T) {
+	fr := &fakeRunner{chunks: []*v1.ExecChunk{
+		{Payload: &v1.ExecChunk_Exit{Exit: &v1.ExecExit{
+			ExitCode:    137,
+			Reason:      v1.ExitReason_OOM_KILLED,
+			ExecutionId: "exe_01M6M3D3FRG49JM5BK3MD9Q0WY",
+			Usage: &v1.ExecUsage{
+				CpuMillis: 120, MemoryPeakBytes: 64 << 20, MemoryPeakScope: v1.PeakScope_PEAK_SCOPE_WINDOW,
+				OomKills: 1, PidsLimitHits: 2,
+			},
+		}}},
+	}}
+	_, ts := newTestServer(t, fr)
+	_ = do(t, http.MethodPost, ts.URL+"/v1/sandboxes", bootstrap, &v1.SandboxSpec{Image: "vora/base"}).Body.Close()
+
+	resp := do(t, http.MethodPost, ts.URL+"/v1/sandboxes/sbx_test/exec", bootstrap, &v1.ExecRequest{Command: "true"})
+	defer func() { _ = resp.Body.Close() }()
+	var line struct {
+		Exit struct {
+			Reason      string            `json:"reason"`
+			ExecutionID string            `json:"executionId"`
+			Usage       map[string]string `json:"usage"`
+		} `json:"exit"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&line); err != nil {
+		t.Fatalf("decode exit line: %v", err)
+	}
+	want := map[string]string{
+		"cpuMillis": "120", "memoryPeakBytes": "67108864", "memoryPeakScope": "PEAK_SCOPE_WINDOW",
+		"oomKills": "1", "pidsLimitHits": "2",
+	}
+	if line.Exit.Reason != "OOM_KILLED" || line.Exit.ExecutionID != "exe_01M6M3D3FRG49JM5BK3MD9Q0WY" {
+		t.Fatalf("exit = %+v, want OOM_KILLED with the execution id", line.Exit)
+	}
+	for k, v := range want {
+		if line.Exit.Usage[k] != v {
+			t.Fatalf("usage = %v, want %s=%q", line.Exit.Usage, k, v)
+		}
+	}
+}
+
 func TestKeyCreationRequiresAdmin(t *testing.T) {
 	_, ts := newTestServer(t, &fakeRunner{})
 

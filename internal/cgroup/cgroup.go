@@ -9,6 +9,7 @@ package cgroup
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 
 	"github.com/vorash/vora/internal/config"
@@ -87,14 +88,31 @@ func (u *Unit) Active(ctx context.Context) (bool, error) { return u.ctl.isActive
 
 // Stats reads current resource usage from the unit's cgroup.
 func (u *Unit) Stats(ctx context.Context) (*runtime.Stats, error) {
-	if u.cgroupPath == "" {
-		path, err := u.ctl.controlGroup(ctx, u.name)
-		if err != nil {
-			return nil, err
-		}
-		u.cgroupPath = path
+	if err := u.resolveCgroup(ctx); err != nil {
+		return nil, err
 	}
 	return readStats(u.cgroupPath)
+}
+
+// OpenWindow starts a usage window on the unit's cgroup.
+func (u *Unit) OpenWindow(ctx context.Context) (*Window, error) {
+	if err := u.resolveCgroup(ctx); err != nil {
+		return nil, err
+	}
+	return OpenWindow(filepath.Join(cgroupRoot, u.cgroupPath))
+}
+
+// resolveCgroup asks systemd for the unit's cgroup when Start could not.
+func (u *Unit) resolveCgroup(ctx context.Context) error {
+	if u.cgroupPath != "" {
+		return nil
+	}
+	path, err := u.ctl.controlGroup(ctx, u.name)
+	if err != nil {
+		return err
+	}
+	u.cgroupPath = path
+	return nil
 }
 
 // Stop stops the unit and its process tree.

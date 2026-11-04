@@ -35,6 +35,9 @@ func (f *fakeBackend) Signal(context.Context, runtime.Handle, int32) error { ret
 func (f *fakeBackend) Stats(context.Context, runtime.Handle) (*runtime.Stats, error) {
 	return &runtime.Stats{}, nil
 }
+func (f *fakeBackend) Meter(context.Context, runtime.Handle) (runtime.UsageMeter, error) {
+	return &fakeMeter{}, nil
+}
 func (f *fakeBackend) Stop(context.Context, runtime.Handle) error    { return nil }
 func (f *fakeBackend) Destroy(context.Context, runtime.Handle) error { return nil }
 

@@ -7,6 +7,7 @@ package bwrap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -660,6 +661,50 @@ func (b *Backend) Stats(ctx context.Context, h runtime.Handle) (*runtime.Stats, 
 		}
 	}
 	return st, nil
+}
+
+// Meter opens a usage window on the sandbox's cgroup: the runner's subtree
+// group when the sandbox has its own netns, else the systemd unit's cgroup.
+func (b *Backend) Meter(ctx context.Context, h runtime.Handle) (runtime.UsageMeter, error) {
+	hd, err := b.handle(h)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case hd.group != nil:
+		w, err := cgroup.OpenWindow(hd.group.Path())
+		if err != nil {
+			return nil, fmt.Errorf("bwrap: meter: %w", err)
+		}
+		return windowMeter{w: w}, nil
+	case hd.unit != nil:
+		w, err := hd.unit.OpenWindow(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("bwrap: meter: %w", err)
+		}
+		return windowMeter{w: w, unit: hd.unit}, nil
+	default:
+		return nil, fmt.Errorf("bwrap: sandbox %s is not running", hd.id)
+	}
+}
+
+// windowMeter adapts a cgroup window to runtime.UsageMeter.
+type windowMeter struct {
+	w *cgroup.Window
+	// unit is set when the window is on a systemd unit's cgroup. An OOM kill
+	// stops that unit and removes the cgroup, counters included, but systemd
+	// keeps Result=oom-kill on the failed unit.
+	unit *cgroup.Unit
+}
+
+func (m windowMeter) Stop(ctx context.Context) (runtime.Usage, error) {
+	u, err := m.w.Stop()
+	if errors.Is(err, cgroup.ErrNotFound) && m.unit != nil {
+		if result, rerr := m.unit.Result(ctx); rerr == nil && result == "oom-kill" {
+			return runtime.Usage{OOMKills: 1}, nil
+		}
+	}
+	return u, err
 }
 
 // Stop asks the agent to exit, then stops the cgroup unit.

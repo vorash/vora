@@ -183,6 +183,61 @@ type Stats struct {
 	PidsLimitHits int64
 }
 
+// UsageMeter is one open usage window on a sandbox.
+type UsageMeter interface {
+	// Stop closes the window and reports what the sandbox used inside it.
+	// Call it once.
+	Stop(ctx context.Context) (Usage, error)
+}
+
+// PeakScope says what Usage.MemoryPeak covers.
+type PeakScope int
+
+const (
+	// PeakUnspecified means the peak was not measured: the exec ran unmetered
+	// or the cgroup exposes no memory.peak.
+	PeakUnspecified PeakScope = iota
+	// PeakWindow is the high-water mark since the window opened. The meter
+	// wrote to its memory.peak fd, which resets that fd's watermark to current
+	// usage (kernel 6.12 and later).
+	PeakWindow
+	// PeakLifetime means the kernel refused the reset, so MemoryPeak is the
+	// cgroup's lifetime peak. It is reported rather than passed off as the
+	// window's.
+	PeakLifetime
+)
+
+// Usage is what a sandbox used inside one window. CPUMillis, OOMKills and
+// PidsLimitHits are deltas of cumulative cgroup counters. MemoryPeak includes
+// the sandbox's resident baseline (its init, and on gVisor the sentry and
+// gofer). Windows are per sandbox, not per process: concurrent execs in one
+// sandbox have overlapping windows and each sees the other's usage.
+type Usage struct {
+	CPUMillis     int64
+	MemoryPeak    int64
+	PeakScope     PeakScope
+	OOMKills      int64
+	PidsLimitHits int64
+}
+
+// Reason derives an exec's semantic exit reason. A kill the cgroup counted
+// beats what the agent reported, because an OOM-killed process only looks
+// like a signal exit from inside. A failure while pids.max was hit is blamed
+// on the limit; a success that brushed it is not. A timeout stays a timeout:
+// the runner's own deadline is the more specific cause.
+func (u Usage) Reason(reported ExitReason, exitCode int) ExitReason {
+	switch {
+	case reported == ReasonTimeout:
+		return ReasonTimeout
+	case u.OOMKills > 0:
+		return ReasonOOMKilled
+	case u.PidsLimitHits > 0 && exitCode != 0:
+		return ReasonPidsLimit
+	default:
+		return reported
+	}
+}
+
 // Capabilities describes what a backend can do, so the runner can adapt
 // without special-casing backend names.
 type Capabilities struct {
@@ -233,6 +288,10 @@ type Backend interface {
 	Signal(ctx context.Context, h Handle, sig int32) error
 	// Stats returns resource usage for the sandbox.
 	Stats(ctx context.Context, h Handle) (*Stats, error)
+	// Meter opens a usage window on a running sandbox. The runner opens one
+	// around every exec, so an exec record describes that exec rather than
+	// the sandbox's lifetime.
+	Meter(ctx context.Context, h Handle) (UsageMeter, error)
 	// Stop gracefully stops the sandbox, then kills it.
 	Stop(ctx context.Context, h Handle) error
 	// Destroy releases all resources for the sandbox.

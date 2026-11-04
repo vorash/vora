@@ -596,6 +596,35 @@ func (b *Backend) Stats(ctx context.Context, h runtime.Handle) (*runtime.Stats, 
 	return &runtime.Stats{}, nil
 }
 
+// Meter opens a usage window on the host cgroup that holds the sentry and
+// gofer. Its peak is the host's view, which includes memory the sentry kept
+// from earlier execs, so it is an upper bound on the exec's own peak.
+func (b *Backend) Meter(_ context.Context, h runtime.Handle) (runtime.UsageMeter, error) {
+	hd, err := b.handle(h)
+	if err != nil {
+		return nil, err
+	}
+	if hd.group == nil {
+		return unmetered{}, nil
+	}
+	w, err := cgroup.OpenWindow(hd.group.Path())
+	if err != nil {
+		return nil, fmt.Errorf("gvisor: meter: %w", err)
+	}
+	return windowMeter{w}, nil
+}
+
+// windowMeter adapts a cgroup window to runtime.UsageMeter.
+type windowMeter struct{ w *cgroup.Window }
+
+func (m windowMeter) Stop(context.Context) (runtime.Usage, error) { return m.w.Stop() }
+
+// unmetered reports zero usage with no peak scope: without a cgroup there is
+// nothing to measure, which Stats reports as zeros too.
+type unmetered struct{}
+
+func (unmetered) Stop(context.Context) (runtime.Usage, error) { return runtime.Usage{}, nil }
+
 // Stop kills the sandbox.
 func (b *Backend) Stop(ctx context.Context, h runtime.Handle) error {
 	hd, err := b.handle(h)

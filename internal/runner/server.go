@@ -669,9 +669,10 @@ func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStrea
 }
 
 // runExec runs one command in a started sandbox. It mints the execution ID,
-// forwards the backend's chunks through send, and writes exactly one exec
-// record, persisted before the exit chunk is sent. A run that ends without an
-// exit chunk is recorded as a RuntimeFailure and returns an error.
+// meters the run, forwards the backend's chunks through send, and writes
+// exactly one exec record, persisted before the exit chunk is sent. A run that
+// ends without an exit chunk is recorded as a RuntimeFailure and returns an
+// error.
 func (s *Server) runExec(ctx context.Context, sandboxID string, backend runtime.Backend, h runtime.Handle, execReq runtime.ExecRequest, keyID string, send func(*v1.ExecChunk) error) error {
 	execReq.ExecutionID = ulid.NewExec()
 
@@ -680,10 +681,12 @@ func (s *Server) runExec(ctx context.Context, sandboxID string, backend runtime.
 		attribute.String("sandbox.id", sandboxID),
 		attribute.String("vora.exec.command", execReq.Command))
 	defer span.End()
-	baseline := s.usageBaseline(execCtx, backend, h)
+	stopMeter := s.meterExec(execCtx, sandboxID, execReq.ExecutionID, backend, h)
+	// Closes the window on paths that never read it, such as a failed send.
+	defer stopMeter()
 	es, err := backend.Exec(execCtx, h, execReq)
 	if err != nil {
-		s.recordExec(sandboxID, execReq, started, 0, 0, 0, runtime.ReasonRuntimeFailure, 0, 0, keyID)
+		s.recordExec(sandboxID, execReq, started, 0, 0, 0, runtime.ReasonRuntimeFailure, stopMeter(), keyID)
 		s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure)).Inc()
 		return status.Errorf(codes.Internal, "exec: %v", err)
 	}
@@ -698,25 +701,27 @@ func (s *Server) runExec(ctx context.Context, sandboxID string, backend runtime.
 		}
 		if err != nil {
 			if !recorded {
-				cpu, peak := s.usageDelta(ctx, backend, h, baseline)
-				s.recordExec(sandboxID, execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure, cpu, peak, keyID)
+				s.recordExec(sandboxID, execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure, stopMeter(), keyID)
 				s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure)).Inc()
 			}
 			return status.Errorf(codes.Internal, "exec stream: %v", err)
 		}
 		stdoutBytes += int64(len(chunk.Stdout))
 		stderrBytes += int64(len(chunk.Stderr))
+		out := execChunkToProto(chunk)
 		if chunk.Exit != nil && !recorded {
 			// Persist before observing: the client may destroy the sandbox the
 			// moment it sees the exit chunk (the API closes its response right
 			// after forwarding it), so the record must be on disk first. The exit
 			// chunk is final, so the byte totals are complete here.
-			cpu, peak := s.usageDelta(ctx, backend, h, baseline)
-			s.recordExec(sandboxID, execReq, started, stdoutBytes, stderrBytes, chunk.Exit.ExitCode, chunk.Exit.Reason, cpu, peak, keyID)
+			usage := stopMeter()
+			reason := usage.Reason(chunk.Exit.Reason, chunk.Exit.ExitCode)
+			s.recordExec(sandboxID, execReq, started, stdoutBytes, stderrBytes, chunk.Exit.ExitCode, reason, usage, keyID)
 			s.metrics.ExecTotal.WithLabelValues("ok").Inc()
 			recorded = true
+			out = execExitToProto(chunk.Exit.ExitCode, reason, usage, execReq.ExecutionID)
 		}
-		if err := send(execChunkToProto(chunk)); err != nil {
+		if err := send(out); err != nil {
 			return err
 		}
 	}
@@ -726,15 +731,46 @@ func (s *Server) runExec(ctx context.Context, sandboxID string, backend runtime.
 	}
 	// EOF with no exit record is a killed run (watchdog, timeout, agent
 	// death) — never a silent success.
-	cpu, peak := s.usageDelta(ctx, backend, h, baseline)
-	s.recordExec(sandboxID, execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure, cpu, peak, keyID)
+	s.recordExec(sandboxID, execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure, stopMeter(), keyID)
 	s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure)).Inc()
 	return status.Error(codes.Internal, "exec stream ended without an exit record (the run was killed)")
 }
 
+// meterExec opens the exec's usage window and returns the function that
+// closes it. Only the first call stops the meter; later calls return the same
+// usage, so every exit path can ask for it. A backend that cannot meter must
+// not block the command: the exec then runs unmetered and reports zero usage
+// with no peak scope.
+func (s *Server) meterExec(ctx context.Context, sandboxID, executionID string, backend runtime.Backend, h runtime.Handle) func() runtime.Usage {
+	m, err := backend.Meter(ctx, h)
+	if err != nil {
+		s.logger.Warn("exec runs unmetered", "sandbox_id", sandboxID, "execution_id", executionID, "error", err)
+		return func() runtime.Usage { return runtime.Usage{} }
+	}
+	var (
+		stopped bool
+		usage   runtime.Usage
+	)
+	return func() runtime.Usage {
+		if stopped {
+			return usage
+		}
+		stopped = true
+		// The record is still written after a client disconnect, so its usage
+		// must not depend on the caller's context.
+		u, err := m.Stop(context.WithoutCancel(ctx))
+		if err != nil {
+			s.logger.Warn("exec usage unavailable", "sandbox_id", sandboxID, "execution_id", executionID, "error", err)
+			return usage
+		}
+		usage = u
+		return usage
+	}
+}
+
 // recordExec persists an execution audit record. Failures are logged, not
 // fatal: losing an audit write must not fail the caller's command.
-func (s *Server) recordExec(sandboxID string, req runtime.ExecRequest, started time.Time, stdoutBytes, stderrBytes int64, code int, reason runtime.ExitReason, cpuMillis, memPeak int64, keyID string) {
+func (s *Server) recordExec(sandboxID string, req runtime.ExecRequest, started time.Time, stdoutBytes, stderrBytes int64, code int, reason runtime.ExitReason, usage runtime.Usage, keyID string) {
 	finished := time.Now().UTC()
 	allowed, denied := s.egressInWindow(sandboxID, started, finished)
 	rec := sandbox.ExecRecord{
@@ -750,8 +786,11 @@ func (s *Server) recordExec(sandboxID string, req runtime.ExecRequest, started t
 		Reason:          reason,
 		StdoutBytes:     stdoutBytes,
 		StderrBytes:     stderrBytes,
-		CPUMillis:       cpuMillis,
-		MemoryPeakBytes: memPeak,
+		CPUMillis:       usage.CPUMillis,
+		MemoryPeakBytes: usage.MemoryPeak,
+		MemoryPeakScope: usage.PeakScope,
+		OOMKills:        usage.OOMKills,
+		PidsLimitHits:   usage.PidsLimitHits,
 		EgressAllowed:   allowed,
 		EgressDenied:    denied,
 	}
@@ -759,44 +798,6 @@ func (s *Server) recordExec(sandboxID string, req runtime.ExecRequest, started t
 		s.metrics.AuditWriteFailedTotal.Inc()
 		s.logger.Warn("write exec record failed", "sandbox_id", sandboxID, "execution_id", req.ExecutionID, "error", err)
 	}
-}
-
-// usageBaseline captures the sandbox cgroup's CPU counter before an execution,
-// so the execution's own consumption can be derived as a delta.
-type usageBaseline struct {
-	cpuMillis int64
-	ok        bool
-}
-
-func (s *Server) usageBaseline(ctx context.Context, backend runtime.Backend, h runtime.Handle) usageBaseline {
-	st, err := backend.Stats(ctx, h)
-	if err != nil || st == nil {
-		return usageBaseline{}
-	}
-	return usageBaseline{cpuMillis: st.CPUMillis, ok: true}
-}
-
-// usageDelta returns the CPU consumed since the baseline and the cgroup's
-// memory.peak at the end of the execution. memory.peak is a high-water mark, so
-// this is the sandbox's peak, not a per-execution sample; current memory is
-// used when the kernel does not expose memory.peak.
-func (s *Server) usageDelta(ctx context.Context, backend runtime.Backend, h runtime.Handle, base usageBaseline) (int64, int64) {
-	if !base.ok {
-		return 0, 0
-	}
-	st, err := backend.Stats(ctx, h)
-	if err != nil || st == nil {
-		return 0, 0
-	}
-	cpu := st.CPUMillis - base.cpuMillis
-	if cpu < 0 {
-		cpu = 0
-	}
-	peak := st.MemoryPeak
-	if peak <= 0 {
-		peak = st.MemoryBytes
-	}
-	return cpu, peak
 }
 
 // egressInWindow counts restricted-network decisions inside [start, end], so an

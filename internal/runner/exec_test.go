@@ -42,14 +42,6 @@ func TestEgressInWindowCountsOnlyTheExecution(t *testing.T) {
 	}
 }
 
-func TestUsageDeltaWithoutBaselineIsZero(t *testing.T) {
-	s := testServer(t, runtime.NewRegistry())
-	cpu, peak := s.usageDelta(context.Background(), nil, nil, usageBaseline{})
-	if cpu != 0 || peak != 0 {
-		t.Fatalf("cpu=%d peak=%d, want 0/0", cpu, peak)
-	}
-}
-
 type fakeHandle struct{ id string }
 
 func (h fakeHandle) ID() string { return h.id }
@@ -88,6 +80,22 @@ type fakeExecBackend struct {
 	stream *fakeExecStream
 	// execErr, when set, fails Exec before any chunk.
 	execErr error
+	// meter is the window every exec opens; meterErr, when set, refuses it.
+	meter    fakeMeter
+	meterErr error
+}
+
+// fakeMeter reports a chosen usage and counts its stops, so a test can check
+// that every way an exec ends closes its window exactly once.
+type fakeMeter struct {
+	usage runtime.Usage
+	err   error
+	stops int
+}
+
+func (m *fakeMeter) Stop(context.Context) (runtime.Usage, error) {
+	m.stops++
+	return m.usage, m.err
 }
 
 func (b *fakeExecBackend) Name() string { return "fake" }
@@ -107,6 +115,12 @@ func (b *fakeExecBackend) Exec(context.Context, runtime.Handle, runtime.ExecRequ
 func (b *fakeExecBackend) Signal(context.Context, runtime.Handle, int32) error { return nil }
 func (b *fakeExecBackend) Stats(context.Context, runtime.Handle) (*runtime.Stats, error) {
 	return &runtime.Stats{}, nil
+}
+func (b *fakeExecBackend) Meter(context.Context, runtime.Handle) (runtime.UsageMeter, error) {
+	if b.meterErr != nil {
+		return nil, b.meterErr
+	}
+	return &b.meter, nil
 }
 func (b *fakeExecBackend) Stop(context.Context, runtime.Handle) error    { return nil }
 func (b *fakeExecBackend) Destroy(context.Context, runtime.Handle) error { return nil }

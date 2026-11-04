@@ -217,6 +217,61 @@ func (ExitReason) EnumDescriptor() ([]byte, []int) {
 	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{2}
 }
 
+// PeakScope says what a memory peak covers.
+type PeakScope int32
+
+const (
+	// Not measured: the execution ran unmetered, or the cgroup has no
+	// memory.peak.
+	PeakScope_PEAK_SCOPE_UNSPECIFIED PeakScope = 0
+	// The high-water mark since the execution started (memory.peak reset for
+	// the runner's fd, kernel 6.12 and later).
+	PeakScope_PEAK_SCOPE_WINDOW PeakScope = 1
+	// The kernel refused the reset, so the peak is the sandbox's lifetime peak.
+	PeakScope_PEAK_SCOPE_LIFETIME PeakScope = 2
+)
+
+// Enum value maps for PeakScope.
+var (
+	PeakScope_name = map[int32]string{
+		0: "PEAK_SCOPE_UNSPECIFIED",
+		1: "PEAK_SCOPE_WINDOW",
+		2: "PEAK_SCOPE_LIFETIME",
+	}
+	PeakScope_value = map[string]int32{
+		"PEAK_SCOPE_UNSPECIFIED": 0,
+		"PEAK_SCOPE_WINDOW":      1,
+		"PEAK_SCOPE_LIFETIME":    2,
+	}
+)
+
+func (x PeakScope) Enum() *PeakScope {
+	p := new(PeakScope)
+	*p = x
+	return p
+}
+
+func (x PeakScope) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (PeakScope) Descriptor() protoreflect.EnumDescriptor {
+	return file_api_proto_v1_common_proto_enumTypes[3].Descriptor()
+}
+
+func (PeakScope) Type() protoreflect.EnumType {
+	return &file_api_proto_v1_common_proto_enumTypes[3]
+}
+
+func (x PeakScope) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use PeakScope.Descriptor instead.
+func (PeakScope) EnumDescriptor() ([]byte, []int) {
+	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{3}
+}
+
 // ResourceLimits are the enforcement limits for a sandbox cgroup.
 type ResourceLimits struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -780,18 +835,105 @@ func (x *ExecRequest) GetStdin() []byte {
 	return nil
 }
 
-// ExecExit reports how an execution finished.
+// ExecUsage is what the sandbox used during one execution's window. The
+// counters are per-execution deltas, never lifetime totals. The window is the
+// sandbox's cgroup, not the process: concurrent executions in one sandbox have
+// overlapping windows, and each counts the others' usage. memory_peak_bytes
+// includes the sandbox's resident baseline (its init, and on gVisor the
+// sentry and gofer).
+type ExecUsage struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	CpuMillis       int64                  `protobuf:"varint,1,opt,name=cpu_millis,json=cpuMillis,proto3" json:"cpu_millis,omitempty"`
+	MemoryPeakBytes int64                  `protobuf:"varint,2,opt,name=memory_peak_bytes,json=memoryPeakBytes,proto3" json:"memory_peak_bytes,omitempty"`
+	MemoryPeakScope PeakScope              `protobuf:"varint,3,opt,name=memory_peak_scope,json=memoryPeakScope,proto3,enum=vora.v1.PeakScope" json:"memory_peak_scope,omitempty"`
+	OomKills        int64                  `protobuf:"varint,4,opt,name=oom_kills,json=oomKills,proto3" json:"oom_kills,omitempty"`
+	PidsLimitHits   int64                  `protobuf:"varint,5,opt,name=pids_limit_hits,json=pidsLimitHits,proto3" json:"pids_limit_hits,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *ExecUsage) Reset() {
+	*x = ExecUsage{}
+	mi := &file_api_proto_v1_common_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExecUsage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExecUsage) ProtoMessage() {}
+
+func (x *ExecUsage) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_v1_common_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExecUsage.ProtoReflect.Descriptor instead.
+func (*ExecUsage) Descriptor() ([]byte, []int) {
+	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *ExecUsage) GetCpuMillis() int64 {
+	if x != nil {
+		return x.CpuMillis
+	}
+	return 0
+}
+
+func (x *ExecUsage) GetMemoryPeakBytes() int64 {
+	if x != nil {
+		return x.MemoryPeakBytes
+	}
+	return 0
+}
+
+func (x *ExecUsage) GetMemoryPeakScope() PeakScope {
+	if x != nil {
+		return x.MemoryPeakScope
+	}
+	return PeakScope_PEAK_SCOPE_UNSPECIFIED
+}
+
+func (x *ExecUsage) GetOomKills() int64 {
+	if x != nil {
+		return x.OomKills
+	}
+	return 0
+}
+
+func (x *ExecUsage) GetPidsLimitHits() int64 {
+	if x != nil {
+		return x.PidsLimitHits
+	}
+	return 0
+}
+
+// ExecExit reports how an execution finished. reason is OOM_KILLED when the
+// execution's window counted an OOM kill, and PIDS_LIMIT_EXCEEDED when it
+// failed after hitting the pids limit; TIMEOUT_EXCEEDED is never overridden.
 type ExecExit struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ExitCode      int32                  `protobuf:"varint,1,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
-	Reason        ExitReason             `protobuf:"varint,2,opt,name=reason,proto3,enum=vora.v1.ExitReason" json:"reason,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	ExitCode int32                  `protobuf:"varint,1,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
+	Reason   ExitReason             `protobuf:"varint,2,opt,name=reason,proto3,enum=vora.v1.ExitReason" json:"reason,omitempty"`
+	Usage    *ExecUsage             `protobuf:"bytes,3,opt,name=usage,proto3" json:"usage,omitempty"`
+	// execution_id is the id of this execution's audit record.
+	ExecutionId   string `protobuf:"bytes,4,opt,name=execution_id,json=executionId,proto3" json:"execution_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ExecExit) Reset() {
 	*x = ExecExit{}
-	mi := &file_api_proto_v1_common_proto_msgTypes[7]
+	mi := &file_api_proto_v1_common_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -803,7 +945,7 @@ func (x *ExecExit) String() string {
 func (*ExecExit) ProtoMessage() {}
 
 func (x *ExecExit) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_v1_common_proto_msgTypes[7]
+	mi := &file_api_proto_v1_common_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -816,7 +958,7 @@ func (x *ExecExit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecExit.ProtoReflect.Descriptor instead.
 func (*ExecExit) Descriptor() ([]byte, []int) {
-	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{7}
+	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ExecExit) GetExitCode() int32 {
@@ -831,6 +973,20 @@ func (x *ExecExit) GetReason() ExitReason {
 		return x.Reason
 	}
 	return ExitReason_EXIT_REASON_UNSPECIFIED
+}
+
+func (x *ExecExit) GetUsage() *ExecUsage {
+	if x != nil {
+		return x.Usage
+	}
+	return nil
+}
+
+func (x *ExecExit) GetExecutionId() string {
+	if x != nil {
+		return x.ExecutionId
+	}
+	return ""
 }
 
 // ExecChunk is one streamed unit of exec output.
@@ -848,7 +1004,7 @@ type ExecChunk struct {
 
 func (x *ExecChunk) Reset() {
 	*x = ExecChunk{}
-	mi := &file_api_proto_v1_common_proto_msgTypes[8]
+	mi := &file_api_proto_v1_common_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -860,7 +1016,7 @@ func (x *ExecChunk) String() string {
 func (*ExecChunk) ProtoMessage() {}
 
 func (x *ExecChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_v1_common_proto_msgTypes[8]
+	mi := &file_api_proto_v1_common_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -873,7 +1029,7 @@ func (x *ExecChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecChunk.ProtoReflect.Descriptor instead.
 func (*ExecChunk) Descriptor() ([]byte, []int) {
-	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{8}
+	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ExecChunk) GetPayload() isExecChunk_Payload {
@@ -947,7 +1103,7 @@ type Stats struct {
 
 func (x *Stats) Reset() {
 	*x = Stats{}
-	mi := &file_api_proto_v1_common_proto_msgTypes[9]
+	mi := &file_api_proto_v1_common_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -959,7 +1115,7 @@ func (x *Stats) String() string {
 func (*Stats) ProtoMessage() {}
 
 func (x *Stats) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_v1_common_proto_msgTypes[9]
+	mi := &file_api_proto_v1_common_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -972,7 +1128,7 @@ func (x *Stats) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Stats.ProtoReflect.Descriptor instead.
 func (*Stats) Descriptor() ([]byte, []int) {
-	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{9}
+	return file_api_proto_v1_common_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Stats) GetMemoryBytes() int64 {
@@ -1069,10 +1225,19 @@ const file_api_proto_v1_common_proto_rawDesc = "" +
 	"\x03cwd\x18\x04 \x01(\tR\x03cwd\x12\x10\n" +
 	"\x03env\x18\x05 \x03(\tR\x03env\x12'\n" +
 	"\x0ftimeout_seconds\x18\x06 \x01(\x03R\x0etimeoutSeconds\x12\x14\n" +
-	"\x05stdin\x18\a \x01(\fR\x05stdin\"T\n" +
+	"\x05stdin\x18\a \x01(\fR\x05stdin\"\xdb\x01\n" +
+	"\tExecUsage\x12\x1d\n" +
+	"\n" +
+	"cpu_millis\x18\x01 \x01(\x03R\tcpuMillis\x12*\n" +
+	"\x11memory_peak_bytes\x18\x02 \x01(\x03R\x0fmemoryPeakBytes\x12>\n" +
+	"\x11memory_peak_scope\x18\x03 \x01(\x0e2\x12.vora.v1.PeakScopeR\x0fmemoryPeakScope\x12\x1b\n" +
+	"\toom_kills\x18\x04 \x01(\x03R\boomKills\x12&\n" +
+	"\x0fpids_limit_hits\x18\x05 \x01(\x03R\rpidsLimitHits\"\xa1\x01\n" +
 	"\bExecExit\x12\x1b\n" +
 	"\texit_code\x18\x01 \x01(\x05R\bexitCode\x12+\n" +
-	"\x06reason\x18\x02 \x01(\x0e2\x13.vora.v1.ExitReasonR\x06reason\"s\n" +
+	"\x06reason\x18\x02 \x01(\x0e2\x13.vora.v1.ExitReasonR\x06reason\x12(\n" +
+	"\x05usage\x18\x03 \x01(\v2\x12.vora.v1.ExecUsageR\x05usage\x12!\n" +
+	"\fexecution_id\x18\x04 \x01(\tR\vexecutionId\"s\n" +
 	"\tExecChunk\x12\x18\n" +
 	"\x06stdout\x18\x01 \x01(\fH\x00R\x06stdout\x12\x18\n" +
 	"\x06stderr\x18\x02 \x01(\fH\x00R\x06stderr\x12'\n" +
@@ -1118,7 +1283,11 @@ const file_api_proto_v1_common_proto_rawDesc = "" +
 	"\x10TIMEOUT_EXCEEDED\x10\x04\x12\x14\n" +
 	"\x10POLICY_VIOLATION\x10\x05\x12\x13\n" +
 	"\x0fRUNTIME_FAILURE\x10\x06\x12\x17\n" +
-	"\x13DISK_QUOTA_EXCEEDED\x10\aB(Z&github.com/vorash/vora/api/proto/v1;v1b\x06proto3"
+	"\x13DISK_QUOTA_EXCEEDED\x10\a*W\n" +
+	"\tPeakScope\x12\x1a\n" +
+	"\x16PEAK_SCOPE_UNSPECIFIED\x10\x00\x12\x15\n" +
+	"\x11PEAK_SCOPE_WINDOW\x10\x01\x12\x17\n" +
+	"\x13PEAK_SCOPE_LIFETIME\x10\x02B(Z&github.com/vorash/vora/api/proto/v1;v1b\x06proto3"
 
 var (
 	file_api_proto_v1_common_proto_rawDescOnce sync.Once
@@ -1132,37 +1301,41 @@ func file_api_proto_v1_common_proto_rawDescGZIP() []byte {
 	return file_api_proto_v1_common_proto_rawDescData
 }
 
-var file_api_proto_v1_common_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_api_proto_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_api_proto_v1_common_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_api_proto_v1_common_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_api_proto_v1_common_proto_goTypes = []any{
 	(SandboxState)(0),        // 0: vora.v1.SandboxState
 	(NetworkMode)(0),         // 1: vora.v1.NetworkMode
 	(ExitReason)(0),          // 2: vora.v1.ExitReason
-	(*ResourceLimits)(nil),   // 3: vora.v1.ResourceLimits
-	(*NetworkPolicy)(nil),    // 4: vora.v1.NetworkPolicy
-	(*BrokerCredential)(nil), // 5: vora.v1.BrokerCredential
-	(*Actor)(nil),            // 6: vora.v1.Actor
-	(*SandboxSpec)(nil),      // 7: vora.v1.SandboxSpec
-	(*Sandbox)(nil),          // 8: vora.v1.Sandbox
-	(*ExecRequest)(nil),      // 9: vora.v1.ExecRequest
-	(*ExecExit)(nil),         // 10: vora.v1.ExecExit
-	(*ExecChunk)(nil),        // 11: vora.v1.ExecChunk
-	(*Stats)(nil),            // 12: vora.v1.Stats
+	(PeakScope)(0),           // 3: vora.v1.PeakScope
+	(*ResourceLimits)(nil),   // 4: vora.v1.ResourceLimits
+	(*NetworkPolicy)(nil),    // 5: vora.v1.NetworkPolicy
+	(*BrokerCredential)(nil), // 6: vora.v1.BrokerCredential
+	(*Actor)(nil),            // 7: vora.v1.Actor
+	(*SandboxSpec)(nil),      // 8: vora.v1.SandboxSpec
+	(*Sandbox)(nil),          // 9: vora.v1.Sandbox
+	(*ExecRequest)(nil),      // 10: vora.v1.ExecRequest
+	(*ExecUsage)(nil),        // 11: vora.v1.ExecUsage
+	(*ExecExit)(nil),         // 12: vora.v1.ExecExit
+	(*ExecChunk)(nil),        // 13: vora.v1.ExecChunk
+	(*Stats)(nil),            // 14: vora.v1.Stats
 }
 var file_api_proto_v1_common_proto_depIdxs = []int32{
 	1,  // 0: vora.v1.NetworkPolicy.mode:type_name -> vora.v1.NetworkMode
-	3,  // 1: vora.v1.SandboxSpec.resources:type_name -> vora.v1.ResourceLimits
-	4,  // 2: vora.v1.SandboxSpec.network:type_name -> vora.v1.NetworkPolicy
-	7,  // 3: vora.v1.Sandbox.spec:type_name -> vora.v1.SandboxSpec
+	4,  // 1: vora.v1.SandboxSpec.resources:type_name -> vora.v1.ResourceLimits
+	5,  // 2: vora.v1.SandboxSpec.network:type_name -> vora.v1.NetworkPolicy
+	8,  // 3: vora.v1.Sandbox.spec:type_name -> vora.v1.SandboxSpec
 	0,  // 4: vora.v1.Sandbox.state:type_name -> vora.v1.SandboxState
 	2,  // 5: vora.v1.Sandbox.reason:type_name -> vora.v1.ExitReason
-	2,  // 6: vora.v1.ExecExit.reason:type_name -> vora.v1.ExitReason
-	10, // 7: vora.v1.ExecChunk.exit:type_name -> vora.v1.ExecExit
-	8,  // [8:8] is the sub-list for method output_type
-	8,  // [8:8] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	3,  // 6: vora.v1.ExecUsage.memory_peak_scope:type_name -> vora.v1.PeakScope
+	2,  // 7: vora.v1.ExecExit.reason:type_name -> vora.v1.ExitReason
+	11, // 8: vora.v1.ExecExit.usage:type_name -> vora.v1.ExecUsage
+	12, // 9: vora.v1.ExecChunk.exit:type_name -> vora.v1.ExecExit
+	10, // [10:10] is the sub-list for method output_type
+	10, // [10:10] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_api_proto_v1_common_proto_init() }
@@ -1170,7 +1343,7 @@ func file_api_proto_v1_common_proto_init() {
 	if File_api_proto_v1_common_proto != nil {
 		return
 	}
-	file_api_proto_v1_common_proto_msgTypes[8].OneofWrappers = []any{
+	file_api_proto_v1_common_proto_msgTypes[9].OneofWrappers = []any{
 		(*ExecChunk_Stdout)(nil),
 		(*ExecChunk_Stderr)(nil),
 		(*ExecChunk_Exit)(nil),
@@ -1180,8 +1353,8 @@ func file_api_proto_v1_common_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_proto_v1_common_proto_rawDesc), len(file_api_proto_v1_common_proto_rawDesc)),
-			NumEnums:      3,
-			NumMessages:   10,
+			NumEnums:      4,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

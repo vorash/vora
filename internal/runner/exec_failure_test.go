@@ -18,9 +18,9 @@ import (
 
 // TestExecFailureIsAuditedAndNeverSilent covers the three ways an exec can end
 // without an exit chunk from the backend. Each must fail the RPC, leave exactly
-// one RuntimeFailure exec record with the bytes already forwarded, and count
-// as a failed execution: a run that was killed or broken must never read as a
-// success in the audit log or the metrics.
+// one RuntimeFailure exec record with the bytes already forwarded and the
+// window's usage, and count as a failed execution: a run that was killed or
+// broken must never read as a success in the audit log or the metrics.
 func TestExecFailureIsAuditedAndNeverSilent(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -52,6 +52,7 @@ func TestExecFailureIsAuditedAndNeverSilent(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			tc.backend.meter.usage = failedRunUsage
 			s, id := startFakeSandbox(t, tc.backend)
 			failed := s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure))
 			before := counterValue(t, failed)
@@ -76,9 +77,20 @@ func TestExecFailureIsAuditedAndNeverSilent(t *testing.T) {
 			if got := counterValue(t, failed) - before; got != 1 {
 				t.Fatalf("vora_exec_failed_total{reason=RuntimeFailure} grew by %v, want 1", got)
 			}
+			// The window closes once, and what it measured is kept: a killed
+			// run's usage is the most useful part of its record.
+			if tc.backend.meter.stops != 1 {
+				t.Fatalf("meter stopped %d times, want exactly once", tc.backend.meter.stops)
+			}
+			if rec.GetCpuMillis() != failedRunUsage.CPUMillis || rec.GetMemoryPeakBytes() != failedRunUsage.MemoryPeak {
+				t.Fatalf("exec record = %v, want the window's usage %+v", rec, failedRunUsage)
+			}
 		})
 	}
 }
+
+// failedRunUsage is what the fake meter reports for a run that never exits.
+var failedRunUsage = runtime.Usage{CPUMillis: 42, MemoryPeak: 3 << 20, PeakScope: runtime.PeakWindow}
 
 // endedStream yields chunks and then EOF, with no exit chunk.
 func endedStream(chunks ...runtime.ExecChunk) *fakeExecStream {
