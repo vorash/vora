@@ -146,3 +146,20 @@ func TestSystemdRunArgsDisableEnvironmentExpansion(t *testing.T) {
 		t.Fatalf("argv was altered: %v", got)
 	}
 }
+
+// An OOM in one exec must not end the sandbox. With systemd's default
+// OOMPolicy=stop the unit is stopped and its cgroup, counters included, is
+// removed: the exec gets no exit chunk and stats lose memory and CPU
+// (vorash/vora#108).
+func TestSystemdRunArgsKeepUnitAfterOOM(t *testing.T) {
+	s := &systemd{mode: config.SystemdUser}
+	args := s.runArgs(StartRequest{Name: "vora-sbx_x", Argv: []string{"bwrap"}})
+
+	sep := slices.Index(args, "--")
+	if sep < 0 {
+		t.Fatalf("no -- separator in %v", args)
+	}
+	if !slices.Contains(args[:sep], "--property=OOMPolicy=continue") {
+		t.Fatalf("systemd-run flags %v lack --property=OOMPolicy=continue", args[:sep])
+	}
+}
