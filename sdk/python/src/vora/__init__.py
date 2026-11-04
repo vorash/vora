@@ -19,6 +19,7 @@ from ._snapshots import Snapshot, Snapshots
 from ._types import (
     ExecChunk,
     ExecResult,
+    ExecUsage,
     NetworkPolicy,
     ResourceLimits,
     SandboxEgress,
@@ -34,6 +35,7 @@ from ._units import parse_cpu, parse_duration, parse_size
 __all__ = [
     "ExecChunk",
     "ExecResult",
+    "ExecUsage",
     "NetworkPolicy",
     "ResourceLimits",
     "Sandbox",

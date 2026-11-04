@@ -109,9 +109,15 @@ class SandboxExec:
     stdout_bytes: int | None = None
     stderr_bytes: int | None = None
     cpu_millis: int | None = None
+    # The peak during this exec's window; memory_peak_scope says whether the
+    # kernel scoped it to the window ("PEAK_SCOPE_WINDOW") or it is the
+    # sandbox's lifetime peak ("PEAK_SCOPE_LIFETIME").
     memory_peak_bytes: int | None = None
     egress_allowed: int | None = None
     egress_denied: int | None = None
+    memory_peak_scope: str | None = None
+    oom_kills: int | None = None
+    pids_limit_hits: int | None = None
 
 
 @dataclass(frozen=True)
@@ -137,13 +143,36 @@ class SnapshotInfo:
 
 
 @dataclass(frozen=True)
+class ExecUsage:
+    """What the sandbox used during one exec.
+
+    The counters are per-exec deltas. The window is the whole sandbox, so
+    concurrent execs in one sandbox have overlapping windows and count each
+    other's usage. ``memory_peak_scope`` is ``"PEAK_SCOPE_WINDOW"`` when the
+    peak covers only this exec, ``"PEAK_SCOPE_LIFETIME"`` when the kernel
+    could not reset it (before Linux 6.12), and None when it was not measured.
+    """
+
+    cpu_millis: int | None = None
+    memory_peak_bytes: int | None = None
+    memory_peak_scope: str | None = None
+    oom_kills: int | None = None
+    pids_limit_hits: int | None = None
+
+
+@dataclass(frozen=True)
 class ExecChunk:
-    """One unit of streamed exec output."""
+    """One unit of streamed exec output.
+
+    An ``exit`` chunk also carries the exec's audit record id and its usage.
+    """
 
     kind: Literal["stdout", "stderr", "exit"]
     data: bytes = b""
     exit_code: int | None = None
     reason: str | None = None
+    execution_id: str | None = None
+    usage: ExecUsage | None = None
 
 
 @dataclass(frozen=True)
@@ -366,6 +395,9 @@ def decode_sandbox_exec(raw: Any) -> SandboxExec:
         memory_peak_bytes=_int(source.get("memoryPeakBytes")),
         egress_allowed=_int(source.get("egressAllowed")),
         egress_denied=_int(source.get("egressDenied")),
+        memory_peak_scope=_string(source.get("memoryPeakScope")),
+        oom_kills=_int(source.get("oomKills")),
+        pids_limit_hits=_int(source.get("pidsLimitHits")),
     )
 
 
@@ -407,5 +439,24 @@ def decode_exec_chunk(raw: Any) -> ExecChunk | None:
         return ExecChunk("stderr", data=decode_base64(stderr))
     exit_ = _object(source.get("exit"))
     if exit_ is not None:
-        return ExecChunk("exit", exit_code=_int(exit_.get("exitCode")) or 0, reason=_string(exit_.get("reason")))
+        return ExecChunk(
+            "exit",
+            exit_code=_int(exit_.get("exitCode")) or 0,
+            reason=_string(exit_.get("reason")),
+            execution_id=_string(exit_.get("executionId")),
+            usage=decode_exec_usage(exit_.get("usage")),
+        )
     return None
+
+
+def decode_exec_usage(raw: Any) -> ExecUsage | None:
+    source = _object(raw)
+    if source is None:
+        return None
+    return ExecUsage(
+        cpu_millis=_int(source.get("cpuMillis")),
+        memory_peak_bytes=_int(source.get("memoryPeakBytes")),
+        memory_peak_scope=_string(source.get("memoryPeakScope")),
+        oom_kills=_int(source.get("oomKills")),
+        pids_limit_hits=_int(source.get("pidsLimitHits")),
+    )
