@@ -55,6 +55,10 @@ for await (const chunk of sandbox.streamExec("apt-get update")) {
 }
 ```
 
+The exit chunk also carries `executionId` (the exec's audit record) and
+`usage`: `cpuMillis`, `memoryPeakBytes` with its `memoryPeakScope`, `oomKills`
+and `pidsLimitHits`, all measured over that exec only.
+
 ## stdin
 
 Pass `stdin` to feed the child; it sees EOF once the input is consumed.

@@ -138,7 +138,7 @@ curl -s -X PUT "$API/v1/sandboxes/$SBX/files?path=/workspace/main.py" -H "$AUTH"
 curl -sN -X POST "$API/v1/sandboxes/$SBX/exec" -H "$AUTH" \
   -d '{"command": "python3", "args": ["main.py"], "cwd": "/workspace", "timeoutSeconds": 30}'
 # {"stdout":"NDUK"}
-# {"exit":{"reason":"EXITED"}}
+# {"exit":{"reason":"EXITED","usage":{"cpuMillis":"18","memoryPeakBytes":"9437184","memoryPeakScope":"PEAK_SCOPE_WINDOW"},"executionId":"exe_01K…"}}
 
 # Decode stdout on the fly.
 curl -sN -X POST "$API/v1/sandboxes/$SBX/exec" -H "$AUTH" \
@@ -167,8 +167,8 @@ The sandbox, exec, snapshot and audit routes speak
 - **`bytes` fields are base64**: exec `stdout`/`stderr`, and `stdin` on the
   exec request.
 - **int64 values come back as strings** (`"createdAtUnixMs": "1790000000000"`),
-  and fields at their zero value are left out. A successful exit is
-  `{"exit":{"reason":"EXITED"}}`, with no `exitCode`.
+  and fields at their zero value are left out. A successful exit has no
+  `exitCode`, and a usage counter that stayed at zero (`oomKills`) is absent.
 - **`command` runs as is**, without a shell. Use `"command": "/bin/sh", "args":
   ["-c", "…"]` for pipes and redirects.
 - **An exec stream that ends without an `exit` chunk was killed.** Don't treat
@@ -299,6 +299,35 @@ for await (const chunk of sandbox.streamExec("for i in 1 2 3; do echo step $i; s
 
 `reason` explains how the run ended: `EXITED`, `OOM_KILLED`,
 `PIDS_LIMIT_EXCEEDED`, `TIMEOUT_EXCEEDED` or `DISK_QUOTA_EXCEEDED`.
+
+### What an exec used
+
+The exit chunk also carries `executionId`, the id of the exec's record in
+`GET /v1/sandboxes/{id}/execs`, and `usage`, what the sandbox used while that
+exec ran:
+
+| Field | Meaning |
+| ----- | ------- |
+| `cpuMillis` | CPU time consumed during the exec |
+| `memoryPeakBytes` | memory high-water mark during the exec, including the sandbox's resident baseline (its init; on gVisor also the sentry and gofer) |
+| `memoryPeakScope` | `PEAK_SCOPE_WINDOW`: the peak covers only this exec. `PEAK_SCOPE_LIFETIME`: the kernel (before Linux 6.12) could not reset the peak, so it is the sandbox's lifetime peak. Absent: not measured |
+| `oomKills` | OOM kills during the exec |
+| `pidsLimitHits` | forks refused by the sandbox's pids limit during the exec |
+
+The counters are per-exec deltas, not lifetime totals. They are measured on
+the sandbox's cgroup, so execs that run at the same time in one sandbox have
+overlapping windows and count each other's usage.
+
+The reason is derived from that usage: an exec whose window counted an OOM
+kill reports `OOM_KILLED`, even though the process itself only saw a kill
+signal, and one that failed after hitting the pids limit reports
+`PIDS_LIMIT_EXCEEDED`. `TIMEOUT_EXCEEDED` is never overridden. Exec records
+carry the same reason and fields (`memoryPeakScope`, `oomKills`,
+`pidsLimitHits`).
+
+`memoryPeakBytes` in an exec record used to be the sandbox's lifetime peak at
+the moment the exec finished. It now means the peak during that exec's window,
+as `memoryPeakScope` states. Records written before this change have no scope.
 
 ### Allow one API, deny everything else
 

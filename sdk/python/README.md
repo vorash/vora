@@ -29,7 +29,7 @@ contract and the error shapes are pinned against it by the test suite.
 | `client.sandboxes.create(image=..., memory=..., cpu=..., pids=..., disk=..., network=..., env=..., ttl=...)` | create + start, returns a `Sandbox` |
 | `client.sandboxes.get/list/destroy` | sandbox lifecycle |
 | `sandbox.exec(command, args=None, cwd=, env=, stdin=, timeout_seconds=)` | run and collect `ExecResult(stdout, stderr, exit_code, reason)` |
-| `sandbox.stream_exec(...)` | stream `ExecChunk`s (`stdout`/`stderr` data, final `exit`) |
+| `sandbox.stream_exec(...)` | stream `ExecChunk`s (`stdout`/`stderr` data, final `exit` with `execution_id` and `usage: ExecUsage`) |
 | `sandbox.write_file/read_file/read_text` | files in the sandbox's writable roots |
 | `sandbox.stats/events/execs/egress` | resource usage and the audit readers |
 | `client.snapshots.create/get/list/remove/fork`, `Snapshot.fork/remove/refresh` | snapshot capture and forks (ADR 023) |
