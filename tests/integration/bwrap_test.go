@@ -75,6 +75,21 @@ func TestBwrapSandboxLifecycle(t *testing.T) {
 	}
 }
 
+// idlePastGrace outlasts vora-init's watchdog grace. The runner does not pass
+// --grace, so the agent runs with its 20 s default.
+const idlePastGrace = 30 * time.Second
+
+// A client may leave a sandbox idle between calls for longer than vora-init's
+// watchdog grace. The runner must keep it alive, so the next exec still finds
+// the agent (vorash/vora#113).
+func TestBwrapIdleSandboxOutlivesWatchdog(t *testing.T) {
+	backend, h := newBwrapSandbox(t)
+	time.Sleep(idlePastGrace)
+	if out := strings.TrimSpace(run(t, backend, h, "/bin/echo", []string{"alive"})); out != "alive" {
+		t.Fatalf("exec after %s idle = %q, want alive", idlePastGrace, out)
+	}
+}
+
 // newBwrapSandbox starts a bwrap sandbox on the cached base image and returns
 // the backend and its handle, tearing the sandbox down at the end of the test.
 func newBwrapSandbox(t *testing.T) (*bwrap.Backend, runtime.Handle) {
