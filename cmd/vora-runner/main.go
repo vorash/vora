@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -519,6 +520,13 @@ func run() error {
 	case <-time.After(10 * time.Second):
 		logger.Warn("graceful shutdown timed out, forcing stop")
 		grpcServer.Stop()
+	}
+	for _, name := range registry.Names() {
+		if b, ok := registry.Get(name); ok {
+			if c, ok := b.(io.Closer); ok {
+				_ = c.Close()
+			}
+		}
 	}
 
 	if err := os.Remove(cfg.SocketPath); err != nil && !os.IsNotExist(err) {

@@ -29,6 +29,11 @@ import (
 
 const agentReadyTimeout = 15 * time.Second
 
+// keepaliveInterval is how often the runner pings a ready sandbox's agent.
+// vora-init exits when nothing contacts it for its --grace, which the runner
+// leaves at the 20 s default, so this must stay well below that.
+const keepaliveInterval = 5 * time.Second
+
 // Backend is the Bubblewrap runtime backend.
 type Backend struct {
 	cfg      config.Config
@@ -42,6 +47,12 @@ type Backend struct {
 	subtree    cgroup.Subtree
 	networks   *network.Manager
 	egressSink func(egress.Event) error
+
+	// life ends with Close, and every keepalive with it.
+	life      context.Context
+	endLife   context.CancelFunc
+	keepalive time.Duration
+	pinging   sync.WaitGroup
 
 	mu      sync.Mutex
 	handles map[string]*handle
@@ -64,6 +75,8 @@ type handle struct {
 	cmd    *exec.Cmd
 	done   chan error
 	cancel context.CancelFunc
+	// stopKeepalive is set once the agent is ready.
+	stopKeepalive func()
 }
 
 func (h *handle) ID() string { return h.id }
@@ -78,14 +91,26 @@ func New(cfg config.Config, cgroups cgroup.Manager, logger *slog.Logger) (*Backe
 		return nil, err
 	}
 	bwrapBin, _ := exec.LookPath("bwrap")
+	life, endLife := context.WithCancel(context.Background())
 	return &Backend{
-		cfg:      cfg,
-		cgroups:  cgroups,
-		logger:   logger,
-		initPath: initPath,
-		bwrapBin: bwrapBin,
-		handles:  make(map[string]*handle),
+		cfg:       cfg,
+		cgroups:   cgroups,
+		logger:    logger,
+		initPath:  initPath,
+		bwrapBin:  bwrapBin,
+		life:      life,
+		endLife:   endLife,
+		keepalive: keepaliveInterval,
+		handles:   make(map[string]*handle),
 	}, nil
+}
+
+// Close stops every keepalive when the runner shuts down. Sandboxes keep
+// running until vora-init's watchdog, no longer pinged, ends them.
+func (b *Backend) Close() error {
+	b.endLife()
+	b.pinging.Wait()
+	return nil
 }
 
 // EnableNetns enables the runner-launched network-namespace path used by every
@@ -385,6 +410,7 @@ func (b *Backend) startInNetns(ctx context.Context, hd *handle, creds []egress.C
 		b.cleanupRestricted(ctx, hd)
 		return err
 	}
+	b.startKeepalive(hd)
 	b.logger.Info("sandbox started", "sandbox_id", hd.id, "backend", "bwrap", "network", string(hd.spec.Network.Mode), "gateway", netns.GatewayIP)
 	return nil
 }
@@ -498,8 +524,58 @@ func (b *Backend) startUnit(ctx context.Context, hd *handle) error {
 		hd.unit, hd.client = nil, nil
 		return err
 	}
+	b.startKeepalive(hd)
 	b.logger.Info("sandbox started", "sandbox_id", hd.id, "unit", unit.Name(), "cgroup", unit.CgroupPath())
 	return nil
+}
+
+// startKeepalive pings the agent until the handle stops or the backend closes,
+// so vora-init's watchdog sees a live runner. A failed ping changes nothing:
+// it is logged once per outage, and the next exec or the TTL reaper decides
+// its fate. The client is captured here because teardown clears hd.client.
+func (b *Backend) startKeepalive(hd *handle) {
+	ctx, cancel := context.WithCancel(b.life)
+	client := hd.client
+	stopped := make(chan struct{})
+	b.pinging.Go(func() {
+		defer close(stopped)
+		ticker := time.NewTicker(b.keepalive)
+		defer ticker.Stop()
+		failing := false
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			pingCtx, cancelPing := context.WithTimeout(ctx, 2*time.Second)
+			_, err := client.Ping(pingCtx)
+			cancelPing()
+			switch {
+			case ctx.Err() != nil:
+				return
+			case err != nil && !failing:
+				failing = true
+				b.logger.Warn("sandbox keepalive ping failed", "sandbox_id", hd.id, "backend", "bwrap", "error", err)
+			case err == nil && failing:
+				failing = false
+				b.logger.Info("sandbox keepalive ping recovered", "sandbox_id", hd.id, "backend", "bwrap")
+			}
+		}
+	})
+	hd.stopKeepalive = func() {
+		cancel()
+		<-stopped
+	}
+}
+
+// endKeepalive stops the handle's pings and waits for the last one to return,
+// so none races the agent's shutdown or the client's close.
+func (hd *handle) endKeepalive() {
+	if hd.stopKeepalive != nil {
+		hd.stopKeepalive()
+		hd.stopKeepalive = nil
+	}
 }
 
 // waitReady polls the agent until it responds, the unit dies, or we time out.
@@ -592,6 +668,7 @@ func (b *Backend) Stop(ctx context.Context, h runtime.Handle) error {
 	if err != nil {
 		return err
 	}
+	hd.endKeepalive()
 	if hd.client != nil {
 		shutdownCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		_ = hd.client.Shutdown(shutdownCtx)
@@ -673,6 +750,7 @@ func (b *Backend) Reap(ctx context.Context, id string) error {
 	delete(b.handles, id)
 	b.mu.Unlock()
 	if ok {
+		hd.endKeepalive()
 		if hd.group != nil || hd.net != nil || hd.proxy != nil {
 			b.cleanupRestricted(ctx, hd)
 		} else {
