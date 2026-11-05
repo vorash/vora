@@ -3,6 +3,9 @@
 package security
 
 import (
+	"context"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -296,6 +299,151 @@ func TestReplacedControlSocketFailsClosed(t *testing.T) {
 			t.Fatalf("exec returned a forged response: output %q, code %d", out, code)
 		}
 	})
+}
+
+// TestVoraInitTamper asserts a workload cannot replace or change the agent
+// binary, from inside or as seen from the host.
+//
+// Why it matters: a warm pool reuses a sandbox across untrusted runs and runs
+// /vora/vora-init inside it to reset it. A run that replaced that binary would
+// own every later run. /vora itself stays writable under bwrap for the control
+// socket, so the read-only file bind is the whole defence.
+func TestVoraInitTamper(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, f *fixture) {
+		if _, ok := f.backend.(*bwrap.Backend); !ok {
+			t.Skip("gVisor binds all of /vora read-only: TestGvisorVoraReadOnly")
+		}
+		h := f.create("sbx_init_tamper", limits(128, 64))
+		want := fileSHA256(t, os.Getenv("VORA_INIT_BINARY"))
+
+		script, err := os.ReadFile(filepath.Join("..", "testdata", "tamper_vora_init.py"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, errOut, code := f.exec(h, "python3", "-c", string(script))
+		t.Logf("tamper attempts:\n%s", out)
+		if code != 0 {
+			t.Fatalf("a tamper attempt was not stopped (exit %d):\n%s%s", code, out, errOut)
+		}
+		if !strings.Contains(out, "sha256 "+want) {
+			t.Fatalf("binary inside the sandbox changed, want sha256 %s:\n%s", want, out)
+		}
+		host := filepath.Join(f.ws.Paths(h.ID()).IPCDir, "vora-init")
+		if got := fileSHA256(t, host); got != want {
+			t.Fatalf("binary on the host changed: sha256 %s, want %s", got, want)
+		}
+		if got, _, code := f.exec(h, "echo", "alive"); code != 0 || strings.TrimSpace(got) != "alive" {
+			t.Fatalf("sandbox stopped serving after the attempts: exit %d, output %q", code, got)
+		}
+	})
+}
+
+// TestInitReinstall asserts a start over a used ipc directory installs the real
+// binary, whatever the workload left there.
+//
+// Why it matters: the install runs on the host with the runner's privileges and
+// bwrap follows a symlink at the file bind's source, so a link the workload
+// planted could overwrite a host file or become the sandbox's init.
+func TestInitReinstall(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, f *fixture) {
+		if _, ok := f.backend.(*bwrap.Backend); !ok {
+			t.Skip("the workload cannot write /vora under gVisor")
+		}
+		hostFile := filepath.Join(f.cfg.StateDir, "host-file")
+		if err := os.WriteFile(hostFile, []byte("host data"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		h := f.create("sbx_reinstall", limits(128, 64))
+		if _, errOut, code := f.exec(h, "ln", "-s", hostFile, "/vora/vora-init.tmp"); code != 0 {
+			t.Fatalf("plant symlink: %s", errOut)
+		}
+		if err := f.backend.Destroy(context.Background(), h); err != nil {
+			t.Fatalf("Destroy: %v", err)
+		}
+
+		h = f.create("sbx_reinstall", limits(128, 64))
+		if got, err := os.ReadFile(hostFile); err != nil || string(got) != "host data" {
+			t.Fatalf("host file = %q, %v: the install wrote through the planted symlink", got, err)
+		}
+		host := filepath.Join(f.ws.Paths(h.ID()).IPCDir, "vora-init")
+		info, err := os.Lstat(host)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.Mode().IsRegular() {
+			t.Fatalf("installed binary mode = %v, want a regular file", info.Mode())
+		}
+		if got, want := fileSHA256(t, host), fileSHA256(t, os.Getenv("VORA_INIT_BINARY")); got != want {
+			t.Fatalf("installed binary sha256 %s, want %s", got, want)
+		}
+		if got, _, code := f.exec(h, "echo", "alive"); code != 0 || strings.TrimSpace(got) != "alive" {
+			t.Fatalf("restarted sandbox does not serve: exit %d, output %q", code, got)
+		}
+	})
+}
+
+// TestAgentProcDenied asserts a workload cannot open the agent's memory or
+// environment through /proc.
+//
+// Why it matters: the agent runs as the workload's uid and outlives every run in
+// a reused sandbox, so writing its memory would carry code into the next run.
+//
+// environ is what tells PR_SET_DUMPABLE apart on any host. mem is opened with
+// PTRACE_MODE_ATTACH, which Yama already refuses for a child reading its ancestor
+// when ptrace_scope is 1 or more, so it only depends on dumpable at ptrace_scope 0.
+// The check is on open: reading mem at offset 0 fails with EIO on any process.
+func TestAgentProcDenied(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, f *fixture) {
+		if _, ok := f.backend.(*bwrap.Backend); !ok {
+			t.Skip("gVisor runs no agent: TestGvisorVoraReadOnly covers its PID 1")
+		}
+		h := f.create("sbx_agent_proc", limits(128, 64))
+		out, errOut, code := f.exec(h, "python3", "-c", `
+import errno, os, sys
+agent = None
+for pid in filter(str.isdigit, os.listdir("/proc")):
+    try:
+        with open(f"/proc/{pid}/comm") as c:
+            if c.read().strip() == "vora-init":
+                agent = pid
+                break
+    except OSError:
+        pass
+if agent is None:
+    sys.exit("agent not found in /proc")
+# The same opens on this process must work, or a denial below proves nothing.
+for name in ("mem", "environ"):
+    os.close(os.open(f"/proc/self/{name}", os.O_RDONLY))
+exposed = False
+for name in ("mem", "environ"):
+    try:
+        os.close(os.open(f"/proc/{agent}/{name}", os.O_RDONLY))
+        print(name, "OK")
+        exposed = True
+    except OSError as e:
+        print(name, errno.errorcode[e.errno])
+        exposed = exposed or e.errno not in (errno.EACCES, errno.EPERM)
+print("agent", agent)
+sys.exit(1 if exposed else 0)
+`)
+		scope, _ := os.ReadFile("/proc/sys/kernel/yama/ptrace_scope")
+		t.Logf("yama ptrace_scope %s\n%s", strings.TrimSpace(string(scope)), out)
+		if code != 0 {
+			t.Fatalf("agent /proc files exposed (exit %d, yama ptrace_scope %s):\n%s%s", code, strings.TrimSpace(string(scope)), out, errOut)
+		}
+		if got, _, code := f.exec(h, "echo", "alive"); code != 0 || strings.TrimSpace(got) != "alive" {
+			t.Fatalf("sandbox stopped serving: exit %d, output %q", code, got)
+		}
+	})
+}
+
+func fileSHA256(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
 // TestControlSocketIsolation asserts sandbox A cannot see B's control socket.
