@@ -63,6 +63,8 @@ type Server struct {
 	brokerCreds map[string][]egress.Credential
 	denyMu      sync.Mutex
 	denyWindows map[string]denyWindow
+	// deniedWindow is the suppression window for denied egress decisions.
+	deniedWindow time.Duration
 	// allowedWindow is the aggregation window for allowed egress decisions.
 	allowedWindow    time.Duration
 	allowMu          sync.Mutex
@@ -124,6 +126,7 @@ const (
 	allowedSandboxBudget = 100
 	allowedOverflowHost  = "*"
 	defaultAllowedWindow = 10 * time.Second
+	defaultDeniedWindow  = time.Second
 )
 
 type allowedKey struct{ sandboxID, host, alias, reason string }
@@ -146,21 +149,22 @@ func NewServer(cfg config.Config, store *sandbox.Store, registry *runtime.Regist
 	}
 	workspaces := workspace.NewManager(cfg.SandboxesDir())
 	s := &Server{
-		cfg:         cfg,
-		store:       store,
-		registry:    registry,
-		images:      images.NewResolver(cfg, logger),
-		workspaces:  workspaces,
-		snapshots:   snapshot.NewStore(cfg.SnapshotsDir()),
-		quota:       quota.New(cfg.SandboxesDir()),
-		audit:       jsonl.New(workspaces.LogsDir),
-		runnerID:    runnerID,
-		logger:      logger,
-		metrics:     telemetry.New(),
-		handles:     make(map[string]sandboxHandle),
-		brokerCreds: make(map[string][]egress.Credential),
-		denyWindows: make(map[string]denyWindow),
-		localAudit:  true,
+		cfg:          cfg,
+		store:        store,
+		registry:     registry,
+		images:       images.NewResolver(cfg, logger),
+		workspaces:   workspaces,
+		snapshots:    snapshot.NewStore(cfg.SnapshotsDir()),
+		quota:        quota.New(cfg.SandboxesDir()),
+		audit:        jsonl.New(workspaces.LogsDir),
+		runnerID:     runnerID,
+		logger:       logger,
+		metrics:      telemetry.New(),
+		handles:      make(map[string]sandboxHandle),
+		brokerCreds:  make(map[string][]egress.Credential),
+		denyWindows:  make(map[string]denyWindow),
+		deniedWindow: defaultDeniedWindow,
+		localAudit:   true,
 
 		allowedWindow:    defaultAllowedWindow,
 		allowedWindows:   make(map[allowedKey]*allowedCount),
@@ -240,7 +244,7 @@ func (s *Server) RecordEgress(event egress.Event) error {
 		defer s.denyMu.Unlock()
 		window := s.denyWindows[event.SandboxID]
 		now := time.Now()
-		if now.Sub(window.start) >= time.Second {
+		if now.Sub(window.start) >= s.deniedWindow {
 			if window.suppressed > 0 {
 				summary := record
 				summary.Host, summary.Remote, summary.Alias = "", "", ""

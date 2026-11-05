@@ -16,6 +16,8 @@ func TestDenyFloodDoesNotFillRunnerAuditDisk(t *testing.T) {
 	if err := os.MkdirAll(s.workspaces.LogsDir(id), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// A real window would end whenever the flood outlasted it on a slow machine.
+	s.deniedWindow = time.Hour
 	for i := 0; i < 10000; i++ {
 		if err := s.RecordEgress(egress.Event{SandboxID: id, Host: "blocked.example.com", Reason: "denied"}); err != nil {
 			t.Fatal(err)
@@ -28,7 +30,7 @@ func TestDenyFloodDoesNotFillRunnerAuditDisk(t *testing.T) {
 	if len(records) > 100 {
 		t.Fatalf("workload generated %d audit writes in one burst", len(records))
 	}
-	time.Sleep(time.Second)
+	s.deniedWindow = time.Nanosecond
 	if err := s.RecordEgress(egress.Event{SandboxID: id, Reason: "denied"}); err != nil {
 		t.Fatal(err)
 	}
