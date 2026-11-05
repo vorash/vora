@@ -1061,9 +1061,10 @@ func TestGivenBackMemberKeepsTheReapersMark(t *testing.T) {
 	p.mu.Unlock()
 	p.RetireExpired(m.id)
 	p.withLock(func() { p.giveBack(m) })
-	if s := p.Stats(); s.Retired[RetireExpired] != 1 || s.Idle != 0 {
-		t.Fatalf("stats %+v", s)
+	if n := p.Stats().Retired[RetireExpired]; n != 1 {
+		t.Fatalf("retired as expired %d times, want 1", n)
 	}
+	waitFor(t, func() bool { return !h.fake.isLive(m.id) }, "the marked member to be destroyed")
 }
 
 // An adapter bug must not breach max_size: the sandbox it returned is real, so
