@@ -175,23 +175,23 @@ func TestLoadChecksTheSumOfReservationsAgainstTheCaps(t *testing.T) {
 }
 
 // Two records for one (tenant, name) can only come from a damaged state dir. The
-// older keeps the name, as it is the pool the control plane has a route to.
+// older keeps the name, whatever the order of a directory listing.
 func TestLoadRefusesTheLaterOfTwoPoolsWithOneName(t *testing.T) {
 	h := newWarmHarness(t)
 	p := h.create(poolSpec(0, 1))
-	dup := h.s.pools.get(pool.ID(p.GetId())).spec.Raw()
-	dup.ID = pool.ID(ulid.NewPool())
-	if err := h.s.savePool(poolRecord{ID: dup.ID, Spec: dup, CreatedAt: time.Now().Add(time.Hour)}); err != nil {
+	older := h.s.pools.get(pool.ID(p.GetId())).spec.Raw()
+	older.ID = pool.ID(ulid.NewPool()) // sorts after p's id
+	if err := h.s.savePool(poolRecord{ID: older.ID, Spec: older, CreatedAt: time.Now().Add(-time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 
 	next := h.restart(nil, reusableBackend{newPoolBackend(t)})
-	if got := next.get(p.GetId()).GetState(); got != v1.PoolState_POOL_ACTIVE {
+	if got := next.get(string(older.ID)).GetState(); got != v1.PoolState_POOL_ACTIVE {
 		t.Fatalf("older pool = %s, want POOL_ACTIVE", got)
 	}
-	next.wantNotLoaded(string(dup.ID), notLoadedDuplicate)
-	if q := next.create(poolSpec(0, 1)); q.GetId() != p.GetId() {
-		t.Fatalf("redeclare = %s, want the loaded pool %s", q.GetId(), p.GetId())
+	next.wantNotLoaded(p.GetId(), notLoadedDuplicate)
+	if q := next.create(poolSpec(0, 1)); q.GetId() != string(older.ID) {
+		t.Fatalf("redeclare = %s, want the loaded pool %s", q.GetId(), older.ID)
 	}
 }
 

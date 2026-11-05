@@ -60,17 +60,33 @@ func (s *Server) savePool(rec poolRecord) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), s.poolPath(rec.ID))
+	if err := os.Rename(tmp.Name(), s.poolPath(rec.ID)); err != nil {
+		return err
+	}
+	return syncDir(dir)
+}
+
+// syncDir makes a rename or remove in dir survive a crash.
+func syncDir(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	return f.Sync()
 }
 
 func (s *Server) deletePoolRecord(id pool.ID) error {
 	if !validPoolID(string(id)) {
 		return fmt.Errorf("pool: invalid id %q", id)
 	}
-	if err := os.Remove(s.poolPath(id)); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(s.poolPath(id)); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return err
 	}
-	return nil
+	return syncDir(s.cfg.PoolsDir())
 }
 
 // loadPoolRecords reads every record. An unreadable one is skipped and

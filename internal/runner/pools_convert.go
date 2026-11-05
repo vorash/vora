@@ -110,6 +110,15 @@ func reuseToProto(r pool.Reuse) v1.PoolReuse {
 	return v1.PoolReuse_POOL_REUSE_RESET
 }
 
+// startErrorForTenant hides a backend's own words, which can name host paths and
+// runtime internals. The detail is in the runner's log.
+func startErrorForTenant(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	return "a pool member failed to start"
+}
+
 func poolStatsToProto(st pool.Stats) *v1.PoolStats {
 	return &v1.PoolStats{
 		Starting:           uint32(st.Starting),
@@ -122,7 +131,7 @@ func poolStatsToProto(st pool.Stats) *v1.PoolStats {
 		ResetsTotal:        st.ResetsTotal,
 		ResetFailuresTotal: st.ResetFailuresTotal,
 		DestroyedTotal:     st.DestroyedTotal,
-		LastStartError:     st.LastStartError,
+		LastStartError:     startErrorForTenant(st.LastStartError),
 		ExhaustedTotal:     st.ExhaustedTotal,
 		StartFailedTotal:   st.StartFailedTotal,
 		Dormant:            st.Dormant,
@@ -211,8 +220,10 @@ func execToRunChunk(c *v1.ExecChunk) *v1.RunChunk {
 	}
 }
 
-// poolStatus maps a pool error to its gRPC status. An error that already is
-// one (from runExec) passes through.
+// poolStatus maps a pool error to its gRPC status. An error that already is one
+// passes through, unless it is Internal, whose text is the backend's own. So is
+// what ErrColdStart and ErrNotStarted wrap, and a tenant sees none of it: the
+// caller logs the error first.
 func poolStatus(err error) error {
 	switch {
 	case err == nil:
@@ -221,8 +232,10 @@ func poolStatus(err error) error {
 		return status.Error(codes.ResourceExhausted, err.Error())
 	case errors.Is(err, pool.ErrDraining):
 		return status.Error(codes.FailedPrecondition, err.Error())
-	case errors.Is(err, pool.ErrColdStart), errors.Is(err, pool.ErrNotStarted):
-		return status.Error(codes.Unavailable, err.Error())
+	case errors.Is(err, pool.ErrColdStart):
+		return status.Error(codes.Unavailable, pool.ErrColdStart.Error())
+	case errors.Is(err, pool.ErrNotStarted):
+		return status.Error(codes.Unavailable, pool.ErrNotStarted.Error())
 	case errors.Is(err, pool.ErrInvalidSpec):
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, pool.ErrUnsafeRefused), errors.Is(err, pool.ErrNotReusable):
@@ -232,8 +245,8 @@ func poolStatus(err error) error {
 	case errors.Is(err, context.DeadlineExceeded):
 		return status.Error(codes.DeadlineExceeded, err.Error())
 	}
-	if _, ok := status.FromError(err); ok {
+	if st, ok := status.FromError(err); ok && st.Code() != codes.Internal {
 		return err
 	}
-	return status.Error(codes.Internal, err.Error())
+	return status.Error(codes.Internal, "the pool run failed")
 }

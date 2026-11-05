@@ -87,6 +87,8 @@ type Server struct {
 	// execGrace is how long past its own timeout a pool run may stay open
 	// before the runner ends it with a synthesized TIMEOUT_EXCEEDED.
 	execGrace time.Duration
+	// poolCloseTimeout bounds waiting for the pools to stop at shutdown.
+	poolCloseTimeout time.Duration
 	// poolOptions tune every pool's timeouts; zero means pool's defaults.
 	poolOptions pool.Options
 }
@@ -94,7 +96,10 @@ type Server struct {
 // defaultExecGrace is the design's hard deadline margin: timeout + 5 s.
 const defaultExecGrace = 5 * time.Second
 
-const defaultAuditTimeout = 5 * time.Second
+const (
+	defaultAuditTimeout     = 5 * time.Second
+	defaultPoolCloseTimeout = 10 * time.Second
+)
 
 // sandboxHandle binds a sandbox to the backend that manages it, so later RPCs
 // (exec/stats/signal/destroy) use the right backend.
@@ -162,6 +167,7 @@ func NewServer(cfg config.Config, store *sandbox.Store, registry *runtime.Regist
 		allowedSandboxes: make(map[string]*allowedCount),
 		execGrace:        defaultExecGrace,
 		auditTimeout:     defaultAuditTimeout,
+		poolCloseTimeout: defaultPoolCloseTimeout,
 	}
 	s.pools.byID = make(map[pool.ID]*poolEntry)
 	s.pools.notLoaded = make(map[pool.ID]*notLoadedPool)
@@ -456,7 +462,8 @@ func (s *Server) CreateSandbox(ctx context.Context, req *v1.CreateSandboxRequest
 }
 
 // createRecord persists a validated spec as a REQUESTED record and prepares its
-// workspace and disk quota. The caller holds createMu and has checked capacity.
+// workspace and disk quota. The caller has settled capacity: under createMu after
+// checkSandboxCapacity, or through a pool's reservation.
 func (s *Server) createRecord(ctx context.Context, spec runtime.SandboxSpec) (*sandbox.Record, error) {
 	// Prepare the per-sandbox directories and record the rootfs path. The
 	// image is not required to exist yet; the backend validates it at start.
@@ -1192,7 +1199,9 @@ func (s *Server) pruneOne(ctx context.Context, id string, cutoff time.Time) {
 
 // Reconcile fail-closes runner state at startup: active store records are
 // reaped and marked FAILED, then leftover backend containers and systemd
-// units are swept. Live sandboxes are not reattached.
+// units are swept. Live sandboxes are not reattached. A plain REQUESTED record
+// waits for its StartSandbox, but a pool member is started by its pool alone, so
+// one stranded before CREATING has nobody left to start or remove it.
 func (s *Server) Reconcile(ctx context.Context) error {
 	recs, err := s.store.List()
 	if err != nil {
@@ -1206,6 +1215,10 @@ func (s *Server) Reconcile(ctx context.Context) error {
 	for _, rec := range recs {
 		switch rec.State {
 		case sandbox.StateRunning, sandbox.StateStarting, sandbox.StateCreating, sandbox.StateStopping:
+		case sandbox.StateRequested, sandbox.StateScheduling:
+			if rec.Spec.PoolID == "" {
+				continue
+			}
 		default:
 			continue
 		}

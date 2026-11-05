@@ -517,6 +517,10 @@ func run() error {
 		logger.Info("shutdown signal received, draining")
 	}
 
+	// Before the backends close, and before the wait for in-flight RPCs, so a
+	// pool starts no member during it. A run in flight still checks in as usual.
+	server.ClosePools()
+
 	stopped := make(chan struct{})
 	go func() {
 		grpcServer.GracefulStop()

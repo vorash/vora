@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -179,6 +181,12 @@ func (r *poolRegistry) reservations() map[pool.ID]reservation {
 	return out
 }
 
+func (r *poolRegistry) isClosed() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closed
+}
+
 func (r *poolRegistry) isLoaded() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -315,11 +323,32 @@ func (s *Server) SweepPools() {
 	}
 }
 
-// ClosePools stops every pool's background work and flushes pool events. It
-// destroys nothing: the next start's Reconcile owns what is left.
+// ClosePools stops CreatePool and every pool's background work, then flushes
+// pool events. It destroys nothing: the next start's Reconcile owns what is left.
+// It runs before the backends close, and it is bounded: a backend call that
+// ignores its deadline holds a pool's Close, not the shutdown.
 func (s *Server) ClosePools() {
+	s.createMu.Lock()
+	s.pools.mu.Lock()
+	s.pools.closed = true
+	s.pools.mu.Unlock()
+	s.createMu.Unlock()
+
+	var closing sync.WaitGroup
 	for _, e := range s.pools.all() {
-		e.pool.Close()
+		closing.Go(e.pool.Close)
+	}
+	closed := make(chan struct{})
+	go func() {
+		closing.Wait()
+		close(closed)
+	}()
+	timer := time.NewTimer(s.poolCloseTimeout)
+	defer timer.Stop()
+	select {
+	case <-closed:
+	case <-timer.C:
+		s.logger.Warn("pools did not stop in time; leaving what is left to the next start's reconcile")
 	}
 	s.events.flush()
 }
@@ -409,11 +438,14 @@ func (s *Server) CreatePool(ctx context.Context, req *v1.CreatePoolRequest) (*v1
 
 	s.createMu.Lock()
 	defer s.createMu.Unlock()
+	if s.pools.isClosed() {
+		return nil, status.Error(codes.Unavailable, "the runner is shutting down")
+	}
 	if existing := s.pools.byName(spec.TenantID(), spec.Name()); existing != nil {
 		switch {
 		case existing.draining.Load():
 			return nil, status.Errorf(codes.FailedPrecondition, "pool %s is draining; retry once it is gone", spec.Name())
-		case proto.Equal(poolSpecToProto(existing.spec), poolSpecToProto(spec)):
+		case sameDefinition(existing.spec, spec):
 			return s.poolToProto(existing), nil
 		default:
 			return nil, status.Errorf(codes.AlreadyExists, "pool %s exists with a different spec", spec.Name())
@@ -429,9 +461,17 @@ func (s *Server) CreatePool(ctx context.Context, req *v1.CreatePoolRequest) (*v1
 	}
 	e := s.startPool(spec, rec.CreatedAt)
 	s.pools.add(e)
-	s.logger.Info("pool declared", "pool_id", spec.ID(), "name", spec.Name(), "tenant_id", spec.TenantID(),
+	s.auditPool(spec.Raw(), req.GetActor().GetKeyId(), "pool_create", spec.Name())
+	s.logger.Info("pool declared", "pool_id", spec.ID(), "name", spec.Name(), "tenant_id", spec.TenantID(), "key_id", req.GetActor().GetKeyId(),
 		"backend", raw.Template.Backend, "size", spec.Size(), "max_size", spec.MaxSize(), "reuse", spec.Reuse().String())
 	return s.poolToProto(e), nil
+}
+
+// sameDefinition reports whether two declares mean the same pool. poolSpecToProto
+// fills in defaults, so a spelled-out default compares equal, but its sandbox has
+// no env, as specToProto leaves env out to keep secrets out of GetSandbox.
+func sameDefinition(a, b pool.Spec) bool {
+	return proto.Equal(poolSpecToProto(a), poolSpecToProto(b)) && maps.Equal(a.Raw().Template.Env, b.Raw().Template.Env)
 }
 
 // GetPool returns a pool's spec, state and live stats.
@@ -454,7 +494,7 @@ func (s *Server) DeletePool(ctx context.Context, req *v1.DeletePoolRequest) (*v1
 	e, err := s.lookupPool(req.GetPoolId(), req.GetTenantId())
 	var notLoaded errPoolNotLoaded
 	if errors.As(err, &notLoaded) {
-		return s.deleteNotLoaded(notLoaded.pool)
+		return s.deleteNotLoaded(notLoaded.pool, req.GetActor().GetKeyId())
 	}
 	if err != nil {
 		return nil, err
@@ -469,7 +509,8 @@ func (s *Server) DeletePool(ctx context.Context, req *v1.DeletePoolRequest) (*v1
 		if err := s.savePool(rec); err != nil {
 			s.logger.Warn("persist pool draining failed", "pool_id", e.spec.ID(), "error", err)
 		}
-		s.logger.Info("pool draining", "pool_id", e.spec.ID(), "name", e.spec.Name())
+		s.auditPool(e.spec.Raw(), req.GetActor().GetKeyId(), "pool_drain", e.spec.Name())
+		s.logger.Info("pool draining", "pool_id", e.spec.ID(), "name", e.spec.Name(), "key_id", req.GetActor().GetKeyId())
 	}
 	if !e.pool.Drain(ctx) {
 		return &v1.DeletePoolResponse{Drained: false}, nil
@@ -478,15 +519,36 @@ func (s *Server) DeletePool(ctx context.Context, req *v1.DeletePoolRequest) (*v1
 	s.createMu.Lock()
 	s.pools.remove(e.spec.ID())
 	s.createMu.Unlock()
+	s.metrics.DeletePoolSeries(e.label())
 	if err := s.deletePoolRecord(e.spec.ID()); err != nil {
 		s.logger.Warn("delete pool record failed", "pool_id", e.spec.ID(), "error", err)
 	}
-	s.logger.Info("pool deleted", "pool_id", e.spec.ID(), "name", e.spec.Name())
+	s.auditPool(e.spec.Raw(), req.GetActor().GetKeyId(), "pool_delete", e.spec.Name())
+	s.logger.Info("pool deleted", "pool_id", e.spec.ID(), "name", e.spec.Name(), "key_id", req.GetActor().GetKeyId())
 	return &v1.DeletePoolResponse{Drained: true}, nil
 }
 
+// auditPool puts who declared or deleted a pool on the audit trail, under the
+// pool's id. A pool has no workspace, so the local store's directory is made here;
+// the Postgres store takes any id.
+func (s *Server) auditPool(raw pool.RawSpec, keyID, kind, detail string) {
+	if s.localAudit {
+		if err := os.MkdirAll(s.workspaces.LogsDir(string(raw.ID)), 0o755); err != nil {
+			s.logger.Warn("create pool audit directory failed", "pool_id", raw.ID, "error", err)
+		}
+	}
+	s.events.append(sandbox.Event{
+		SandboxID: string(raw.ID),
+		Actor:     actorFor(runtime.SandboxSpec{TenantID: raw.TenantID, AgentID: raw.AgentID}, keyID),
+		Reason:    kind + ": " + detail,
+		Kind:      kind,
+		Detail:    detail,
+		RunnerID:  s.runnerID,
+	})
+}
+
 // deleteNotLoaded removes a refused pool's record. It has no members to drain.
-func (s *Server) deleteNotLoaded(n *notLoadedPool) (*v1.DeletePoolResponse, error) {
+func (s *Server) deleteNotLoaded(n *notLoadedPool, keyID string) (*v1.DeletePoolResponse, error) {
 	s.createMu.Lock()
 	defer s.createMu.Unlock()
 	if err := s.deletePoolRecord(n.rec.ID); err != nil {
@@ -494,7 +556,8 @@ func (s *Server) deleteNotLoaded(n *notLoadedPool) (*v1.DeletePoolResponse, erro
 		return nil, status.Error(codes.Internal, "failed to delete pool")
 	}
 	s.pools.forget(n.rec.ID)
-	s.logger.Info("pool deleted without having been loaded", "pool_id", n.rec.ID, "name", n.rec.Spec.Name)
+	s.auditPool(n.rec.Spec, keyID, "pool_delete", "not loaded")
+	s.logger.Info("pool deleted without having been loaded", "pool_id", n.rec.ID, "name", n.rec.Spec.Name, "key_id", keyID)
 	return &v1.DeletePoolResponse{Drained: true}, nil
 }
 
@@ -554,6 +617,9 @@ func (s *Server) RunInPool(req *v1.RunInPoolRequest, stream grpc.ServerStreaming
 		s.observeRun(e, placement, reason, time.Since(execStart), done)
 	}
 	if err != nil {
+		if stream.Context().Err() == nil {
+			s.logger.Warn("pool run failed", "pool_id", e.spec.ID(), "sandbox_id", placement.SandboxID, "error", err)
+		}
 		return poolStatus(err)
 	}
 	return sender.send(runDoneToProto(done))
@@ -672,27 +738,37 @@ func (s *Server) observeRun(e *poolEntry, pl pool.Placement, reason runtime.Exit
 	case pool.ResetFailed:
 		s.metrics.PoolResetDuration.WithLabelValues(label, "failed").Observe(done.Duration.Seconds())
 	}
+	// DeletePool can finish as soon as this run's member is destroyed, so its
+	// delete of the series may have come before the observes above.
+	if s.pools.get(e.spec.ID()) == nil {
+		s.metrics.DeletePoolSeries(label)
+	}
 }
 
 // poolSandboxes is the runner side of pool.Sandboxes: one member is one
 // ordinary sandbox record with a PoolID, provisioned through the same
-// createRecord and startRecord as a plain sandbox. Capacity is not checked
-// per member because the pool reserved it, and createMu is held only for the
-// record, so a member start never serialises other creates.
+// createRecord and startRecord as a plain sandbox. Capacity is not checked per
+// member because the pool reserved it, and committed skips a loaded pool's
+// records, so a member start takes no createMu and never serialises other creates.
 type poolSandboxes struct {
 	s     *Server
 	actor sandbox.Actor
 }
 
-func (a poolSandboxes) Start(ctx context.Context, spec runtime.SandboxSpec, prepare bool) (pool.Started, error) {
+func (a poolSandboxes) Start(ctx context.Context, spec runtime.SandboxSpec, prepare bool) (started pool.Started, err error) {
 	s := a.s
 	spec.ID = ulid.NewSandbox()
+	// What a tenant sees of a failed start is a fixed word (poolStatus, and
+	// poolStatsToProto for last_start_error), so the log is where the detail lives.
+	defer func() {
+		if err != nil {
+			s.logger.Warn("pool member failed to start", "sandbox_id", spec.ID, "pool_id", spec.PoolID, "prepare", prepare, "error", err)
+		}
+	}()
 	if err := s.enforceResourceLimits(&spec); err != nil {
 		return pool.Started{}, status.Error(codes.InvalidArgument, err.Error())
 	}
-	s.createMu.Lock()
 	rec, err := s.createRecord(ctx, spec)
-	s.createMu.Unlock()
 	if err != nil {
 		a.undo(ctx, spec.ID)
 		return pool.Started{}, err
@@ -701,7 +777,7 @@ func (a poolSandboxes) Start(ctx context.Context, spec runtime.SandboxSpec, prep
 		a.undo(ctx, rec.ID)
 		return pool.Started{}, err
 	}
-	started := pool.Started{SandboxID: rec.ID}
+	started.SandboxID = rec.ID
 	if !prepare {
 		return started, nil
 	}
@@ -717,7 +793,6 @@ func (a poolSandboxes) Start(ctx context.Context, spec runtime.SandboxSpec, prep
 	}
 	reset, err := reusable.Prepare(ctx, h)
 	if err != nil {
-		s.logger.Warn("pool member failed admission", "sandbox_id", rec.ID, "pool_id", spec.PoolID, "error", err)
 		a.undo(ctx, rec.ID)
 		return pool.Started{}, fmt.Errorf("prepare: %w", err)
 	}
@@ -725,18 +800,30 @@ func (a poolSandboxes) Start(ctx context.Context, spec runtime.SandboxSpec, prep
 	return started, nil
 }
 
-// undo removes whatever a failed Start left behind. It runs on a context
-// detached from ctx: a cold start runs on the client's context, and a client
-// that disconnected mid-start must not leak a half-started sandbox.
+// undo removes whatever a failed Start left behind. It runs on a context detached
+// from ctx, as a cold start runs on the client's context and a client that
+// disconnected mid-start must not leak a half-started sandbox, and under its own
+// deadline, as a backend that never answers must not hold the start's slot.
 func (a poolSandboxes) undo(ctx context.Context, id string) {
-	err := a.s.destroy(context.WithoutCancel(ctx), id, "")
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), memberUndoTimeout)
+	defer cancel()
+	err := a.s.destroy(dctx, id, "")
 	if err != nil && status.Code(err) != codes.NotFound {
 		a.s.logger.Warn("undo pool member start failed", "sandbox_id", id, "error", err)
 	}
 }
 
+// memberUndoTimeout matches the pool's default DestroyTimeout.
+const memberUndoTimeout = 30 * time.Second
+
+// Destroy is idempotent, as pool.Sandboxes needs: a record the audit pruner
+// already removed is a member that is gone, not a destroy to retry for ever.
 func (a poolSandboxes) Destroy(ctx context.Context, sandboxID string) error {
-	return a.s.destroy(ctx, sandboxID, "")
+	err := a.s.destroy(ctx, sandboxID, "")
+	if status.Code(err) == codes.NotFound {
+		return nil
+	}
+	return err
 }
 
 // Event records a pool event on the member's trail. Reason repeats kind and

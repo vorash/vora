@@ -178,7 +178,7 @@ func (s *Server) ForkSnapshot(ctx context.Context, req *v1.ForkSnapshotRequest) 
 		return nil, err
 	}
 	if _, err := s.workspaces.Create(ws); err != nil {
-		_ = s.workspaces.Destroy(spec.ID)
+		s.abortFork(ctx, rec.ID, req.GetActor().GetKeyId())
 		s.logger.Error("fork workspace failed", "snapshot_id", snap.ID, "error", err)
 		return nil, status.Error(codes.Internal, "failed to prepare workspace")
 	}
@@ -187,7 +187,7 @@ func (s *Server) ForkSnapshot(ctx context.Context, req *v1.ForkSnapshotRequest) 
 		snapshot.WorkspaceDir: ws.WorkspaceDir,
 		snapshot.HomeDir:      ws.HomeDir,
 	}, spec.Resources.DiskBytes); err != nil {
-		_ = s.workspaces.Destroy(spec.ID)
+		s.abortFork(ctx, rec.ID, req.GetActor().GetKeyId())
 		s.logger.Error("fork restore failed", "snapshot_id", snap.ID, "sandbox_id", spec.ID, "error", err)
 		return nil, status.Errorf(codes.Internal, "failed to restore snapshot %s", snap.ID)
 	}

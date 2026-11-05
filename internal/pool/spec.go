@@ -91,7 +91,12 @@ const (
 	defaultMaxPoolSize          = 64
 )
 
+// The tenant and name make up a pool's metric label, so both are bounded. Series
+// stay bounded too: each pool reserves at least one of the runner's sandbox slots,
+// and the runner deletes a pool's series with it.
 var namePattern = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
+
+const maxTenantBytes = 128
 
 // RawSpec is a pool definition as the wire delivers it, before validation.
 // Zero means "default" for every field but Size, where 0 is a cold pool, so
@@ -218,8 +223,8 @@ func Parse(raw RawSpec, limits Limits) (Spec, error) {
 		return Spec{}, fmt.Errorf("%w: id is required", ErrInvalidSpec)
 	case !namePattern.MatchString(raw.Name):
 		return Spec{}, fmt.Errorf("%w: name must match %s", ErrInvalidSpec, namePattern)
-	case raw.TenantID == "":
-		return Spec{}, fmt.Errorf("%w: tenant is required", ErrInvalidSpec)
+	case raw.TenantID == "" || len(raw.TenantID) > maxTenantBytes:
+		return Spec{}, fmt.Errorf("%w: tenant is required, at most %d bytes", ErrInvalidSpec, maxTenantBytes)
 	case s.size < 0 || s.maxSize < 1 || s.size > s.maxSize:
 		return Spec{}, fmt.Errorf("%w: need 0 <= size <= max_size and max_size >= 1", ErrInvalidSpec)
 	case s.maxSize > limits.MaxSize:

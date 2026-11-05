@@ -38,6 +38,7 @@ type poolBackend struct {
 	prepareHook func(ctx context.Context, id string) error
 	execHook    func(ctx context.Context, id string, req runtime.ExecRequest) (runtime.ExecStream, error)
 	resetHook   func(ctx context.Context, id string) error
+	destroyHook func(ctx context.Context, id string)
 	// destroyIgnoresCancel makes Destroy succeed on a cancelled context. The
 	// default refuses, as a backend honouring ctx would, which is what makes
 	// a leaked cleanup visible.
@@ -141,6 +142,12 @@ func (b *poolBackend) Meter(context.Context, runtime.Handle) (runtime.UsageMeter
 func (b *poolBackend) Stop(context.Context, runtime.Handle) error { return nil }
 
 func (b *poolBackend) Destroy(ctx context.Context, h runtime.Handle) error {
+	b.mu.Lock()
+	hook := b.destroyHook
+	b.mu.Unlock()
+	if hook != nil {
+		hook(ctx, h.ID())
+	}
 	if ctx.Err() != nil && !b.destroyIgnoresCancel {
 		return ctx.Err()
 	}

@@ -3,6 +3,7 @@ package pool
 import (
 	"errors"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,6 +105,8 @@ func TestParseRejects(t *testing.T) {
 		{"borrow_timeout below its floor", func(r *RawSpec) { r.BorrowTimeout = time.Nanosecond }, testLimits, ErrInvalidSpec},
 		{"idle_expiry below its floor", func(r *RawSpec) { r.IdleExpiry = time.Nanosecond }, testLimits, ErrInvalidSpec},
 		{"bad name", func(r *RawSpec) { r.Name = "Py Pool" }, testLimits, ErrInvalidSpec},
+		{"name too long", func(r *RawSpec) { r.Name = strings.Repeat("a", 65) }, testLimits, ErrInvalidSpec},
+		{"tenant too long", func(r *RawSpec) { r.TenantID = strings.Repeat("a", 129) }, testLimits, ErrInvalidSpec},
 		{"no tenant", func(r *RawSpec) { r.TenantID = "" }, testLimits, ErrInvalidSpec},
 	}
 	for _, c := range cases {

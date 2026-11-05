@@ -37,8 +37,9 @@ type Metrics struct {
 	RunnerCapacity        prometheus.Gauge
 	RunnerSandboxes       prometheus.Gauge
 
-	// Pool metrics observed per run. The pool label is "<tenant>/<name>", so
-	// a series survives a delete and recreate; start is warm or cold.
+	// Pool metrics observed per run. The pool label is "<tenant>/<name>", and
+	// DeletePoolSeries removes a pool's series when it is deleted; start is warm
+	// or cold.
 	PoolRunsTotal     *prometheus.CounterVec
 	PoolRunDuration   *prometheus.HistogramVec
 	PoolStartup       *prometheus.HistogramVec
@@ -105,6 +106,16 @@ func (m *Metrics) RegisterPoolSource(source func() []PoolSample) {
 		return
 	}
 	m.registry.MustRegister(poolCollector{source: source})
+}
+
+// DeletePoolSeries removes a deleted pool's per-run series. The collector's series
+// go on their own, as they exist only while a pool does.
+func (m *Metrics) DeletePoolSeries(pool string) {
+	labels := prometheus.Labels{"pool": pool}
+	m.PoolRunsTotal.DeletePartialMatch(labels)
+	m.PoolRunDuration.DeletePartialMatch(labels)
+	m.PoolStartup.DeletePartialMatch(labels)
+	m.PoolResetDuration.DeletePartialMatch(labels)
 }
 
 // Gather is the registry's Gather, for tests that read the exported values.
