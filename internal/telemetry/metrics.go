@@ -43,6 +43,9 @@ type Metrics struct {
 	PoolRunDuration   *prometheus.HistogramVec
 	PoolStartup       *prometheus.HistogramVec
 	PoolResetDuration *prometheus.HistogramVec
+	// PoolEventsDroppedTotal counts audit events lost because the queue in front
+	// of the audit store was full.
+	PoolEventsDroppedTotal prometheus.Counter
 }
 
 // PoolSample is one pool's state at scrape time, for the metrics that derive
@@ -190,6 +193,10 @@ func New() *Metrics {
 		Help:    "Pool member reset duration by result (ok, failed).",
 		Buckets: []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10},
 	}, []string{"pool", "result"})
+	m.PoolEventsDroppedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "vora_pool_events_dropped_total",
+		Help: "Pool audit events dropped because the queue in front of a stalled audit store was full.",
+	})
 
 	reg.MustRegister(
 		m.BuildInfo, m.SandboxCreateTotal, m.SandboxCreateDuration, m.SandboxRunning,
@@ -198,6 +205,7 @@ func New() *Metrics {
 		m.AuditWriteFailedTotal, m.DiskQuotaUnenforced, m.DiskQuotaEnforced,
 		m.RunnerCapacity, m.RunnerSandboxes,
 		m.PoolRunsTotal, m.PoolRunDuration, m.PoolStartup, m.PoolResetDuration,
+		m.PoolEventsDroppedTotal,
 	)
 	return m
 }

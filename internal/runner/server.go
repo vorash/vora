@@ -80,6 +80,10 @@ type Server struct {
 
 	pools  poolRegistry
 	events poolEvents
+	// auditTimeout bounds an audit write on the path of a sandbox start, exec or
+	// destroy: a stalled store loses the record, logged and counted, rather than
+	// holding the caller, and with it a pool member.
+	auditTimeout time.Duration
 	// execGrace is how long past its own timeout a pool run may stay open
 	// before the runner ends it with a synthesized TIMEOUT_EXCEEDED.
 	execGrace time.Duration
@@ -89,6 +93,8 @@ type Server struct {
 
 // defaultExecGrace is the design's hard deadline margin: timeout + 5 s.
 const defaultExecGrace = 5 * time.Second
+
+const defaultAuditTimeout = 5 * time.Second
 
 // sandboxHandle binds a sandbox to the backend that manages it, so later RPCs
 // (exec/stats/signal/destroy) use the right backend.
@@ -155,6 +161,7 @@ func NewServer(cfg config.Config, store *sandbox.Store, registry *runtime.Regist
 		allowedWindows:   make(map[allowedKey]*allowedCount),
 		allowedSandboxes: make(map[string]*allowedCount),
 		execGrace:        defaultExecGrace,
+		auditTimeout:     defaultAuditTimeout,
 	}
 	s.pools.byID = make(map[pool.ID]*poolEntry)
 	s.events.init(s)
@@ -941,7 +948,9 @@ func (s *Server) recordExec(sandboxID string, req runtime.ExecRequest, started t
 		EgressAllowed:   allowed,
 		EgressDenied:    denied,
 	}
-	if err := s.audit.AppendExec(context.Background(), sandboxID, rec); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), s.auditTimeout)
+	defer cancel()
+	if err := s.audit.AppendExec(ctx, sandboxID, rec); err != nil {
 		s.metrics.AuditWriteFailedTotal.Inc()
 		s.logger.Warn("write exec record failed", "sandbox_id", sandboxID, "execution_id", req.ExecutionID, "error", err)
 	}
@@ -950,7 +959,9 @@ func (s *Server) recordExec(sandboxID string, req runtime.ExecRequest, started t
 // egressInWindow counts restricted-network decisions inside [start, end], so an
 // execution's outbound requests and policy violations are recorded with it.
 func (s *Server) egressInWindow(sandboxID string, start, end time.Time) (allowed, denied int64) {
-	allowed, denied, err := s.audit.EgressCounts(context.Background(), sandboxID, start, end)
+	ctx, cancel := context.WithTimeout(context.Background(), s.auditTimeout)
+	defer cancel()
+	allowed, denied, err := s.audit.EgressCounts(ctx, sandboxID, start, end)
 	if err != nil {
 		return 0, 0
 	}
@@ -1466,7 +1477,9 @@ func (s *Server) transition(rec *sandbox.Record, to sandbox.State, reason runtim
 		Reason:    string(reason),
 		RunnerID:  s.runnerID,
 	}
-	if err := s.audit.AppendEvent(context.Background(), rec.ID, event); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), s.auditTimeout)
+	defer cancel()
+	if err := s.audit.AppendEvent(ctx, rec.ID, event); err != nil {
 		s.metrics.AuditWriteFailedTotal.Inc()
 		s.logger.Warn("append event failed", "sandbox_id", rec.ID, "to", to, "error", err)
 	}

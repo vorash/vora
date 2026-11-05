@@ -104,68 +104,122 @@ func (s *Server) loadPoolRecords() ([]poolRecord, error) {
 	return recs, nil
 }
 
-// poolEvents writes pool lifecycle events (reset, retire, alive, destroy)
-// off the pool's own path. A reset's check-in holds the run's trailer, and
-// with a Postgres audit store an append is a network round trip, so events
-// queue to one writer that keeps their order. The queue is bounded: once it
-// is full, Event blocks, because a dropped audit record is worse than a slow
-// trailer.
+// poolEvents writes pool lifecycle events (reset, retire, alive, destroy) off
+// the pool's own path. A reset's check-in holds the run's trailer, and with a
+// Postgres audit store an append is a network round trip, so events queue to one
+// writer that keeps their order. A stalled store must not stall the pools: when
+// the queue is full the newest event is dropped, counted and logged. What is lost
+// is a line of the trail, since a member's reset outcome is in Stats and its
+// RunDone. Dropping the newest keeps what is queued in order and needs nothing
+// from the writer.
 type poolEvents struct {
 	s  *Server
-	mu sync.Mutex // held across a send, so flush never closes under one
-	// closed is set by flush; later events (a run checking in after
-	// ClosePools) are written inline.
+	mu sync.Mutex // guards closed, started and dropped, and is never held across a write
+	// closed is set by flush; later events (a run checking in after ClosePools)
+	// are written inline.
 	closed  bool
 	started bool
+	// dropped counts the events lost since the queue last had room.
+	dropped uint64
 	ch      chan sandbox.Event
-	wg      sync.WaitGroup
+	done    chan struct{} // closed when the writer has ended
+	// abandon ends every write when flush gives up on the store.
+	abandon      context.Context
+	abandonWrite context.CancelFunc
+
+	writeTimeout time.Duration
+	flushTimeout time.Duration
 }
 
-const poolEventQueue = 1024
+const (
+	poolEventQueue = 1024
+	// poolEventWriteTimeout is also what a stalled store costs a check-in after
+	// ClosePools, when events are written inline.
+	poolEventWriteTimeout = 5 * time.Second
+	poolEventFlushTimeout = 10 * time.Second
+)
 
 func (e *poolEvents) init(s *Server) {
 	e.s = s
 	e.ch = make(chan sandbox.Event, poolEventQueue)
+	e.done = make(chan struct{})
+	e.abandon, e.abandonWrite = context.WithCancel(context.Background())
+	e.writeTimeout, e.flushTimeout = poolEventWriteTimeout, poolEventFlushTimeout
 }
 
 func (e *poolEvents) append(ev sandbox.Event) {
 	ev.Timestamp = time.Now().UTC()
+	if !e.enqueue(ev) {
+		e.write(ev)
+	}
+}
+
+// enqueue queues ev, or drops it if the queue is full. It reports false once
+// the writer is gone. It never blocks, so a check-in never waits on the store.
+func (e *poolEvents) enqueue(ev sandbox.Event) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
-		e.write(ev)
-		return
+		return false
 	}
 	if !e.started {
 		e.started = true
-		e.wg.Add(1)
 		go e.drain()
 	}
-	e.ch <- ev
+	select {
+	case e.ch <- ev:
+		if e.dropped > 0 {
+			e.s.logger.Warn("pool event queue has room again", "dropped", e.dropped)
+			e.dropped = 0
+		}
+	default:
+		e.s.metrics.PoolEventsDroppedTotal.Inc()
+		// Once per stall: a stalled store would otherwise add a log line per run.
+		if e.dropped == 0 {
+			e.s.logger.Warn("pool event queue is full; dropping the newest events", "sandbox_id", ev.SandboxID, "kind", ev.Kind)
+		}
+		e.dropped++
+	}
+	return true
 }
 
 func (e *poolEvents) drain() {
-	defer e.wg.Done()
+	defer close(e.done)
 	for ev := range e.ch {
 		e.write(ev)
 	}
 }
 
 func (e *poolEvents) write(ev sandbox.Event) {
-	if err := e.s.audit.AppendEvent(context.Background(), ev.SandboxID, ev); err != nil {
+	ctx, cancel := context.WithTimeout(e.abandon, e.writeTimeout)
+	defer cancel()
+	if err := e.s.audit.AppendEvent(ctx, ev.SandboxID, ev); err != nil {
 		e.s.metrics.AuditWriteFailedTotal.Inc()
 		e.s.logger.Warn("append pool event failed", "sandbox_id", ev.SandboxID, "kind", ev.Kind, "error", err)
 	}
 }
 
-// flush writes what is queued and stops the writer.
+// flush stops the writer and waits for what is queued, up to flushTimeout. Past
+// that the rest is abandoned: shutdown does not wait on a stalled store.
 func (e *poolEvents) flush() {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	if e.closed {
+		e.mu.Unlock()
 		return
 	}
 	e.closed = true
 	close(e.ch)
-	e.wg.Wait()
+	started := e.started
+	e.mu.Unlock()
+	if !started {
+		return
+	}
+	timer := time.NewTimer(e.flushTimeout)
+	defer timer.Stop()
+	select {
+	case <-e.done:
+	case <-timer.C:
+		e.s.logger.Warn("pool events not written before shutdown; abandoning them", "queued", len(e.ch))
+		e.abandonWrite()
+	}
 }

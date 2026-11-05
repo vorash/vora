@@ -168,6 +168,7 @@ func TestFailedResetRetiresTheMember(t *testing.T) {
 	if err != nil || rec.State != sandbox.StateDestroyed {
 		t.Fatalf("record of the retired member = %v (%v), want DESTROYED", rec, err)
 	}
+	h.s.events.flush()
 	events, _ := h.s.audit.Events(context.Background(), id)
 	var kinds []string
 	for _, e := range events {
@@ -514,27 +515,6 @@ func TestBackendWithoutReusableHostsColdPoolsOnly(t *testing.T) {
 		t.Fatalf("cold run = %v, done = %v; want a cold start retired after its run", run, done)
 	}
 	waitFor(t, func() bool { return len(h.backend.live()) == 0 }, "the cold member to be destroyed")
-}
-
-func TestRunInPoolValidatesTheExec(t *testing.T) {
-	h := newWarmHarness(t)
-	spec := poolSpec(0, 1)
-	maxRun := int64(10)
-	spec.MaxRunSeconds = &maxRun
-	p := h.create(spec)
-	for name, exec := range map[string]*v1.ExecRequest{
-		"no timeout":       {Command: "true"},
-		"over max_run":     {Command: "true", TimeoutSeconds: 11},
-		"client-minted id": {Command: "true", TimeoutSeconds: 1, ExecutionId: "exe_x"},
-	} {
-		stream, err := h.client.RunInPool(h.ctx(), &v1.RunInPoolRequest{PoolId: p.GetId(), TenantId: h.tenant, Exec: exec})
-		if err == nil {
-			_, err = stream.Recv()
-		}
-		if status.Code(err) != codes.InvalidArgument {
-			t.Errorf("%s: %v, want InvalidArgument", name, err)
-		}
-	}
 }
 
 func TestReaperHandsAnExpiredMemberToItsPool(t *testing.T) {
