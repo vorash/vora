@@ -9,14 +9,18 @@ import (
 	goruntime "runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// TestStress drives many borrowers through random failures and checks the
-// pool's promises from the fake's own books: no sandbox serves two runs at
-// once, a sandbox whose reset failed never runs again, live sandboxes stay
-// within max_size, and shutdown leaves no goroutine behind.
+// TestStress drives many borrowers through random failures, cancels during
+// waits and during runs, and a drain that starts while they are all busy. It
+// checks the pool's promises from the fake's own books: no sandbox runs again
+// without a nil Reset, no sandbox serves two runs at once, a sandbox whose
+// reset failed never runs again, live sandboxes stay within max_size, and
+// shutdown leaves no goroutine behind. What it exercised also comes from those
+// books, never from what the pool reports about itself.
 func TestStress(t *testing.T) {
 	seed := time.Now().UnixNano()
 	if s, err := strconv.ParseInt(os.Getenv("POOL_STRESS_SEED"), 10, 64); err == nil {
@@ -41,7 +45,7 @@ func TestStress(t *testing.T) {
 	raw := rawSpec(4, 6)
 	raw.MaxRuns = 5
 	raw.MaxAge = 2 * time.Minute
-	raw.BorrowTimeout = 20 * time.Millisecond
+	raw.BorrowTimeout = 2 * time.Millisecond
 	spec := mustParse(t, raw, testLimits)
 	fake := newFake(t, spec.MaxSize())
 	clock := newClock()
@@ -56,13 +60,17 @@ func TestStress(t *testing.T) {
 		case chance(3):
 			<-ctx.Done()
 			return ctx.Err()
+		case chance(3):
+			// A Reset that ignores its context and answers nil too late.
+			time.Sleep(60*time.Millisecond + jitter(10*time.Millisecond))
+			return nil
 		case chance(10):
 			return errBoom
 		}
 		time.Sleep(jitter(time.Millisecond))
 		return nil
 	}
-	fake.aliveHook = func(string) error {
+	fake.aliveHook = func(context.Context, string) error {
 		if chance(10) {
 			return errBoom
 		}
@@ -76,13 +84,15 @@ func TestStress(t *testing.T) {
 	}
 	p := New(spec, fake, Options{
 		Now:          clock.Now,
-		ResetTimeout: 10 * time.Millisecond,
+		ResetTimeout: 50 * time.Millisecond,
+		CallGrace:    5 * time.Millisecond,
+		ProbeTimeout: 50 * time.Millisecond,
 		StartBackoff: time.Millisecond,
+		DestroyRetry: time.Millisecond,
 	})
 
 	stop := make(chan struct{})
 	sweeperDone := make(chan struct{})
-	var wg sync.WaitGroup
 	go func() {
 		defer close(sweeperDone)
 		for {
@@ -100,22 +110,26 @@ func TestStress(t *testing.T) {
 	}()
 
 	const borrowers, runsEach = 16, 40
-	var outcomes sync.Map
-	count := func(k string) {
-		v, _ := outcomes.LoadOrStore(k, new(int64))
-		rngMu.Lock()
-		*v.(*int64)++
-		rngMu.Unlock()
-	}
+	const drainAfter = borrowers * runsEach * 7 / 10
+	var finished, ran atomic.Int64
+	var draining sync.Once
+	var drainer sync.WaitGroup
+	var wg sync.WaitGroup
 	for b := 0; b < borrowers; b++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for i := 0; i < runsEach; i++ {
 				ctx, cancel := context.WithCancel(context.Background())
-				done, err := p.Run(ctx, func(ctx context.Context, pl Placement) error {
+				var timer *time.Timer
+				if chance(30) {
+					// Lands in the wait, the probe, the cold start or the run.
+					timer = time.AfterFunc(jitter(3*time.Millisecond), cancel)
+				}
+				_, err := p.Run(ctx, func(ctx context.Context, pl Placement) error {
 					fake.use(pl.SandboxID)
 					defer fake.release(pl.SandboxID)
+					ran.Add(1)
 					switch {
 					case chance(5):
 						return fmt.Errorf("agent: %w", ErrNotStarted)
@@ -126,50 +140,60 @@ func TestStress(t *testing.T) {
 					time.Sleep(jitter(2 * time.Millisecond))
 					return nil
 				})
+				if timer != nil {
+					timer.Stop()
+				}
 				cancel()
 				switch {
 				case err == nil:
-					count("ok " + done.Reset.String())
-				case errors.Is(err, ErrExhausted), errors.Is(err, ErrColdStart), errors.Is(err, ErrNotStarted), errors.Is(err, context.Canceled):
-					count("err " + err.Error()[:12])
+				case errors.Is(err, ErrExhausted), errors.Is(err, ErrColdStart), errors.Is(err, ErrNotStarted),
+					errors.Is(err, context.Canceled), errors.Is(err, ErrDraining):
 				default:
 					t.Errorf("unexpected error %v", err)
+				}
+				if finished.Add(1) == drainAfter {
+					draining.Do(func() {
+						drainer.Add(1)
+						go func() {
+							defer drainer.Done()
+							short, cancel := context.WithTimeout(context.Background(), jitter(5*time.Millisecond)+time.Microsecond)
+							defer cancel()
+							p.Drain(short)
+						}()
+					})
 				}
 			}
 		}()
 	}
 	wg.Wait()
+	drainer.Wait()
 	close(stop)
 	<-sweeperDone
 
-	outcomes.Range(func(k, v any) bool {
-		rngMu.Lock()
-		defer rngMu.Unlock()
-		t.Logf("%-24s %d", k, *v.(*int64))
-		return true
-	})
-	for _, want := range []string{"ok ok", "ok failed", "ok retired"} {
-		if _, ok := outcomes.Load(want); !ok {
-			t.Errorf("the run never produced outcome %q, so it did not exercise that path", want)
-		}
-	}
-
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		drained := p.Drain(ctx)
-		cancel()
-		if drained {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("drain did not converge: %+v", p.Stats())
-		}
-		p.Sweep()
+	// Sweep has stopped, so Drain alone has to finish the failed destroys.
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), patience)
+	defer cancelDrain()
+	if !p.Drain(drainCtx) {
+		t.Fatalf("drain did not converge: %+v", p.Stats())
 	}
 	p.Close()
+
+	started, destroyed := fake.counts()
+	resetsOK, resetsFailed := fake.resets()
+	t.Logf("runs %d, sandboxes started %d, destroyed %d, nil resets %d, failed resets %d",
+		ran.Load(), started, destroyed, resetsOK, resetsFailed)
+	for name, n := range map[string]int{
+		"runs": int(ran.Load()), "nil resets": resetsOK, "failed resets": resetsFailed, "destroys": destroyed,
+	} {
+		if n == 0 {
+			t.Errorf("the fake saw no %s, so the run did not exercise that path", name)
+		}
+	}
 	if n := fake.liveCount(); n != 0 {
 		t.Fatalf("%d sandboxes left after drain", n)
 	}
-	waitFor(t, func() bool { return goruntime.NumGoroutine() <= baseline }, "goroutines to return to %d, now %d", baseline, goruntime.NumGoroutine())
+	if started != destroyed {
+		t.Fatalf("started %d, destroyed %d: every sandbox the fake started must be gone", started, destroyed)
+	}
+	waitFor(t, func() bool { return goruntime.NumGoroutine() <= baseline }, "goroutines to return to %d", baseline)
 }

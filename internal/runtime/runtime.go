@@ -339,8 +339,13 @@ type Resettable interface {
 	// process set again. A nil error means proven clean. Any error, including
 	// ctx expiry, wraps ErrUnproven and means the sandbox must be destroyed.
 	// Reset never reports partial success.
+	//
+	// Reset returns promptly on ctx expiry. A caller that has waited past that
+	// treats the sandbox as unproven, ignores whatever Reset later returns, and
+	// may destroy the sandbox while Reset is still running.
 	Reset(ctx context.Context) (ResetReport, error)
-	// Alive reports whether init is running and reachable. Cheap.
+	// Alive reports whether init is running and reachable. Cheap. It returns
+	// promptly on ctx expiry, as Reset does.
 	Alive(ctx context.Context) error
 }
 
@@ -348,7 +353,6 @@ type Resettable interface {
 type ResetReport struct {
 	ProcessesKilled int
 	EntriesRemoved  int
-	IPCRemoved      int
 }
 
 // Sweeper is implemented by backends that keep runtime state outside the

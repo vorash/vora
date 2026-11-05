@@ -6,6 +6,7 @@ package pool
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"time"
 
@@ -23,9 +24,12 @@ const (
 	// proved it clean.
 	ReuseReset Reuse = iota
 	// ReuseUnsafeNoReset returns a member with nothing cleaned. It exists for
-	// the isolation experiment's baseline arm. Parse refuses it unless the
-	// runner granted Limits.AllowUnsafeReuse, and every run on such a pool
-	// reports it in its Placement.
+	// the isolation experiment's baseline arm, and that post-run reset is the
+	// only way it differs from ReuseReset: its members get the same admission
+	// Prepare, Alive probe, DenyIPC, max_runs and max_age. So it needs a
+	// Reusable backend too. Parse refuses it unless the runner granted
+	// Limits.AllowUnsafeReuse, or when every run would be fresh anyway (size 0
+	// or max_runs 1), and every run on such a pool reports it in its Placement.
 	ReuseUnsafeNoReset
 )
 
@@ -48,9 +52,10 @@ var (
 )
 
 // minPids is the smallest pids limit a member can run with. An idle bwrap
-// sandbox holds a steady 10 or 11 tasks; at 10 it creates but cannot exec, and
-// at 11 the exec loop passed 150/150 on vora-mini (design build log, v0.10.6).
-const minPids = 11
+// sandbox holds a steady 10 or 11 tasks, so 12 is the first limit that always
+// leaves one for the workload. This floor was measured for bwrap exec (design
+// build log, v0.10.6). Steps 10 and 11 must re-measure it with reset running.
+const minPids = 12
 
 const (
 	defaultSize          = 8
@@ -59,6 +64,31 @@ const (
 	defaultMaxRun        = 5 * time.Minute
 	defaultBorrowTimeout = 2 * time.Second
 	defaultIdleExpiry    = time.Hour
+)
+
+// Duration floors. Each keeps one bad spec from turning into a loop of member
+// starts and destroys: max_age 1 ns measured 8543 cycles in 200 ms.
+const (
+	minMaxAge        = time.Minute
+	minMaxRun        = time.Second
+	minBorrowTimeout = time.Millisecond
+	minIdleExpiry    = time.Minute
+)
+
+// maxDuration caps every duration, so MemberTTL's sum cannot overflow past
+// Limits.MaxTTL.
+const maxDuration = 30 * 24 * time.Hour
+
+// What a zero cap in Limits means. The resource and TTL values are the ones
+// the runner's enforceResourceLimits falls back to, and a runner test holds
+// them equal. defaultMaxPoolSize is VORA_MAX_SANDBOXES' default.
+const (
+	defaultMaxTTL               = 24 * time.Hour
+	defaultMaxMemoryBytes int64 = 8 << 30
+	defaultMaxCPUMillis   int64 = 8000
+	defaultMaxPids        int64 = 512
+	defaultMaxDiskBytes   int64 = 8 << 30
+	defaultMaxPoolSize          = 64
 )
 
 var namePattern = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
@@ -84,14 +114,51 @@ type RawSpec struct {
 	Reuse         Reuse
 }
 
-// Limits are the runner-wide rules a spec is checked against.
+// Limits are the runner-wide rules a spec is checked against, so a pool that
+// could only fail every start is refused when it is declared. A zero cap means
+// the same as it does in the runner's enforceResourceLimits: the built-in
+// default, not "no cap".
 type Limits struct {
-	// MaxTTL caps a member's record TTL (VORA_MAX_TTL). Zero means no cap.
+	// MaxTTL caps a member's record TTL (VORA_MAX_TTL).
 	MaxTTL time.Duration
+	// MaxMemoryBytes, MaxCPUMillis, MaxPids and MaxDiskBytes cap one member's
+	// resources (VORA_MAX_MEMORY, VORA_MAX_CPU, VORA_MAX_PIDS, VORA_MAX_DISK).
+	MaxMemoryBytes int64
+	MaxCPUMillis   int64
+	MaxPids        int64
+	MaxDiskBytes   int64
+	// MaxSize caps a pool's max_size.
+	MaxSize int
 	// AllowUnsafeReuse is VORA_POOL_UNSAFE_REUSE=allow.
 	AllowUnsafeReuse bool
 	// Reusable reports whether a backend implements runtime.Reusable.
 	Reusable func(backend string) bool
+	// HasBackend reports whether this runner has a backend at all. Nil skips
+	// the check, so the runner must set it: a cold pool on a backend the runner
+	// lacks otherwise parses and then fails every start.
+	HasBackend func(backend string) bool
+}
+
+func (l Limits) withDefaults() Limits {
+	if l.MaxTTL <= 0 {
+		l.MaxTTL = defaultMaxTTL
+	}
+	if l.MaxMemoryBytes <= 0 {
+		l.MaxMemoryBytes = defaultMaxMemoryBytes
+	}
+	if l.MaxCPUMillis <= 0 {
+		l.MaxCPUMillis = defaultMaxCPUMillis
+	}
+	if l.MaxPids <= 0 {
+		l.MaxPids = defaultMaxPids
+	}
+	if l.MaxDiskBytes <= 0 {
+		l.MaxDiskBytes = defaultMaxDiskBytes
+	}
+	if l.MaxSize <= 0 {
+		l.MaxSize = defaultMaxPoolSize
+	}
+	return l
 }
 
 // Spec is a validated pool definition. Only Parse builds one, so a Spec in
@@ -112,6 +179,7 @@ type Spec struct {
 // max_runs 100, max_age 30 min, max_run 5 min, borrow_timeout 2 s,
 // idle_expiry 1 h, reuse reset.
 func Parse(raw RawSpec, limits Limits) (Spec, error) {
+	limits = limits.withDefaults()
 	s := Spec{
 		raw:           raw,
 		size:          defaultSize,
@@ -154,41 +222,63 @@ func Parse(raw RawSpec, limits Limits) (Spec, error) {
 		return Spec{}, fmt.Errorf("%w: tenant is required", ErrInvalidSpec)
 	case s.size < 0 || s.maxSize < 1 || s.size > s.maxSize:
 		return Spec{}, fmt.Errorf("%w: need 0 <= size <= max_size and max_size >= 1", ErrInvalidSpec)
+	case s.maxSize > limits.MaxSize:
+		return Spec{}, fmt.Errorf("%w: max_size exceeds the runner's %d", ErrInvalidSpec, limits.MaxSize)
 	case s.maxRuns < 1:
 		return Spec{}, fmt.Errorf("%w: max_runs must be >= 1", ErrInvalidSpec)
-	case s.maxAge < 0 || s.maxRun < 0 || s.borrowTimeout < 0 || s.idleExpiry < 0:
-		return Spec{}, fmt.Errorf("%w: durations must not be negative", ErrInvalidSpec)
-	case limits.MaxTTL > 0 && s.MemberTTL() > limits.MaxTTL:
+	}
+	for _, d := range []struct {
+		name       string
+		value, min time.Duration
+	}{
+		{"max_age", s.maxAge, minMaxAge},
+		{"max_run", s.maxRun, minMaxRun},
+		{"borrow_timeout", s.borrowTimeout, minBorrowTimeout},
+		{"idle_expiry", s.idleExpiry, minIdleExpiry},
+	} {
+		if d.value < d.min || d.value > maxDuration {
+			return Spec{}, fmt.Errorf("%w: %s must be between %s and %s", ErrInvalidSpec, d.name, d.min, maxDuration)
+		}
+	}
+	if s.MemberTTL() > limits.MaxTTL {
 		return Spec{}, fmt.Errorf("%w: max_age + max_run + 1m exceeds the runner's max TTL", ErrInvalidSpec)
 	}
-	if err := checkTemplate(raw.Template); err != nil {
+	if err := checkTemplate(raw.Template, limits); err != nil {
 		return Spec{}, err
 	}
 	switch s.reuse {
 	case ReuseReset:
-		if s.resets() && (limits.Reusable == nil || !limits.Reusable(raw.Template.Backend)) {
-			return Spec{}, fmt.Errorf("%w: %q", ErrNotReusable, raw.Template.Backend)
-		}
 	case ReuseUnsafeNoReset:
 		if !limits.AllowUnsafeReuse {
 			return Spec{}, ErrUnsafeRefused
 		}
+		if !s.reused() {
+			return Spec{}, fmt.Errorf("%w: unsafe reuse needs size > 0 and max_runs > 1, or every run is fresh", ErrInvalidSpec)
+		}
 	default:
 		return Spec{}, fmt.Errorf("%w: unknown reuse %v", ErrInvalidSpec, s.reuse)
+	}
+	if s.reused() && (limits.Reusable == nil || !limits.Reusable(raw.Template.Backend)) {
+		return Spec{}, fmt.Errorf("%w: %q", ErrNotReusable, raw.Template.Backend)
 	}
 	return s, nil
 }
 
-func checkTemplate(t runtime.SandboxSpec) error {
+func checkTemplate(t runtime.SandboxSpec, limits Limits) error {
+	r := t.Resources
 	switch {
 	case t.ID != "" || t.TenantID != "" || t.AgentID != "" || t.TTL != 0:
 		return fmt.Errorf("%w: template must not set id, tenant, agent or ttl", ErrInvalidSpec)
 	case t.Backend == "":
 		return fmt.Errorf("%w: template must name a backend", ErrInvalidSpec)
+	case limits.HasBackend != nil && !limits.HasBackend(t.Backend):
+		return fmt.Errorf("%w: this runner has no backend %q", ErrInvalidSpec, t.Backend)
 	case t.Network.Mode != runtime.NetworkNone:
 		return fmt.Errorf("%w: pools support network mode %q only", ErrInvalidSpec, runtime.NetworkNone)
-	case t.Resources.Pids < minPids:
+	case r.Pids < minPids:
 		return fmt.Errorf("%w: pids must be >= %d (the agent's own tasks)", ErrInvalidSpec, minPids)
+	case r.MemoryBytes > limits.MaxMemoryBytes || r.CPUMillis > limits.MaxCPUMillis || r.Pids > limits.MaxPids || r.DiskBytes > limits.MaxDiskBytes:
+		return fmt.Errorf("%w: template resources exceed the runner's limits", ErrInvalidSpec)
 	}
 	t.ID = "member"
 	if err := t.Validate(); err != nil {
@@ -212,16 +302,15 @@ func (s Spec) MaxRuns() int          { return s.maxRuns }
 func (s Spec) MaxRun() time.Duration { return s.maxRun }
 func (s Spec) Reuse() Reuse          { return s.reuse }
 
-// MemberTTL is the TTL stamped on every member's record. The pool retires a
-// member at max_age and never lends one past it, so the runner's TTL reaper
-// fires only if the pool itself is wedged.
+// MemberTTL is the TTL stamped on every member's record. The pool lends no
+// member past max_age and retires it at check-in, and the runner's fn holds a
+// run to max_run, so the TTL reaper fires only if the pool itself is wedged or
+// Sweep has stopped.
 func (s Spec) MemberTTL() time.Duration { return s.maxAge + s.maxRun + time.Minute }
 
-// reused reports whether a member can serve more than one run.
+// reused reports whether a member can serve more than one run. Such a member
+// is prepared at admission whether or not the pool resets it after a run.
 func (s Spec) reused() bool { return s.size > 0 && s.maxRuns > 1 }
-
-// resets reports whether members are reset between runs.
-func (s Spec) resets() bool { return s.reused() && s.reuse == ReuseReset }
 
 // MemberSpec derives one member's sandbox spec. Tenant, agent and pool come
 // from the pool, so a member cannot belong to anyone else. The ID is left for
@@ -229,6 +318,7 @@ func (s Spec) resets() bool { return s.reused() && s.reuse == ReuseReset }
 // clean it; the unsafe arm gets the same so the arms differ only in the reset.
 func (s Spec) MemberSpec() runtime.SandboxSpec {
 	m := s.raw.Template
+	m.Env = maps.Clone(m.Env)
 	m.TenantID = s.raw.TenantID
 	m.AgentID = s.raw.AgentID
 	m.PoolID = string(s.raw.ID)

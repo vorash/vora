@@ -40,8 +40,8 @@ func (s memberState) String() string {
 
 // transitions is the member state machine. A member leaves the table from
 // starting (the start failed, nothing to destroy) or retiring (Destroy
-// returned, the slot is free). idle is entered only through toIdle, which is
-// the one place a reset's nil error is required.
+// returned, the slot is free). idle is entered only through toIdle, which
+// refuses a member a run has used since its last nil Reset.
 var transitions = map[memberState][]memberState{
 	starting:  {idle, busy, retiring},
 	idle:      {busy, retiring},
@@ -68,7 +68,7 @@ const (
 	RetireShrink      RetireCause = "shrink" // more live members than the target
 	RetireIdleExpiry  RetireCause = "idle_expiry"
 	RetireResetFailed RetireCause = "reset_failed"
-	RetireUnhealthy   RetireCause = "unhealthy" // Alive failed or the exec did not start
+	RetireUnhealthy   RetireCause = "unhealthy" // Alive failed, the exec did not start, the run panicked, or the adapter returned no Resettable
 	RetireDrain       RetireCause = "drain"
 	RetireExpired     RetireCause = "expired" // the runner's TTL reaper
 )
@@ -82,11 +82,13 @@ type member struct {
 	createdAt time.Time
 	idleSince time.Time
 	lastReset time.Duration
+	// dirty is set when a run is lent the member and cleared only by a nil
+	// Reset. Only the member's owner touches it.
+	dirty bool
 	// retireWhen is set while a member is held by someone else; the next
 	// settle applies it.
 	retireWhen RetireCause
 	destroying bool
-	destroyErr error
 }
 
 // Fate is what check-in does with a member after its run.
