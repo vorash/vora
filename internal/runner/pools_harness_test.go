@@ -400,7 +400,7 @@ func serveBufconn(t *testing.T, s *Server) v1.RunnerServiceClient {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		conn.Close()
+		_ = conn.Close()
 		srv.Stop()
 	})
 	return v1.NewRunnerServiceClient(conn)

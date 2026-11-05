@@ -590,10 +590,34 @@ func TestPoolMetricsCarryTheDashboardNames(t *testing.T) {
 			t.Errorf("%s{%s} not exported; have %v", name, labels, got[name])
 		}
 	}
-	// retired_total appears once a member has been retired.
-	if _, err := h.client.DeletePool(h.ctx(), &v1.DeletePoolRequest{PoolId: p.GetId(), TenantId: h.tenant, WaitMs: 5000}); err != nil {
+	// vora_pool_retired_total is read from the pool's books too, so it has a
+	// series once a member has been retired.
+	h.s.cfg.PoolUnsafeReuse = true
+	single := poolSpec(1, 1)
+	single.Name = "single"
+	runs := uint32(1)
+	single.MaxRuns = &runs
+	q := h.create(single)
+	h.waitIdle(q.GetId(), 1)
+	if _, err := h.run(h.ctx(), q.GetId(), 5); err != nil {
 		t.Fatal(err)
 	}
+	waitFor(t, func() bool {
+		families, _ := h.s.metrics.Gather()
+		for _, f := range families {
+			if f.GetName() != "vora_pool_retired_total" {
+				continue
+			}
+			for _, m := range f.GetMetric() {
+				for _, l := range m.GetLabel() {
+					if l.GetName() == "cause" && l.GetValue() == "max_runs" && m.GetCounter().GetValue() == 1 {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}, "vora_pool_retired_total{cause=max_runs} to reach 1")
 }
 
 func TestRestartFailsOldMembersAndReloadsPools(t *testing.T) {

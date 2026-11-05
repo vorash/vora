@@ -800,7 +800,7 @@ func (s *Server) runExec(ctx context.Context, sandboxID string, backend runtime.
 	if err != nil {
 		return failed(), status.Errorf(codes.Internal, "exec: %v", err)
 	}
-	defer es.Close()
+	defer func() { _ = es.Close() }()
 	if opts.beforeFirst != nil {
 		if err := opts.beforeFirst(execReq.ExecutionID); err != nil {
 			return failed(), err
