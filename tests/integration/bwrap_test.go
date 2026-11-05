@@ -118,6 +118,19 @@ func TestBwrapExitsWithoutRunner(t *testing.T) {
 	}
 }
 
+// stateTempDir returns a short-lived state directory for a sandbox. Not
+// t.TempDir: it embeds the test's name, and the control socket under the state
+// directory must fit in a Unix socket path's 108 bytes.
+func stateTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "vora-it-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 // newBwrapSandbox starts a bwrap sandbox on the cached base image and returns
 // the backend and its handle, tearing the sandbox down at the end of the test.
 func newBwrapSandbox(t *testing.T) (*bwrap.Backend, runtime.Handle) {
@@ -156,14 +169,7 @@ func startBwrapSandbox(t *testing.T, spec runtime.SandboxSpec) (*bwrap.Backend, 
 	}
 	rootfs := imageRootfs(t, "base")
 
-	// Not t.TempDir: it embeds the test's name, and the control socket under it must
-	// fit in a Unix socket path's 108 bytes.
-	stateDir, err := os.MkdirTemp("", "vora-it-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
-	cfg := config.Config{StateDir: stateDir, SystemdMode: config.SystemdUser}
+	cfg := config.Config{StateDir: stateTempDir(t), SystemdMode: config.SystemdUser}
 	wsManager := workspace.NewManager(cfg.SandboxesDir())
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	backend, err := bwrap.New(cfg, cgroups, logger)
@@ -568,7 +574,7 @@ func newBwrapRunner(t *testing.T) v1.RunnerServiceClient {
 	rootfs := imageRootfs(t, "base")
 	realImages := filepath.Dir(filepath.Dir(filepath.Dir(rootfs))) // .../images
 
-	stateDir := t.TempDir()
+	stateDir := stateTempDir(t)
 	if err := os.Symlink(realImages, filepath.Join(stateDir, "images")); err != nil {
 		t.Fatalf("symlink images: %v", err)
 	}

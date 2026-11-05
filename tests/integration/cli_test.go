@@ -28,7 +28,7 @@ func TestCLIWorkflow(t *testing.T) {
 		}
 	}
 
-	stateDir := t.TempDir()
+	stateDir := stateTempDir(t)
 	if err := os.Symlink(realImages, filepath.Join(stateDir, "images")); err != nil {
 		t.Fatalf("symlink images: %v", err)
 	}
