@@ -112,7 +112,7 @@ func (r *resetter) captureManifest(ctx context.Context) ([]byte, error) {
 	defer func() { _ = mountinfo.Close() }()
 	m, err := r.capture(ctx, mountinfo)
 	if err != nil {
-		return nil, fmt.Errorf("capture: %w", err)
+		return nil, err
 	}
 	return json.Marshal(m)
 }
