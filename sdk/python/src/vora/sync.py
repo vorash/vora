@@ -12,12 +12,19 @@ from typing import Any, AsyncIterator, Awaitable, Iterator, TypeVar
 
 from ._client import Vora as AsyncVora
 from ._client import Sandboxes as AsyncSandboxes
+from ._http import RetryPolicy
+from ._pools import Pool as AsyncPool
+from ._pools import Pools as AsyncPools
 from ._sandbox import Sandbox as AsyncSandbox
 from ._snapshots import Snapshot as AsyncSnapshot
 from ._snapshots import Snapshots as AsyncSnapshots
 from ._types import (
     ExecChunk,
     ExecResult,
+    PoolInfo,
+    PoolRunResult,
+    PoolStats,
+    RunChunk,
     SandboxEgress,
     SandboxEvent,
     SandboxExec,
@@ -47,12 +54,14 @@ class Vora(_Sync):
         base_url: str | None = None,
         api_key: str | None = None,
         client: Any = None,
+        retry: RetryPolicy | None = RetryPolicy(),
     ) -> None:
         loop = asyncio.new_event_loop()
         super().__init__(loop)
-        self._async = AsyncVora(base_url=base_url, api_key=api_key, client=client)
+        self._async = AsyncVora(base_url=base_url, api_key=api_key, client=client, retry=retry)
         self.sandboxes = Sandboxes(loop, self._async.sandboxes)
         self.snapshots = Snapshots(loop, self._async.snapshots)
+        self.pools = Pools(loop, self._async.pools)
 
     def close(self) -> None:
         self._run(self._async.aclose())
@@ -180,3 +189,65 @@ class Snapshot(_Sync):
 
     def remove(self) -> None:
         self._run(self._async.remove())
+
+
+class Pools(_Sync):
+    def __init__(self, loop: asyncio.AbstractEventLoop, async_: AsyncPools) -> None:
+        super().__init__(loop)
+        self._async = async_
+
+    def declare(self, name: str, **options: Any) -> "Pool":
+        return Pool(self._loop, self._run(self._async.declare(name, **options)))
+
+    def get(self, name: str, *, tenant_id: str | None = None) -> "Pool":
+        return Pool(self._loop, self._run(self._async.get(name, tenant_id=tenant_id)))
+
+    def list(self, *, tenant_id: str | None = None) -> list["Pool"]:
+        return [Pool(self._loop, item) for item in self._run(self._async.list(tenant_id=tenant_id))]
+
+
+class Pool(_Sync):
+    def __init__(self, loop: asyncio.AbstractEventLoop, async_: AsyncPool) -> None:
+        super().__init__(loop)
+        self._async = async_
+
+    @property
+    def name(self) -> str:
+        return self._async.name
+
+    @property
+    def id(self) -> str:
+        return self._async.id
+
+    @property
+    def info(self) -> PoolInfo:
+        return self._async.info
+
+    def refresh(self) -> PoolInfo:
+        return self._run(self._async.refresh())
+
+    def stats(self) -> PoolStats | None:
+        return self._run(self._async.stats())
+
+    def run(self, command: str, args: list[str] | None = None, **options: Any) -> PoolRunResult:
+        return self._run(self._async.run(command, args, **options))
+
+    def stream_run(self, command: str, args: list[str] | None = None, **options: Any) -> Iterator[RunChunk]:
+        agen = self._async.stream_run(command, args, **options)
+        try:
+            while True:
+                try:
+                    yield self._run(agen.__anext__())
+                except StopAsyncIteration:
+                    return
+        finally:
+            self._run(agen.aclose())
+
+    def execs(self, sandbox_id: str) -> list[SandboxExec]:
+        return self._run(self._async.execs(sandbox_id))
+
+    def events(self, sandbox_id: str) -> list[SandboxEvent]:
+        return self._run(self._async.events(sandbox_id))
+
+    def delete(self, *, max_wait_seconds: float = 600.0) -> None:
+        self._run(self._async.delete(max_wait_seconds=max_wait_seconds))

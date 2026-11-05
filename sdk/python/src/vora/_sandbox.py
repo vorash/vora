@@ -24,6 +24,26 @@ from ._types import (
     encode_exec_request,
 )
 
+
+def exec_request(
+    command: str,
+    args: Sequence[str] | None,
+    cwd: str | None,
+    env: Sequence[str] | None,
+    stdin: str | bytes | None,
+    timeout_seconds: int | None,
+) -> dict[str, Any]:
+    # A bare command is a shell command line; `/bin/sh` exists in every
+    # Vora base image and keeps pipelines and quoting working the way
+    # callers expect.
+    if args is None:
+        options: dict[str, Any] = {"command": "sh", "args": ["-c", command]}
+    else:
+        options = {"command": command, "args": list(args)}
+    options.update(cwd=cwd, env=list(env) if env else None, stdin=stdin, timeout_seconds=timeout_seconds)
+    return encode_exec_request(options)
+
+
 class Sandbox:
     """A handle to one sandbox. Reached through ``vora.sandboxes``."""
 
@@ -67,7 +87,7 @@ class Sandbox:
         exit_code = 0
         reason: str | None = None
         saw_exit = False
-        request = self._exec_request(command, args, cwd, env, stdin, timeout_seconds)
+        request = exec_request(command, args, cwd, env, stdin, timeout_seconds)
         async for chunk in self._stream(request):
             if chunk.kind == "stdout":
                 stdout += chunk.data
@@ -102,28 +122,9 @@ class Sandbox:
         timeout_seconds: int | None = None,
     ) -> AsyncGenerator[ExecChunk, None]:
         """Stream exec output as chunks, ending with an ``exit`` chunk."""
-        request = self._exec_request(command, args, cwd, env, stdin, timeout_seconds)
+        request = exec_request(command, args, cwd, env, stdin, timeout_seconds)
         async for chunk in self._stream(request):
             yield chunk
-
-    def _exec_request(
-        self,
-        command: str,
-        args: Sequence[str] | None,
-        cwd: str | None,
-        env: Sequence[str] | None,
-        stdin: str | bytes | None,
-        timeout_seconds: int | None,
-    ) -> dict[str, Any]:
-        # A bare command is a shell command line; `/bin/sh` exists in every
-        # Vora base image and keeps pipelines and quoting working the way
-        # callers expect.
-        if args is None:
-            options: dict[str, Any] = {"command": "sh", "args": ["-c", command]}
-        else:
-            options = {"command": command, "args": list(args)}
-        options.update(cwd=cwd, env=list(env) if env else None, stdin=stdin, timeout_seconds=timeout_seconds)
-        return encode_exec_request(options)
 
     async def _stream(self, request: dict[str, Any]) -> AsyncGenerator[ExecChunk, None]:
         async for raw in self._transport.ndjson(self._path("/exec"), json_body=request):
