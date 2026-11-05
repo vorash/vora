@@ -79,6 +79,10 @@ const (
 	PoolState_POOL_STATE_UNSPECIFIED PoolState = 0
 	PoolState_POOL_ACTIVE            PoolState = 1
 	PoolState_POOL_DRAINING          PoolState = 2
+	// The runner keeps this pool's definition but refused to load it at its last
+	// boot: it has no members and no reservation, runs are FAILED_PRECONDITION, and
+	// a boot that can honour it loads it again. not_loaded_reason says why.
+	PoolState_POOL_NOT_LOADED PoolState = 3
 )
 
 // Enum value maps for PoolState.
@@ -87,11 +91,13 @@ var (
 		0: "POOL_STATE_UNSPECIFIED",
 		1: "POOL_ACTIVE",
 		2: "POOL_DRAINING",
+		3: "POOL_NOT_LOADED",
 	}
 	PoolState_value = map[string]int32{
 		"POOL_STATE_UNSPECIFIED": 0,
 		"POOL_ACTIVE":            1,
 		"POOL_DRAINING":          2,
+		"POOL_NOT_LOADED":        3,
 	}
 )
 
@@ -475,6 +481,9 @@ type Pool struct {
 	RunnerId        string                 `protobuf:"bytes,4,opt,name=runner_id,json=runnerId,proto3" json:"runner_id,omitempty"`
 	Stats           *PoolStats             `protobuf:"bytes,5,opt,name=stats,proto3" json:"stats,omitempty"`
 	CreatedAtUnixMs int64                  `protobuf:"varint,6,opt,name=created_at_unix_ms,json=createdAtUnixMs,proto3" json:"created_at_unix_ms,omitempty"`
+	// Why the pool is POOL_NOT_LOADED: backend_missing, backend_not_reusable,
+	// unsafe_reuse_not_granted, spec_refused, capacity or duplicate_name.
+	NotLoadedReason string `protobuf:"bytes,7,opt,name=not_loaded_reason,json=notLoadedReason,proto3" json:"not_loaded_reason,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -549,6 +558,13 @@ func (x *Pool) GetCreatedAtUnixMs() int64 {
 		return x.CreatedAtUnixMs
 	}
 	return 0
+}
+
+func (x *Pool) GetNotLoadedReason() string {
+	if x != nil {
+		return x.NotLoadedReason
+	}
+	return ""
 }
 
 type CreatePoolRequest struct {
@@ -1181,14 +1197,15 @@ const file_api_proto_v1_pool_proto_rawDesc = "" +
 	"\x10last_start_error\x18\v \x01(\tR\x0elastStartError\x12'\n" +
 	"\x0fexhausted_total\x18\f \x01(\x04R\x0eexhaustedTotal\x12,\n" +
 	"\x12start_failed_total\x18\r \x01(\x04R\x10startFailedTotal\x12\x18\n" +
-	"\adormant\x18\x0e \x01(\bR\adormant\"\xdb\x01\n" +
+	"\adormant\x18\x0e \x01(\bR\adormant\"\x87\x02\n" +
 	"\x04Pool\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12%\n" +
 	"\x04spec\x18\x02 \x01(\v2\x11.vora.v1.PoolSpecR\x04spec\x12(\n" +
 	"\x05state\x18\x03 \x01(\x0e2\x12.vora.v1.PoolStateR\x05state\x12\x1b\n" +
 	"\trunner_id\x18\x04 \x01(\tR\brunnerId\x12(\n" +
 	"\x05stats\x18\x05 \x01(\v2\x12.vora.v1.PoolStatsR\x05stats\x12+\n" +
-	"\x12created_at_unix_ms\x18\x06 \x01(\x03R\x0fcreatedAtUnixMs\"`\n" +
+	"\x12created_at_unix_ms\x18\x06 \x01(\x03R\x0fcreatedAtUnixMs\x12*\n" +
+	"\x11not_loaded_reason\x18\a \x01(\tR\x0fnotLoadedReason\"`\n" +
 	"\x11CreatePoolRequest\x12%\n" +
 	"\x04spec\x18\x01 \x01(\v2\x11.vora.v1.PoolSpecR\x04spec\x12$\n" +
 	"\x05actor\x18\x02 \x01(\v2\x0e.vora.v1.ActorR\x05actor\"F\n" +
@@ -1233,11 +1250,12 @@ const file_api_proto_v1_pool_proto_rawDesc = "" +
 	"\tPoolReuse\x12\x1a\n" +
 	"\x16POOL_REUSE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10POOL_REUSE_RESET\x10\x01\x12\x1e\n" +
-	"\x1aPOOL_REUSE_UNSAFE_NO_RESET\x10\x02*K\n" +
+	"\x1aPOOL_REUSE_UNSAFE_NO_RESET\x10\x02*`\n" +
 	"\tPoolState\x12\x1a\n" +
 	"\x16POOL_STATE_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vPOOL_ACTIVE\x10\x01\x12\x11\n" +
-	"\rPOOL_DRAINING\x10\x02*\x88\x01\n" +
+	"\rPOOL_DRAINING\x10\x02\x12\x13\n" +
+	"\x0fPOOL_NOT_LOADED\x10\x03*\x88\x01\n" +
 	"\x10PoolResetOutcome\x12\x1a\n" +
 	"\x16POOL_RESET_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rPOOL_RESET_OK\x10\x01\x12\x15\n" +

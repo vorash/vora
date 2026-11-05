@@ -38,6 +38,9 @@ func startServer(t *testing.T, stateDir, socket string) (v1.RunnerServiceClient,
 	store := sandbox.NewStore(cfg.SandboxesDir())
 	registry := runtime.NewRegistry()
 	srv := runner.NewServer(cfg, store, registry, ulid.NewRunner(), nil)
+	if err := srv.LoadPools(); err != nil {
+		t.Fatalf("LoadPools: %v", err)
+	}
 
 	lis, err := net.Listen("unix", socket)
 	if err != nil {

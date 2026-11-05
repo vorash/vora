@@ -120,7 +120,6 @@ func TestRunThatNeverStartedIsNotObserved(t *testing.T) {
 	// As a destroy racing the borrow leaves it: the first attempt finds no handle.
 	h.s.delHandle(h.backend.live()[0])
 	gate := make(chan struct{})
-	defer close(gate)
 	h.backend.set(func(b *poolBackend) {
 		b.startHook = func(ctx context.Context, _ string) error {
 			select {
@@ -135,6 +134,9 @@ func TestRunThatNeverStartedIsNotObserved(t *testing.T) {
 	if _, err := h.run(ctx, p.GetId(), 5); err == nil {
 		t.Fatal("a run with no member to run on succeeded")
 	}
+	// One slot: an idle member means the retry's cold start has unwound.
+	close(gate)
+	h.waitIdle(p.GetId(), 1)
 	for _, name := range []string{"vora_pool_runs_total", "vora_pool_run_duration_seconds", "vora_pool_startup_seconds", "vora_exec_duration_seconds"} {
 		f := h.metricFamily(name)
 		if f == nil {

@@ -144,6 +144,27 @@ func (s *Server) poolToProto(e *poolEntry) *v1.Pool {
 	}
 }
 
+// notLoadedToProto reports a refused pool. Parse refused its definition, so the
+// spec is as it was declared, with no defaults filled in.
+func (s *Server) notLoadedToProto(n *notLoadedPool) *v1.Pool {
+	raw := n.rec.Spec
+	return &v1.Pool{
+		Id: string(n.rec.ID),
+		Spec: &v1.PoolSpec{
+			Name:     raw.Name,
+			TenantId: raw.TenantID,
+			AgentId:  raw.AgentID,
+			Sandbox:  specToProto(raw.Template),
+			Reuse:    reuseToProto(raw.Reuse),
+		},
+		State:           v1.PoolState_POOL_NOT_LOADED,
+		RunnerId:        s.runnerID,
+		Stats:           &v1.PoolStats{},
+		CreatedAtUnixMs: n.rec.CreatedAt.UnixMilli(),
+		NotLoadedReason: n.reason,
+	}
+}
+
 func runFrameToProto(poolID pool.ID, pl pool.Placement, executionID string) *v1.RunChunk {
 	return &v1.RunChunk{Payload: &v1.RunChunk_Run{Run: &v1.PoolRun{
 		PoolId:      string(poolID),

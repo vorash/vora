@@ -59,6 +59,9 @@ func TestAPIControlPlane(t *testing.T) {
 	}
 	runnerID := ulid.NewRunner()
 	runnerSrv := runner.NewServer(cfg, sandbox.NewStore(cfg.SandboxesDir()), reg, runnerID, logger)
+	if err := runnerSrv.LoadPools(); err != nil {
+		t.Fatalf("LoadPools: %v", err)
+	}
 
 	// Runner gRPC endpoint (the address the API dials).
 	runnerLn, err := net.Listen("tcp", "127.0.0.1:0")

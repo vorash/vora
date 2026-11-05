@@ -682,6 +682,9 @@ func newBwrapRunner(t *testing.T) v1.RunnerServiceClient {
 		t.Fatalf("register: %v", err)
 	}
 	srv := runner.NewServer(cfg, sandbox.NewStore(cfg.SandboxesDir()), registry, ulid.NewRunner(), logger)
+	if err := srv.LoadPools(); err != nil {
+		t.Fatalf("LoadPools: %v", err)
+	}
 
 	lis, err := net.Listen("unix", filepath.Join(t.TempDir(), "runner.sock"))
 	if err != nil {

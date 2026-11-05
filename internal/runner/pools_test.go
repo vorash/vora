@@ -694,11 +694,14 @@ func TestRestartFailsOldMembersAndReloadsPools(t *testing.T) {
 	if _, err := s2.GetPool(context.Background(), &v1.GetPoolRequest{PoolId: string(going.ID), TenantId: h.tenant}); status.Code(err) != codes.NotFound {
 		t.Fatalf("pool that was draining at shutdown: %v, want NotFound", err)
 	}
-	if _, err := s2.GetPool(context.Background(), &v1.GetPoolRequest{PoolId: granted.GetId(), TenantId: h.tenant}); status.Code(err) != codes.NotFound {
-		t.Fatalf("unsafe pool on a runner that lost the grant: %v, want NotFound", err)
+	// The definition outlives a boot that cannot honour it. The draining record
+	// is the only one removed.
+	lost, err := s2.GetPool(context.Background(), &v1.GetPoolRequest{PoolId: granted.GetId(), TenantId: h.tenant})
+	if err != nil || lost.GetState() != v1.PoolState_POOL_NOT_LOADED {
+		t.Fatalf("unsafe pool on a runner that lost the grant: %v, %v; want POOL_NOT_LOADED", lost, err)
 	}
 	recs, _ := s2.loadPoolRecords()
-	if len(recs) != 1 {
-		t.Fatalf("pool records after load = %d, want only the reloaded pool", len(recs))
+	if len(recs) != 2 {
+		t.Fatalf("pool records after load = %d, want the reloaded pool and the one not loaded", len(recs))
 	}
 }

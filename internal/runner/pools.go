@@ -1,9 +1,11 @@
 package runner
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,17 +37,51 @@ type poolEntry struct {
 // label is the pool's metric label, stable across a delete and recreate.
 func (e *poolEntry) label() string { return e.spec.TenantID() + "/" + e.spec.Name() }
 
-// poolRegistry is the runner's table of loaded pools. createMu, not this
-// mutex, serialises a pool's reservation against sandbox creates: CreatePool
-// and DeletePool take createMu around the add and remove, and
-// checkSandboxCapacity runs under it, so the capacity books never see a half
-// reserved pool.
+// notLoadedPool is a persisted pool this boot refused. Its record stays on disk,
+// so a later boot that can honour it loads it again. It holds no reservation and
+// has no members, but it keeps its (tenant, name).
+type notLoadedPool struct {
+	rec    poolRecord
+	reason string
+}
+
+// Why a persisted pool was not loaded. These reach the tenant through GetPool, so
+// each is a fixed word: the detail, which can name host paths, goes to the log.
+const (
+	notLoadedBackendMissing = "backend_missing"
+	notLoadedNotReusable    = "backend_not_reusable"
+	notLoadedUnsafeRefused  = "unsafe_reuse_not_granted"
+	notLoadedSpecRefused    = "spec_refused"
+	notLoadedCapacity       = "capacity"
+	notLoadedDuplicate      = "duplicate_name"
+)
+
+// errPoolNotLoaded is the answer for a pool that is known but not loaded. It is
+// a gRPC status as it stands, and GetPool and DeletePool look for it.
+type errPoolNotLoaded struct{ pool *notLoadedPool }
+
+func (e errPoolNotLoaded) Error() string {
+	return fmt.Sprintf("pool %s is not loaded on this runner: %s", e.pool.rec.ID, e.pool.reason)
+}
+
+func (e errPoolNotLoaded) GRPCStatus() *status.Status {
+	return status.New(codes.FailedPrecondition, e.Error())
+}
+
+// poolRegistry is the runner's table of pools. createMu, not this mutex,
+// serialises a pool's reservation against sandbox creates: CreatePool, DeletePool
+// and LoadPools take createMu around the add and remove, and checkSandboxCapacity
+// runs under it, so the capacity books never see a half reserved pool.
 type poolRegistry struct {
 	mu sync.Mutex
-	// loaded is set by LoadPools. Pool RPCs are Unavailable before it: the
-	// gRPC servers in main serve before Reconcile and LoadPools run.
+	// loaded is set by LoadPools. Pool RPCs and sandbox creates are Unavailable
+	// before it, since the gRPC servers in main serve before Reconcile and
+	// LoadPools run and the capacity books mean nothing until then.
 	loaded bool
-	byID   map[pool.ID]*poolEntry
+	// closed is set by ClosePools, which stops CreatePool.
+	closed    bool
+	byID      map[pool.ID]*poolEntry
+	notLoaded map[pool.ID]*notLoadedPool
 }
 
 type reservation struct {
@@ -68,6 +104,45 @@ func (r *poolRegistry) byName(tenant, name string) *poolEntry {
 		}
 	}
 	return nil
+}
+
+func (r *poolRegistry) notLoadedPool(id pool.ID) *notLoadedPool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.notLoaded[id]
+}
+
+func (r *poolRegistry) notLoadedByName(tenant, name string) *notLoadedPool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, n := range r.notLoaded {
+		if n.rec.Spec.TenantID == tenant && n.rec.Spec.Name == name {
+			return n
+		}
+	}
+	return nil
+}
+
+func (r *poolRegistry) refuse(n *notLoadedPool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.notLoaded[n.rec.ID] = n
+}
+
+func (r *poolRegistry) forget(id pool.ID) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.notLoaded, id)
+}
+
+func (r *poolRegistry) refused() []*notLoadedPool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*notLoadedPool, 0, len(r.notLoaded))
+	for _, n := range r.notLoaded {
+		out = append(out, n)
+	}
+	return out
 }
 
 func (r *poolRegistry) add(e *poolEntry) {
@@ -149,11 +224,16 @@ func (s *Server) startPool(spec pool.Spec, createdAt time.Time) *poolEntry {
 }
 
 // LoadPools restarts every persisted pool after Reconcile has failed their old
-// members. A draining record is removed. A record the current limits refuse
-// (an unsafe grant that is gone, a backend no longer registered) is removed
-// and logged, so the control plane sees NotFound and drops its route rather
-// than a pool that runs under rules it was not declared with.
+// members, oldest first, so which pool fits a lowered cap does not depend on the
+// order of a directory listing. A draining record is removed. A record this boot
+// cannot honour stays on disk, is logged and is reported through GetPool and
+// vora_pool_not_loaded, and starts no members: losing a definition because a
+// backend failed to register once would be permanent, and a pool whose unsafe
+// grant is gone must not run at all, not even with a reset. A later boot that can
+// honour it loads it again.
 func (s *Server) LoadPools() error {
+	s.createMu.Lock()
+	defer s.createMu.Unlock()
 	if s.pools.isLoaded() {
 		return nil
 	}
@@ -161,17 +241,23 @@ func (s *Server) LoadPools() error {
 	if err != nil {
 		return err
 	}
+	slices.SortFunc(recs, func(a, b poolRecord) int {
+		return cmp.Or(a.CreatedAt.Compare(b.CreatedAt), cmp.Compare(a.ID, b.ID))
+	})
 	limits := s.poolLimits()
 	for _, rec := range recs {
 		if rec.Draining {
 			s.logger.Info("pool was draining at shutdown; removed", "pool_id", rec.ID)
-			_ = s.deletePoolRecord(rec.ID)
+			if err := s.deletePoolRecord(rec.ID); err != nil {
+				s.logger.Warn("delete pool record failed", "pool_id", rec.ID, "error", err)
+			}
 			continue
 		}
-		spec, err := pool.Parse(rec.Spec, limits)
+		spec, reason, err := s.admitPersisted(rec, limits)
 		if err != nil {
-			s.logger.Warn("refusing persisted pool", "pool_id", rec.ID, "name", rec.Spec.Name, "tenant_id", rec.Spec.TenantID, "error", err)
-			_ = s.deletePoolRecord(rec.ID)
+			s.logger.Error("pool NOT loaded: its record is kept, and it runs nothing until a boot can honour it",
+				"pool_id", rec.ID, "name", rec.Spec.Name, "tenant_id", rec.Spec.TenantID, "reason", reason, "error", err)
+			s.pools.refuse(&notLoadedPool{rec: rec, reason: reason})
 			continue
 		}
 		s.pools.add(s.startPool(spec, rec.CreatedAt))
@@ -180,6 +266,43 @@ func (s *Server) LoadPools() error {
 	s.pools.mu.Lock()
 	s.pools.loaded = true
 	s.pools.mu.Unlock()
+	return nil
+}
+
+// admitPersisted decides whether a record can load on this boot. The caller holds
+// createMu. On refusal it returns the tenant-safe reason and the detail for the log.
+func (s *Server) admitPersisted(rec poolRecord, limits pool.Limits) (pool.Spec, string, error) {
+	if limits.HasBackend != nil && !limits.HasBackend(rec.Spec.Template.Backend) {
+		return pool.Spec{}, notLoadedBackendMissing, fmt.Errorf("no backend %q", rec.Spec.Template.Backend)
+	}
+	spec, err := pool.Parse(rec.Spec, limits)
+	switch {
+	case errors.Is(err, pool.ErrUnsafeRefused):
+		return pool.Spec{}, notLoadedUnsafeRefused, err
+	case errors.Is(err, pool.ErrNotReusable):
+		return pool.Spec{}, notLoadedNotReusable, err
+	case err != nil:
+		return pool.Spec{}, notLoadedSpecRefused, err
+	}
+	if other := s.pools.byName(spec.TenantID(), spec.Name()); other != nil {
+		return pool.Spec{}, notLoadedDuplicate, fmt.Errorf("pool %s holds this name", other.spec.ID())
+	}
+	if err := s.checkPoolCapacity(spec); err != nil {
+		return pool.Spec{}, notLoadedCapacity, err
+	}
+	return spec, "", nil
+}
+
+// checkPoolCapacity admits a pool's whole reservation. The caller holds createMu.
+func (s *Server) checkPoolCapacity(spec pool.Spec) error {
+	global, forTenant, err := s.committed(spec.TenantID())
+	if err != nil {
+		return err
+	}
+	maxGlobal, maxTenant := s.capacityCaps()
+	if global+spec.MaxSize() > maxGlobal || forTenant+spec.MaxSize() > maxTenant {
+		return status.Errorf(codes.ResourceExhausted, "sandbox capacity reached: pool needs %d of %d free", spec.MaxSize(), min(maxGlobal-global, maxTenant-forTenant))
+	}
 	return nil
 }
 
@@ -204,7 +327,11 @@ func (s *Server) ClosePools() {
 // poolSamples is the scrape-time source of the pool state metrics.
 func (s *Server) poolSamples() []telemetry.PoolSample {
 	entries := s.pools.all()
-	out := make([]telemetry.PoolSample, 0, len(entries))
+	refused := s.pools.refused()
+	out := make([]telemetry.PoolSample, 0, len(entries)+len(refused))
+	for _, n := range refused {
+		out = append(out, telemetry.PoolSample{Pool: n.rec.Spec.TenantID + "/" + n.rec.Spec.Name, NotLoaded: n.reason})
+	}
 	for _, e := range entries {
 		st := e.pool.Stats()
 		retired := make(map[string]uint64, len(st.Retired))
@@ -238,6 +365,9 @@ func (s *Server) lookupPool(id, tenant string) (*poolEntry, error) {
 	if tenant == "" {
 		return nil, status.Error(codes.InvalidArgument, "tenant_id is required")
 	}
+	if n := s.pools.notLoadedPool(pool.ID(id)); n != nil && n.rec.Spec.TenantID == tenant {
+		return nil, errPoolNotLoaded{n}
+	}
 	e := s.pools.get(pool.ID(id))
 	if e == nil || e.spec.TenantID() != tenant {
 		return nil, status.Errorf(codes.NotFound, "pool %s not found", id)
@@ -256,6 +386,14 @@ func (s *Server) CreatePool(ctx context.Context, req *v1.CreatePoolRequest) (*v1
 	raw, err := poolSpecFromProto(req.GetSpec())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	// Before Parse, which would refuse it for the same reason the load did and
+	// hide that the pool exists. A loaded pool holds the name over a duplicate
+	// record, and the set only shrinks once pools are loaded.
+	if s.pools.byName(raw.TenantID, raw.Name) == nil {
+		if n := s.pools.notLoadedByName(raw.TenantID, raw.Name); n != nil {
+			return nil, errPoolNotLoaded{n}
+		}
 	}
 	raw.ID = pool.ID(ulid.NewPool())
 	if raw.Template.Resources.DiskBytes == 0 {
@@ -281,13 +419,8 @@ func (s *Server) CreatePool(ctx context.Context, req *v1.CreatePoolRequest) (*v1
 			return nil, status.Errorf(codes.AlreadyExists, "pool %s exists with a different spec", spec.Name())
 		}
 	}
-	global, forTenant, err := s.committed(spec.TenantID())
-	if err != nil {
+	if err := s.checkPoolCapacity(spec); err != nil {
 		return nil, err
-	}
-	maxGlobal, maxTenant := s.capacityCaps()
-	if global+spec.MaxSize() > maxGlobal || forTenant+spec.MaxSize() > maxTenant {
-		return nil, status.Errorf(codes.ResourceExhausted, "sandbox capacity reached: pool needs %d of %d free", spec.MaxSize(), maxTenant-forTenant)
 	}
 	rec := poolRecord{ID: spec.ID(), Spec: spec.Raw(), CreatedAt: time.Now().UTC()}
 	if err := s.savePool(rec); err != nil {
@@ -304,6 +437,10 @@ func (s *Server) CreatePool(ctx context.Context, req *v1.CreatePoolRequest) (*v1
 // GetPool returns a pool's spec, state and live stats.
 func (s *Server) GetPool(ctx context.Context, req *v1.GetPoolRequest) (*v1.Pool, error) {
 	e, err := s.lookupPool(req.GetPoolId(), req.GetTenantId())
+	var notLoaded errPoolNotLoaded
+	if errors.As(err, &notLoaded) {
+		return s.notLoadedToProto(notLoaded.pool), nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -315,6 +452,10 @@ func (s *Server) GetPool(ctx context.Context, req *v1.GetPoolRequest) (*v1.Pool,
 // draining and the caller repeats the call.
 func (s *Server) DeletePool(ctx context.Context, req *v1.DeletePoolRequest) (*v1.DeletePoolResponse, error) {
 	e, err := s.lookupPool(req.GetPoolId(), req.GetTenantId())
+	var notLoaded errPoolNotLoaded
+	if errors.As(err, &notLoaded) {
+		return s.deleteNotLoaded(notLoaded.pool)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -341,6 +482,19 @@ func (s *Server) DeletePool(ctx context.Context, req *v1.DeletePoolRequest) (*v1
 		s.logger.Warn("delete pool record failed", "pool_id", e.spec.ID(), "error", err)
 	}
 	s.logger.Info("pool deleted", "pool_id", e.spec.ID(), "name", e.spec.Name())
+	return &v1.DeletePoolResponse{Drained: true}, nil
+}
+
+// deleteNotLoaded removes a refused pool's record. It has no members to drain.
+func (s *Server) deleteNotLoaded(n *notLoadedPool) (*v1.DeletePoolResponse, error) {
+	s.createMu.Lock()
+	defer s.createMu.Unlock()
+	if err := s.deletePoolRecord(n.rec.ID); err != nil {
+		s.logger.Error("delete pool record failed", "pool_id", n.rec.ID, "error", err)
+		return nil, status.Error(codes.Internal, "failed to delete pool")
+	}
+	s.pools.forget(n.rec.ID)
+	s.logger.Info("pool deleted without having been loaded", "pool_id", n.rec.ID, "name", n.rec.Spec.Name)
 	return &v1.DeletePoolResponse{Drained: true}, nil
 }
 

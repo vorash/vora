@@ -453,9 +453,10 @@ func run() error {
 		logger.Warn("startup reconciliation failed", "error", err)
 	}
 	// Pools load after Reconcile has failed their old members, so each one
-	// refills from nothing.
+	// refills from nothing. Until this returns the runner refuses every create,
+	// so a failure here is fatal rather than a runner that can never admit one.
 	if err := server.LoadPools(); err != nil {
-		logger.Warn("loading pools failed", "error", err)
+		return fmt.Errorf("load pools: %w", err)
 	}
 	defer server.ClosePools()
 	go func() {

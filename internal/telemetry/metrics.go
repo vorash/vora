@@ -51,7 +51,10 @@ type Metrics struct {
 // PoolSample is one pool's state at scrape time, for the metrics that derive
 // from the pool's own books rather than from a run.
 type PoolSample struct {
-	Pool        string
+	Pool string
+	// NotLoaded is set, and nothing else is, for a pool whose definition is kept
+	// but which this boot refused to load. It names the reason.
+	NotLoaded   string
 	States      map[string]int    // starting, idle, busy, resetting, retiring
 	Retired     map[string]uint64 // by cause
 	Exhausted   uint64
@@ -63,6 +66,7 @@ var (
 	poolRetiredDesc     = prometheus.NewDesc("vora_pool_retired_total", "Pool members destroyed, by cause.", []string{"pool", "cause"}, nil)
 	poolExhaustedDesc   = prometheus.NewDesc("vora_pool_exhausted_total", "Pool runs refused because no member was free within the borrow timeout.", []string{"pool"}, nil)
 	poolStartFailedDesc = prometheus.NewDesc("vora_pool_start_failed_total", "Pool member starts that failed.", []string{"pool"}, nil)
+	poolNotLoadedDesc   = prometheus.NewDesc("vora_pool_not_loaded", "Pools whose definition is kept but which this boot refused to load.", []string{"pool", "reason"}, nil)
 )
 
 // poolCollector reads every pool's books at scrape time, so the gauges and
@@ -74,10 +78,15 @@ func (c poolCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- poolRetiredDesc
 	ch <- poolExhaustedDesc
 	ch <- poolStartFailedDesc
+	ch <- poolNotLoadedDesc
 }
 
 func (c poolCollector) Collect(ch chan<- prometheus.Metric) {
 	for _, p := range c.source() {
+		if p.NotLoaded != "" {
+			ch <- prometheus.MustNewConstMetric(poolNotLoadedDesc, prometheus.GaugeValue, 1, p.Pool, p.NotLoaded)
+			continue
+		}
 		for state, n := range p.States {
 			ch <- prometheus.MustNewConstMetric(poolSandboxesDesc, prometheus.GaugeValue, float64(n), p.Pool, state)
 		}

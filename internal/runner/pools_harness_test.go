@@ -531,3 +531,18 @@ func (h *poolHarness) startPlain() string {
 	}
 	return id
 }
+
+// snapshot takes a snapshot of a plain sandbox and destroys the sandbox, so the
+// snapshot holds no capacity, and returns its id.
+func (h *poolHarness) snapshot() string {
+	h.t.Helper()
+	id := h.startPlain()
+	resp, err := h.client.SnapshotSandbox(h.ctx(), &v1.SnapshotSandboxRequest{SandboxId: id})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	if _, err := h.client.DestroySandbox(h.ctx(), &v1.DestroySandboxRequest{SandboxId: id}); err != nil {
+		h.t.Fatal(err)
+	}
+	return resp.GetSnapshot().GetId()
+}

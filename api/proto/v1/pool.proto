@@ -60,6 +60,10 @@ enum PoolState {
   POOL_STATE_UNSPECIFIED = 0;
   POOL_ACTIVE = 1;
   POOL_DRAINING = 2;
+  // The runner keeps this pool's definition but refused to load it at its last
+  // boot: it has no members and no reservation, runs are FAILED_PRECONDITION, and
+  // a boot that can honour it loads it again. not_loaded_reason says why.
+  POOL_NOT_LOADED = 3;
 }
 
 message Pool {
@@ -69,6 +73,9 @@ message Pool {
   string runner_id = 4;
   PoolStats stats = 5;
   int64 created_at_unix_ms = 6;
+  // Why the pool is POOL_NOT_LOADED: backend_missing, backend_not_reusable,
+  // unsafe_reuse_not_granted, spec_refused, capacity or duplicate_name.
+  string not_loaded_reason = 7;
 }
 
 message CreatePoolRequest {

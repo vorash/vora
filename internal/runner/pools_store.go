@@ -95,7 +95,7 @@ func (s *Server) loadPoolRecords() ([]poolRecord, error) {
 			continue
 		}
 		var rec poolRecord
-		if err := json.Unmarshal(data, &rec); err != nil || string(rec.ID)+".json" != name {
+		if err := json.Unmarshal(data, &rec); err != nil || string(rec.ID)+".json" != name || rec.Spec.ID != rec.ID {
 			s.logger.Warn("pool record malformed", "file", name, "error", err)
 			continue
 		}

@@ -164,6 +164,7 @@ func NewServer(cfg config.Config, store *sandbox.Store, registry *runtime.Regist
 		auditTimeout:     defaultAuditTimeout,
 	}
 	s.pools.byID = make(map[pool.ID]*poolEntry)
+	s.pools.notLoaded = make(map[pool.ID]*notLoadedPool)
 	s.events.init(s)
 	s.setQuotaModeMetric()
 	s.metrics.RegisterPoolSource(s.poolSamples)
@@ -487,6 +488,9 @@ func (s *Server) createRecord(ctx context.Context, spec runtime.SandboxSpec) (*s
 // checkSandboxCapacity admits one more plain sandbox for tenant. The caller
 // holds createMu.
 func (s *Server) checkSandboxCapacity(tenant string) error {
+	if !s.pools.isLoaded() {
+		return status.Error(codes.Unavailable, "the runner is still starting")
+	}
 	global, forTenant, err := s.committed(tenant)
 	if err != nil {
 		return err
