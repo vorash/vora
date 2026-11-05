@@ -11,7 +11,7 @@ import (
 )
 
 func TestFilterStructure(t *testing.T) {
-	f := Filter()
+	f := Filter(false)
 	if len(f) < 6 {
 		t.Fatalf("filter too short: %d instructions", len(f))
 	}
@@ -59,13 +59,13 @@ func TestFilterBlocksNamespaceCloneAndX32(t *testing.T) {
 		{"personality change", unix.SYS_PERSONALITY, 0, unix.SECCOMP_RET_ERRNO | uint32(unix.EPERM)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := evalFilter(Filter(), auditArch(), tc.nr, tc.flags); got != tc.want {
+			if got := evalFilter(Filter(false), auditArch(), tc.nr, tc.flags); got != tc.want {
 				t.Fatalf("result=%#x, want %#x", got, tc.want)
 			}
 		})
 	}
 	if auditArch() == unix.AUDIT_ARCH_X86_64 {
-		if got := evalFilter(Filter(), auditArch(), uint32(unix.SYS_GETPID)|0x40000000, 0); got != unix.SECCOMP_RET_ERRNO|uint32(unix.EPERM) {
+		if got := evalFilter(Filter(false), auditArch(), uint32(unix.SYS_GETPID)|0x40000000, 0); got != unix.SECCOMP_RET_ERRNO|uint32(unix.EPERM) {
 			t.Fatalf("x32 syscall accepted: %#x", got)
 		}
 	}
@@ -115,7 +115,7 @@ func evalFilter(prog []unix.SockFilter, arch, nr, flags uint32) uint32 {
 
 func TestInstallBlocksDeniedSyscall(t *testing.T) {
 	if os.Getenv("VORA_SECCOMP_TEST_CHILD") == "1" {
-		if err := Install(); err != nil {
+		if err := Install(false); err != nil {
 			t.Fatalf("Install: %v", err)
 		}
 		if _, _, errno := unix.Syscall6(unix.SYS_KEYCTL, 0, 0, 0, 0, 0, 0); errno != unix.EPERM {
@@ -130,5 +130,66 @@ func TestInstallBlocksDeniedSyscall(t *testing.T) {
 	cmd.Env = append(os.Environ(), "VORA_SECCOMP_TEST_CHILD=1")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("filtered child failed: %v\n%s", err, out)
+	}
+}
+
+// The names go to runsc and the numbers into the agent's filter, so a call missing from
+// either one leaves a backend open while the other looks fine.
+func TestFilterDeniesIPCOnlyWhenAsked(t *testing.T) {
+	numbers := map[string]uint32{
+		"shmget": unix.SYS_SHMGET, "semget": unix.SYS_SEMGET, "msgget": unix.SYS_MSGGET,
+		"mq_open": unix.SYS_MQ_OPEN, "mq_unlink": unix.SYS_MQ_UNLINK,
+		"mq_timedsend": unix.SYS_MQ_TIMEDSEND, "mq_timedreceive": unix.SYS_MQ_TIMEDRECEIVE,
+		"mq_notify": unix.SYS_MQ_NOTIFY, "mq_getsetattr": unix.SYS_MQ_GETSETATTR,
+	}
+	if len(IPCSyscalls) != len(numbers) {
+		t.Fatalf("IPCSyscalls = %v, want exactly %d calls", IPCSyscalls, len(numbers))
+	}
+	eperm := unix.SECCOMP_RET_ERRNO | uint32(unix.EPERM)
+	for _, name := range IPCSyscalls {
+		nr, ok := numbers[name]
+		if !ok {
+			t.Fatalf("IPCSyscalls names %q, which this test does not know", name)
+		}
+		if got := evalFilter(Filter(true), auditArch(), nr, 0); got != eperm {
+			t.Errorf("%s with denyIPC: result %#x, want EPERM", name, got)
+		}
+		if got := evalFilter(Filter(false), auditArch(), nr, 0); got != unix.SECCOMP_RET_ALLOW {
+			t.Errorf("%s without denyIPC: result %#x, want allowed", name, got)
+		}
+	}
+	// A sandbox that denies IPC must still deny everything else the base list does.
+	if got := evalFilter(Filter(true), auditArch(), unix.SYS_KEYCTL, 0); got != eperm {
+		t.Errorf("keyctl with denyIPC: result %#x, want EPERM", got)
+	}
+	if got := evalFilter(Filter(true), auditArch(), unix.SYS_GETPID, 0); got != unix.SECCOMP_RET_ALLOW {
+		t.Errorf("getpid with denyIPC: result %#x, want allowed", got)
+	}
+}
+
+// The real kernel, on a key that does not exist, so nothing is ever created here: the
+// filter answers EPERM, and without it the kernel answers ENOENT.
+func TestInstallDeniesIPCOnlyWhenAsked(t *testing.T) {
+	if mode := os.Getenv("VORA_SECCOMP_IPC_CHILD"); mode != "" {
+		deny := mode == "deny"
+		if err := Install(deny); err != nil {
+			t.Fatalf("Install: %v", err)
+		}
+		want := unix.ENOENT
+		if deny {
+			want = unix.EPERM
+		}
+		const noSuchKey = 0x766f7261
+		if _, _, errno := unix.Syscall(unix.SYS_SHMGET, noSuchKey, 0, 0); errno != want {
+			t.Fatalf("shmget errno = %v, want %v", errno, want)
+		}
+		return
+	}
+	for _, mode := range []string{"deny", "allow"} {
+		cmd := exec.Command(os.Args[0], "-test.run=TestInstallDeniesIPCOnlyWhenAsked")
+		cmd.Env = append(os.Environ(), "VORA_SECCOMP_IPC_CHILD="+mode)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s child failed: %v\n%s", mode, err, out)
+		}
 	}
 }

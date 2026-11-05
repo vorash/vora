@@ -7,11 +7,13 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/vorash/vora/internal/runtime"
+	"github.com/vorash/vora/internal/seccomp"
 )
 
 // fakeRunsc stands in for the real `runsc spec`: it records its argv and writes
@@ -108,5 +110,53 @@ func TestWriteBundleUsesVoraInit(t *testing.T) {
 	}
 	if strings.Contains(string(argv), "/bin/sh") {
 		t.Errorf("runsc spec argv still names /bin/sh: %q", argv)
+	}
+}
+
+// The seccomp section is what makes runsc deny IPC, and an ordinary sandbox must not
+// get one: a program there may use SysV IPC.
+func TestWriteBundleDeniesIPCOnlyWhenAsked(t *testing.T) {
+	for _, deny := range []bool{false, true} {
+		dir := t.TempDir()
+		runsc := filepath.Join(dir, "runsc")
+		if err := os.WriteFile(runsc, []byte(fakeRunsc), 0o755); err != nil {
+			t.Fatalf("write fake runsc: %v", err)
+		}
+		bundle := filepath.Join(dir, "bundle")
+		spec := runtime.SandboxSpec{ID: "sbx_test", DenyIPC: deny}
+		if err := writeBundle(runsc, bundle, spec, "", false); err != nil {
+			t.Fatalf("writeBundle: %v", err)
+		}
+		data, err := os.ReadFile(filepath.Join(bundle, "config.json"))
+		if err != nil {
+			t.Fatalf("read config.json: %v", err)
+		}
+		var s specs.Spec
+		if err := json.Unmarshal(data, &s); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if !deny {
+			if s.Linux != nil && s.Linux.Seccomp != nil {
+				t.Fatalf("seccomp section without DenyIPC: %+v", s.Linux.Seccomp)
+			}
+			continue
+		}
+		section := s.Linux.Seccomp
+		if section == nil {
+			t.Fatal("no seccomp section with DenyIPC")
+		}
+		if section.DefaultAction != specs.ActAllow {
+			t.Errorf("default action = %q, want allow", section.DefaultAction)
+		}
+		if len(section.Syscalls) != 1 {
+			t.Fatalf("syscall rules = %+v, want one", section.Syscalls)
+		}
+		rule := section.Syscalls[0]
+		if rule.Action != specs.ActErrno || rule.ErrnoRet == nil || *rule.ErrnoRet != uint(syscall.EPERM) {
+			t.Errorf("rule action = %q errno %v, want EPERM", rule.Action, rule.ErrnoRet)
+		}
+		if !slices.Equal(rule.Names, seccomp.IPCSyscalls) {
+			t.Errorf("rule names = %v, want %v", rule.Names, seccomp.IPCSyscalls)
+		}
 	}
 }

@@ -6,12 +6,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"sort"
+	"syscall"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/vorash/vora/internal/network"
 	"github.com/vorash/vora/internal/runtime"
+	"github.com/vorash/vora/internal/seccomp"
 )
 
 // The sandbox init is Vora's own static binary, exposed by the ipc directory
@@ -89,6 +92,16 @@ func writeBundle(runsc, bundleDir string, spec runtime.SandboxSpec, resolvConf s
 			s.Linux.Namespaces = kept
 		}
 	}
+	if spec.DenyIPC {
+		section, err := ipcSeccomp()
+		if err != nil {
+			return err
+		}
+		if s.Linux == nil {
+			s.Linux = &specs.Linux{}
+		}
+		s.Linux.Seccomp = section
+	}
 
 	out, err := json.MarshalIndent(&s, "", "  ")
 	if err != nil {
@@ -98,6 +111,30 @@ func writeBundle(runsc, bundleDir string, spec runtime.SandboxSpec, resolvConf s
 		return fmt.Errorf("gvisor: write spec: %w", err)
 	}
 	return nil
+}
+
+// ipcSeccomp is the OCI seccomp section that denies seccomp.IPCSyscalls and allows
+// everything else, so a sandbox keeps the syscalls it has without one.
+func ipcSeccomp() (*specs.LinuxSeccomp, error) {
+	var arch specs.Arch
+	switch goruntime.GOARCH {
+	case "amd64":
+		arch = specs.ArchX86_64
+	case "arm64":
+		arch = specs.ArchAARCH64
+	default:
+		return nil, fmt.Errorf("gvisor: no seccomp architecture for %s", goruntime.GOARCH)
+	}
+	eperm := uint(syscall.EPERM)
+	return &specs.LinuxSeccomp{
+		DefaultAction: specs.ActAllow,
+		Architectures: []specs.Arch{arch},
+		Syscalls: []specs.LinuxSyscall{{
+			Names:    seccomp.IPCSyscalls,
+			Action:   specs.ActErrno,
+			ErrnoRet: &eperm,
+		}},
+	}, nil
 }
 
 // runscSpec writes a baseline OCI spec into dir.

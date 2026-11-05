@@ -11,6 +11,8 @@
 // syscalls a sandboxed workload has no legitimate need for and that are common
 // kernel attack surface (ptrace, module loading, the mount and keyring APIs,
 // bpf, kexec, ...).
+//
+// A sandbox that will be reset also denies IPCSyscalls. See its comment.
 package seccomp
 
 import (
@@ -55,9 +57,19 @@ func deniedSyscalls() []uint32 {
 	}
 }
 
-// Filter returns the BPF program to install. It is exported so it can be
-// written to a file and handed to a sandbox that applies its own filter.
-func Filter() []unix.SockFilter {
+// ipcSyscalls is IPCSyscalls as this architecture's numbers.
+func ipcSyscalls() []uint32 {
+	return []uint32{
+		unix.SYS_SHMGET, unix.SYS_SEMGET, unix.SYS_MSGGET,
+		unix.SYS_MQ_OPEN, unix.SYS_MQ_UNLINK, unix.SYS_MQ_TIMEDSEND,
+		unix.SYS_MQ_TIMEDRECEIVE, unix.SYS_MQ_NOTIFY, unix.SYS_MQ_GETSETATTR,
+	}
+}
+
+// Filter returns the BPF program to install, with IPCSyscalls denied as well when
+// denyIPC is set. It is exported so it can be written to a file and handed to a
+// sandbox that applies its own filter.
+func Filter(denyIPC bool) []unix.SockFilter {
 	filter := []unix.SockFilter{
 		// Load seccomp_data.arch.
 		{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 4},
@@ -89,7 +101,11 @@ func Filter() []unix.SockFilter {
 		unix.SockFilter{Code: unix.BPF_RET | unix.BPF_K, K: deny},
 		unix.SockFilter{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 0},
 	)
-	for _, nr := range deniedSyscalls() {
+	denied := deniedSyscalls()
+	if denyIPC {
+		denied = append(denied, ipcSyscalls()...)
+	}
+	for _, nr := range denied {
 		filter = append(filter,
 			// If nr == denied, fall to the EPERM return; otherwise skip it.
 			unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 0, Jf: 1, K: nr},
@@ -102,12 +118,12 @@ func Filter() []unix.SockFilter {
 // Install applies the filter to the current thread and every other thread in
 // the process (and so to every process started afterwards). It fails loudly
 // when seccomp is unavailable rather than leaving the sandbox unfiltered.
-func Install() error {
+func Install(denyIPC bool) error {
 	arch := auditArch()
 	if arch == 0 {
 		return fmt.Errorf("seccomp: unsupported architecture %s", runtime.GOARCH)
 	}
-	filter := Filter()
+	filter := Filter(denyIPC)
 	prog := unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]}
 	// no_new_privs is per thread until TSYNC spreads it, and seccomp refuses a thread
 	// without it, so both calls must run on the same one.

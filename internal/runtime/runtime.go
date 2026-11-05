@@ -96,6 +96,10 @@ type SandboxSpec struct {
 	Env       map[string]string `json:"env,omitempty"`
 	TTL       time.Duration     `json:"ttl_ns,omitempty"`
 	Workspace WorkspaceSpec     `json:"workspace"`
+	// DenyIPC makes SysV IPC and POSIX message queues fail with EPERM inside the
+	// sandbox. A reset cannot clean them, so a sandbox that will be reset needs this.
+	// The default leaves them working, because a program like Postgres depends on them.
+	DenyIPC bool `json:"deny_ipc,omitempty"`
 }
 
 // Validate checks that a spec is structurally usable by any backend. Backends

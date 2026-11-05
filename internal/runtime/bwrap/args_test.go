@@ -2,6 +2,7 @@ package bwrap
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -114,6 +115,32 @@ func TestArgsBindsResolver(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(with, " "), "--ro-bind /state/sbx/resolv.conf /etc/resolv.conf") {
 		t.Fatalf("argv missing the resolv.conf bind: %v", with)
+	}
+}
+
+// The agent reads the choice from its argv, after the `--` that ends bwrap's own flags,
+// and an ordinary sandbox must not get it.
+func TestArgsDeniesIPCOnlyWhenAsked(t *testing.T) {
+	base := BuildOptions{
+		RootfsDir:    "/cache/base/rootfs",
+		WorkspaceDir: "/state/sbx/workspace",
+		IPCDir:       "/state/sbx/ipc",
+	}
+	without, err := Args(base)
+	if err != nil {
+		t.Fatalf("Args: %v", err)
+	}
+	if slices.Contains(without, "--deny-ipc") {
+		t.Fatalf("--deny-ipc without DenyIPC: %v", without)
+	}
+
+	base.DenyIPC = true
+	with, err := Args(base)
+	if err != nil {
+		t.Fatalf("Args: %v", err)
+	}
+	if !slices.Contains(with[slices.Index(with, "--"):], "--deny-ipc") {
+		t.Fatalf("--deny-ipc is not in the agent's argv: %v", with)
 	}
 }
 
