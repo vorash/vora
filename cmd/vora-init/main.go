@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	goruntime "runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -52,6 +53,11 @@ func main() {
 		pause()
 		return
 	}
+
+	// Every thread counts against the sandbox's pids limit, and Go keeps the ones it
+	// starts, up to a number that scales with the host's core count. The agent only
+	// moves bytes and one exec runs at a time, so one P costs it nothing.
+	goruntime.GOMAXPROCS(1)
 
 	socket := flag.String("socket", "/run/vora/control.sock", "control socket path inside the sandbox")
 	grace := flag.Duration("grace", 20*time.Second, "exit if the runner has not contacted us for this long")
