@@ -3,6 +3,7 @@ syntax = "proto3";
 package vora.v1;
 
 import "api/proto/v1/common.proto";
+import "api/proto/v1/pool.proto";
 
 option go_package = "github.com/vorash/vora/api/proto/v1;v1";
 
@@ -27,6 +28,12 @@ service RunnerService {
   rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
   rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
   rpc ForkSnapshot(ForkSnapshotRequest) returns (ForkSnapshotResponse);
+  // Pools. A pool's members are ordinary sandboxes with a pool_id; every
+  // sandbox RPC that would act on one refuses it with FAILED_PRECONDITION.
+  rpc CreatePool(CreatePoolRequest) returns (Pool);
+  rpc GetPool(GetPoolRequest) returns (Pool);
+  rpc DeletePool(DeletePoolRequest) returns (DeletePoolResponse);
+  rpc RunInPool(RunInPoolRequest) returns (stream RunChunk);
 }
 
 message CreateSandboxRequest {
@@ -97,6 +104,9 @@ message SandboxEvent {
 
 message GetSandboxExecsRequest {
   string sandbox_id = 1;
+  // pool_id, when set, requires the sandbox's record to name this pool, so a
+  // pooled sandbox's trail is readable only through its pool.
+  string pool_id = 2;
 }
 
 message GetSandboxExecsResponse {
@@ -130,6 +140,10 @@ message SandboxExec {
   // cgroup's counters.
   int64 oom_kills = 16;
   int64 pids_limit_hits = 17;
+  // pool_id and sandbox_run are set for a pool run: sandbox_run marks run
+  // boundaries inside a reused sandbox (1-based).
+  string pool_id = 18;
+  uint32 sandbox_run = 19;
 }
 
 message GetSandboxEgressRequest {

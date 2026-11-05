@@ -679,8 +679,11 @@ func (x *SandboxEvent) GetTimestampUnixMs() int64 {
 }
 
 type GetSandboxExecsRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SandboxId     string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	SandboxId string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
+	// pool_id, when set, requires the sandbox's record to name this pool, so a
+	// pooled sandbox's trail is readable only through its pool.
+	PoolId        string `protobuf:"bytes,2,opt,name=pool_id,json=poolId,proto3" json:"pool_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -718,6 +721,13 @@ func (*GetSandboxExecsRequest) Descriptor() ([]byte, []int) {
 func (x *GetSandboxExecsRequest) GetSandboxId() string {
 	if x != nil {
 		return x.SandboxId
+	}
+	return ""
+}
+
+func (x *GetSandboxExecsRequest) GetPoolId() string {
+	if x != nil {
+		return x.PoolId
 	}
 	return ""
 }
@@ -794,6 +804,10 @@ type SandboxExec struct {
 	// cgroup's counters.
 	OomKills      int64 `protobuf:"varint,16,opt,name=oom_kills,json=oomKills,proto3" json:"oom_kills,omitempty"`
 	PidsLimitHits int64 `protobuf:"varint,17,opt,name=pids_limit_hits,json=pidsLimitHits,proto3" json:"pids_limit_hits,omitempty"`
+	// pool_id and sandbox_run are set for a pool run: sandbox_run marks run
+	// boundaries inside a reused sandbox (1-based).
+	PoolId        string `protobuf:"bytes,18,opt,name=pool_id,json=poolId,proto3" json:"pool_id,omitempty"`
+	SandboxRun    uint32 `protobuf:"varint,19,opt,name=sandbox_run,json=sandboxRun,proto3" json:"sandbox_run,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -943,6 +957,20 @@ func (x *SandboxExec) GetOomKills() int64 {
 func (x *SandboxExec) GetPidsLimitHits() int64 {
 	if x != nil {
 		return x.PidsLimitHits
+	}
+	return 0
+}
+
+func (x *SandboxExec) GetPoolId() string {
+	if x != nil {
+		return x.PoolId
+	}
+	return ""
+}
+
+func (x *SandboxExec) GetSandboxRun() uint32 {
+	if x != nil {
+		return x.SandboxRun
 	}
 	return 0
 }
@@ -1940,7 +1968,7 @@ var File_api_proto_v1_runner_proto protoreflect.FileDescriptor
 
 const file_api_proto_v1_runner_proto_rawDesc = "" +
 	"\n" +
-	"\x19api/proto/v1/runner.proto\x12\avora.v1\x1a\x19api/proto/v1/common.proto\"\x82\x01\n" +
+	"\x19api/proto/v1/runner.proto\x12\avora.v1\x1a\x19api/proto/v1/common.proto\x1a\x17api/proto/v1/pool.proto\"\x82\x01\n" +
 	"\x14CreateSandboxRequest\x12(\n" +
 	"\x04spec\x18\x01 \x01(\v2\x14.vora.v1.SandboxSpecR\x04spec\x12@\n" +
 	"\x0ebroker_secrets\x18\x02 \x03(\v2\x19.vora.v1.BrokerCredentialR\rbrokerSecrets\"C\n" +
@@ -1983,12 +2011,13 @@ const file_api_proto_v1_runner_proto_rawDesc = "" +
 	"\x02to\x18\x03 \x01(\tR\x02to\x12\x16\n" +
 	"\x06reason\x18\x04 \x01(\tR\x06reason\x12\x1b\n" +
 	"\trunner_id\x18\x05 \x01(\tR\brunnerId\x12*\n" +
-	"\x11timestamp_unix_ms\x18\x06 \x01(\x03R\x0ftimestampUnixMs\"7\n" +
+	"\x11timestamp_unix_ms\x18\x06 \x01(\x03R\x0ftimestampUnixMs\"P\n" +
 	"\x16GetSandboxExecsRequest\x12\x1d\n" +
 	"\n" +
-	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\"E\n" +
+	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12\x17\n" +
+	"\apool_id\x18\x02 \x01(\tR\x06poolId\"E\n" +
 	"\x17GetSandboxExecsResponse\x12*\n" +
-	"\x05execs\x18\x01 \x03(\v2\x14.vora.v1.SandboxExecR\x05execs\"\xf8\x04\n" +
+	"\x05execs\x18\x01 \x03(\v2\x14.vora.v1.SandboxExecR\x05execs\"\xb2\x05\n" +
 	"\vSandboxExec\x12!\n" +
 	"\fexecution_id\x18\x01 \x01(\tR\vexecutionId\x12\x18\n" +
 	"\acommand\x18\x02 \x01(\tR\acommand\x12\x12\n" +
@@ -2008,7 +2037,10 @@ const file_api_proto_v1_runner_proto_rawDesc = "" +
 	"\regress_denied\x18\x0e \x01(\x03R\fegressDenied\x12>\n" +
 	"\x11memory_peak_scope\x18\x0f \x01(\x0e2\x12.vora.v1.PeakScopeR\x0fmemoryPeakScope\x12\x1b\n" +
 	"\toom_kills\x18\x10 \x01(\x03R\boomKills\x12&\n" +
-	"\x0fpids_limit_hits\x18\x11 \x01(\x03R\rpidsLimitHits\"8\n" +
+	"\x0fpids_limit_hits\x18\x11 \x01(\x03R\rpidsLimitHits\x12\x17\n" +
+	"\apool_id\x18\x12 \x01(\tR\x06poolId\x12\x1f\n" +
+	"\vsandbox_run\x18\x13 \x01(\rR\n" +
+	"sandboxRun\"8\n" +
 	"\x17GetSandboxEgressRequest\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\"L\n" +
@@ -2074,7 +2106,7 @@ const file_api_proto_v1_runner_proto_rawDesc = "" +
 	"\x0ebroker_secrets\x18\x02 \x03(\v2\x19.vora.v1.BrokerCredentialR\rbrokerSecrets\x12$\n" +
 	"\x05actor\x18\x03 \x01(\v2\x0e.vora.v1.ActorR\x05actor\"B\n" +
 	"\x14ForkSnapshotResponse\x12*\n" +
-	"\asandbox\x18\x01 \x01(\v2\x10.vora.v1.SandboxR\asandbox2\x81\v\n" +
+	"\asandbox\x18\x01 \x01(\v2\x10.vora.v1.SandboxR\asandbox2\xf1\f\n" +
 	"\rRunnerService\x12N\n" +
 	"\rCreateSandbox\x12\x1d.vora.v1.CreateSandboxRequest\x1a\x1e.vora.v1.CreateSandboxResponse\x12:\n" +
 	"\n" +
@@ -2094,7 +2126,13 @@ const file_api_proto_v1_runner_proto_rawDesc = "" +
 	"\vGetSnapshot\x12\x1b.vora.v1.GetSnapshotRequest\x1a\x11.vora.v1.Snapshot\x12N\n" +
 	"\rListSnapshots\x12\x1d.vora.v1.ListSnapshotsRequest\x1a\x1e.vora.v1.ListSnapshotsResponse\x12Q\n" +
 	"\x0eDeleteSnapshot\x12\x1e.vora.v1.DeleteSnapshotRequest\x1a\x1f.vora.v1.DeleteSnapshotResponse\x12K\n" +
-	"\fForkSnapshot\x12\x1c.vora.v1.ForkSnapshotRequest\x1a\x1d.vora.v1.ForkSnapshotResponseB(Z&github.com/vorash/vora/api/proto/v1;v1b\x06proto3"
+	"\fForkSnapshot\x12\x1c.vora.v1.ForkSnapshotRequest\x1a\x1d.vora.v1.ForkSnapshotResponse\x127\n" +
+	"\n" +
+	"CreatePool\x12\x1a.vora.v1.CreatePoolRequest\x1a\r.vora.v1.Pool\x121\n" +
+	"\aGetPool\x12\x17.vora.v1.GetPoolRequest\x1a\r.vora.v1.Pool\x12E\n" +
+	"\n" +
+	"DeletePool\x12\x1a.vora.v1.DeletePoolRequest\x1a\x1b.vora.v1.DeletePoolResponse\x12;\n" +
+	"\tRunInPool\x12\x19.vora.v1.RunInPoolRequest\x1a\x11.vora.v1.RunChunk0\x01B(Z&github.com/vorash/vora/api/proto/v1;v1b\x06proto3"
 
 var (
 	file_api_proto_v1_runner_proto_rawDescOnce sync.Once
@@ -2153,8 +2191,15 @@ var file_api_proto_v1_runner_proto_goTypes = []any{
 	(*ExecRequest)(nil),              // 40: vora.v1.ExecRequest
 	(ExitReason)(0),                  // 41: vora.v1.ExitReason
 	(PeakScope)(0),                   // 42: vora.v1.PeakScope
-	(*ExecChunk)(nil),                // 43: vora.v1.ExecChunk
-	(*Stats)(nil),                    // 44: vora.v1.Stats
+	(*CreatePoolRequest)(nil),        // 43: vora.v1.CreatePoolRequest
+	(*GetPoolRequest)(nil),           // 44: vora.v1.GetPoolRequest
+	(*DeletePoolRequest)(nil),        // 45: vora.v1.DeletePoolRequest
+	(*RunInPoolRequest)(nil),         // 46: vora.v1.RunInPoolRequest
+	(*ExecChunk)(nil),                // 47: vora.v1.ExecChunk
+	(*Stats)(nil),                    // 48: vora.v1.Stats
+	(*Pool)(nil),                     // 49: vora.v1.Pool
+	(*DeletePoolResponse)(nil),       // 50: vora.v1.DeletePoolResponse
+	(*RunChunk)(nil),                 // 51: vora.v1.RunChunk
 }
 var file_api_proto_v1_runner_proto_depIdxs = []int32{
 	35, // 0: vora.v1.CreateSandboxRequest.spec:type_name -> vora.v1.SandboxSpec
@@ -2195,26 +2240,34 @@ var file_api_proto_v1_runner_proto_depIdxs = []int32{
 	29, // 35: vora.v1.RunnerService.ListSnapshots:input_type -> vora.v1.ListSnapshotsRequest
 	31, // 36: vora.v1.RunnerService.DeleteSnapshot:input_type -> vora.v1.DeleteSnapshotRequest
 	33, // 37: vora.v1.RunnerService.ForkSnapshot:input_type -> vora.v1.ForkSnapshotRequest
-	1,  // 38: vora.v1.RunnerService.CreateSandbox:output_type -> vora.v1.CreateSandboxResponse
-	37, // 39: vora.v1.RunnerService.GetSandbox:output_type -> vora.v1.Sandbox
-	4,  // 40: vora.v1.RunnerService.ListSandboxes:output_type -> vora.v1.ListSandboxesResponse
-	37, // 41: vora.v1.RunnerService.StartSandbox:output_type -> vora.v1.Sandbox
-	43, // 42: vora.v1.RunnerService.ExecSandbox:output_type -> vora.v1.ExecChunk
-	8,  // 43: vora.v1.RunnerService.SignalSandbox:output_type -> vora.v1.SignalSandboxResponse
-	44, // 44: vora.v1.RunnerService.StatsSandbox:output_type -> vora.v1.Stats
-	11, // 45: vora.v1.RunnerService.GetSandboxEvents:output_type -> vora.v1.GetSandboxEventsResponse
-	14, // 46: vora.v1.RunnerService.GetSandboxExecs:output_type -> vora.v1.GetSandboxExecsResponse
-	17, // 47: vora.v1.RunnerService.GetSandboxEgress:output_type -> vora.v1.GetSandboxEgressResponse
-	20, // 48: vora.v1.RunnerService.GetSandboxFile:output_type -> vora.v1.GetSandboxFileResponse
-	22, // 49: vora.v1.RunnerService.PutSandboxFile:output_type -> vora.v1.PutSandboxFileResponse
-	24, // 50: vora.v1.RunnerService.DestroySandbox:output_type -> vora.v1.DestroySandboxResponse
-	27, // 51: vora.v1.RunnerService.SnapshotSandbox:output_type -> vora.v1.SnapshotSandboxResponse
-	25, // 52: vora.v1.RunnerService.GetSnapshot:output_type -> vora.v1.Snapshot
-	30, // 53: vora.v1.RunnerService.ListSnapshots:output_type -> vora.v1.ListSnapshotsResponse
-	32, // 54: vora.v1.RunnerService.DeleteSnapshot:output_type -> vora.v1.DeleteSnapshotResponse
-	34, // 55: vora.v1.RunnerService.ForkSnapshot:output_type -> vora.v1.ForkSnapshotResponse
-	38, // [38:56] is the sub-list for method output_type
-	20, // [20:38] is the sub-list for method input_type
+	43, // 38: vora.v1.RunnerService.CreatePool:input_type -> vora.v1.CreatePoolRequest
+	44, // 39: vora.v1.RunnerService.GetPool:input_type -> vora.v1.GetPoolRequest
+	45, // 40: vora.v1.RunnerService.DeletePool:input_type -> vora.v1.DeletePoolRequest
+	46, // 41: vora.v1.RunnerService.RunInPool:input_type -> vora.v1.RunInPoolRequest
+	1,  // 42: vora.v1.RunnerService.CreateSandbox:output_type -> vora.v1.CreateSandboxResponse
+	37, // 43: vora.v1.RunnerService.GetSandbox:output_type -> vora.v1.Sandbox
+	4,  // 44: vora.v1.RunnerService.ListSandboxes:output_type -> vora.v1.ListSandboxesResponse
+	37, // 45: vora.v1.RunnerService.StartSandbox:output_type -> vora.v1.Sandbox
+	47, // 46: vora.v1.RunnerService.ExecSandbox:output_type -> vora.v1.ExecChunk
+	8,  // 47: vora.v1.RunnerService.SignalSandbox:output_type -> vora.v1.SignalSandboxResponse
+	48, // 48: vora.v1.RunnerService.StatsSandbox:output_type -> vora.v1.Stats
+	11, // 49: vora.v1.RunnerService.GetSandboxEvents:output_type -> vora.v1.GetSandboxEventsResponse
+	14, // 50: vora.v1.RunnerService.GetSandboxExecs:output_type -> vora.v1.GetSandboxExecsResponse
+	17, // 51: vora.v1.RunnerService.GetSandboxEgress:output_type -> vora.v1.GetSandboxEgressResponse
+	20, // 52: vora.v1.RunnerService.GetSandboxFile:output_type -> vora.v1.GetSandboxFileResponse
+	22, // 53: vora.v1.RunnerService.PutSandboxFile:output_type -> vora.v1.PutSandboxFileResponse
+	24, // 54: vora.v1.RunnerService.DestroySandbox:output_type -> vora.v1.DestroySandboxResponse
+	27, // 55: vora.v1.RunnerService.SnapshotSandbox:output_type -> vora.v1.SnapshotSandboxResponse
+	25, // 56: vora.v1.RunnerService.GetSnapshot:output_type -> vora.v1.Snapshot
+	30, // 57: vora.v1.RunnerService.ListSnapshots:output_type -> vora.v1.ListSnapshotsResponse
+	32, // 58: vora.v1.RunnerService.DeleteSnapshot:output_type -> vora.v1.DeleteSnapshotResponse
+	34, // 59: vora.v1.RunnerService.ForkSnapshot:output_type -> vora.v1.ForkSnapshotResponse
+	49, // 60: vora.v1.RunnerService.CreatePool:output_type -> vora.v1.Pool
+	49, // 61: vora.v1.RunnerService.GetPool:output_type -> vora.v1.Pool
+	50, // 62: vora.v1.RunnerService.DeletePool:output_type -> vora.v1.DeletePoolResponse
+	51, // 63: vora.v1.RunnerService.RunInPool:output_type -> vora.v1.RunChunk
+	42, // [42:64] is the sub-list for method output_type
+	20, // [20:42] is the sub-list for method input_type
 	20, // [20:20] is the sub-list for extension type_name
 	20, // [20:20] is the sub-list for extension extendee
 	0,  // [0:20] is the sub-list for field type_name
@@ -2226,6 +2279,7 @@ func file_api_proto_v1_runner_proto_init() {
 		return
 	}
 	file_api_proto_v1_common_proto_init()
+	file_api_proto_v1_pool_proto_init()
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
