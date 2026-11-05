@@ -351,6 +351,7 @@ for d, _, names in os.walk("/proc/sys"):
 print("checked", checked)
 print("writable", writable)
 print("msgmax", open("/proc/sys/kernel/msgmax").read().strip())
+print("binfmt", os.listdir("/proc/sys/fs/binfmt_misc") if os.path.isdir("/proc/sys/fs/binfmt_misc") else [])
 `)
 		if code != 0 {
 			t.Fatalf("exit %d:\n%s%s", code, out, errOut)
@@ -361,6 +362,10 @@ print("msgmax", open("/proc/sys/kernel/msgmax").read().strip())
 		}
 		if strings.Contains(out, "checked 0") {
 			t.Fatal("/proc/sys is empty, so this proved nothing")
+		}
+		// The bind that makes /proc/sys read-only comes from the host's /proc.
+		if !strings.Contains(out, "binfmt []") {
+			t.Fatalf("the host's binfmt_misc entries are visible:\n%s", out)
 		}
 		// Hiding /proc/sys would pass the check above and break programs that read it.
 		if !strings.Contains(out, "msgmax ") {
