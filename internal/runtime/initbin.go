@@ -47,7 +47,7 @@ func InstallInitBinary(src, dst string) error {
 		return fmt.Errorf("install init binary: %w", err)
 	}
 	tmp := f.Name()
-	defer os.Remove(tmp)
+	defer func() { _ = os.Remove(tmp) }()
 	_, err = f.Write(data)
 	if err == nil {
 		err = f.Chmod(0o755)
