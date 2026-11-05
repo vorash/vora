@@ -51,7 +51,7 @@ type streamFixture struct {
 	dials *atomic.Int32
 }
 
-func newStreamFixture(t *testing.T, runner *streamRunner, writeTimeout time.Duration) *streamFixture {
+func newStreamFixture(t *testing.T, runner v1.RunnerServiceServer, writeTimeout time.Duration) *streamFixture {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

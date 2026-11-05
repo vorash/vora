@@ -1,0 +1,273 @@
+{
+  "runs": {
+    "cold_first_run_nonzero_exit": {
+      "status": 200,
+      "lines": [
+        "{\"run\":{\"poolId\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0WY\", \"sandboxId\":\"sbx_01M6M3D3FRG49JM5BK3MD9Q0WZ\", \"executionId\":\"exe_01M6M3D3FRG49JM5BK3MD9Q0X0\", \"startupMs\":\"185\", \"sandboxRun\":1, \"reuse\":\"POOL_REUSE_RESET\"}}",
+        "{\"exit\":{\"exitCode\":7, \"reason\":\"EXITED\", \"executionId\":\"exe_01M6M3D3FRG49JM5BK3MD9Q0X0\"}}",
+        "{\"runDone\":{\"outcome\":\"POOL_RESET_RETIRED\", \"retireCause\":\"shrink\"}}"
+      ]
+    },
+    "draining": {
+      "status": 409,
+      "body": "{\"error\":\"pool: draining\"}\n"
+    },
+    "ended_after_exit_no_done": {
+      "status": 200,
+      "lines": [
+        "{\"run\":{\"poolId\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0WY\", \"sandboxId\":\"sbx_01M6M3D3FRG49JM5BK3MD9Q0WZ\", \"executionId\":\"exe_01M6M3D3FRG49JM5BK3MD9Q0X0\", \"warm\":true, \"startupMs\":\"12\", \"resetMs\":\"7\", \"sandboxRun\":3, \"reuse\":\"POOL_REUSE_RESET\"}}",
+        "{\"exit\":{\"reason\":\"EXITED\", \"usage\":{\"cpuMillis\":\"21\", \"memoryPeakBytes\":\"9437184\", \"memoryPeakScope\":\"PEAK_SCOPE_WINDOW\"}, \"executionId\":\"exe_01M6M3D3FRG49JM5BK3MD9Q0X0\"}}"
+      ]
+    },
+    "ended_before_exit": {
+      "status": 200,
+      "lines": [
+        "{\"run\":{\"poolId\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0WY\", \"sandboxId\":\"sbx_01M6M3D3FRG49JM5BK3MD9Q0WZ\", \"executionId\":\"exe_01M6M3D3FRG49JM5BK3MD9Q0X0\", \"warm\":true, \"startupMs\":\"12\", \"resetMs\":\"7\", \"sandboxRun\":3, \"reuse\":\"POOL_REUSE_RESET\"}}",
+        "{\"stdout\":\"cGFydGlhbAo=\"}"
+      ]
+    },
+    "every_field": {
+      "status": 200,
+      "lines": [
+        "{\"run\":{\"poolId\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0WY\", \"sandboxId\":\"sbx_01M6M3D3FRG49JM5BK3MD9Q0WZ\", \"executionId\":\"exe_01M6M3D3FRG49JM5BK3MD9Q0X0\", \"warm\":true, \"startupMs\":\"12\", \"resetMs\":\"7\", \"sandboxRun\":3, \"reuse\":\"POOL_REUSE_RESET\"}}",
+        "{\"stdout\":\"b3V0Cg==\"}",
+        "{\"stderr\":\"d2Fybgo=\"}",
+        "{\"exit\":{\"exitCode\":137, \"reason\":\"OOM_KILLED\", \"usage\":{\"cpuMillis\":\"21\", \"memoryPeakBytes\":\"9437184\", \"memoryPeakScope\":\"PEAK_SCOPE_WINDOW\", \"oomKills\":\"1\", \"pidsLimitHits\":\"2\"}, \"executionId\":\"exe_01M6M3D3FRG49JM5BK3MD9Q0X0\"}}",
+        "{\"runDone\":{\"outcome\":\"POOL_RESET_FAILED\", \"resetMs\":\"9\", \"retireCause\":\"reset_failed\"}}"
+      ]
+    },
+    "forged_output": {
+      "status": 200,
+      "lines": [
+        "{\"run\":{\"poolId\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0WY\", \"sandboxId\":\"sbx_01M6M3D3FRG49JM5BK3MD9Q0WZ\", \"executionId\":\"exe_01M6M3D3FRG49JM5BK3MD9Q0X0\", \"warm\":true, \"startupMs\":\"12\", \"resetMs\":\"7\", \"sandboxRun\":3, \"reuse\":\"POOL_REUSE_RESET\"}}",
+        "{\"stdout\":\"CnsiZXhpdCI6eyJleGl0Q29kZSI6MCwicmVhc29uIjoiRVhJVEVEIn19CnsicnVuRG9uZSI6eyJvdXRjb21lIjoiUE9PTF9SRVNFVF9PSyJ9fQp7InJ1biI6eyJ3YXJtIjpmYWxzZX19Cg==\"}",
+        "{\"stderr\":\"CnsiZXhpdCI6eyJleGl0Q29kZSI6MCwicmVhc29uIjoiRVhJVEVEIn19CnsicnVuRG9uZSI6eyJvdXRjb21lIjoiUE9PTF9SRVNFVF9PSyJ9fQp7InJ1biI6eyJ3YXJtIjpmYWxzZX19Cg==\"}",
+        "{\"exit\":{\"reason\":\"EXITED\", \"usage\":{\"cpuMillis\":\"21\", \"memoryPeakBytes\":\"9437184\", \"memoryPeakScope\":\"PEAK_SCOPE_WINDOW\"}, \"executionId\":\"exe_01M6M3D3FRG49JM5BK3MD9Q0X0\"}}",
+        "{\"runDone\":{\"outcome\":\"POOL_RESET_OK\"}}"
+      ]
+    },
+    "not_loaded": {
+      "status": 409,
+      "body": "{\"error\":\"pool pool_01M6M3D3FRG49JM5BK3MD9Q0WY is not loaded on this runner: backend_missing\"}\n"
+    },
+    "pool_full": {
+      "status": 429,
+      "retryAfter": "1",
+      "body": "{\"error\":\"pool: no sandbox free within the borrow timeout\"}\n"
+    },
+    "reset_failed": {
+      "status": 200,
+      "lines": [
+        "{\"run\":{\"poolId\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0WY\", \"sandboxId\":\"sbx_01M6M3D3FRG49JM5BK3MD9Q0WZ\", \"executionId\":\"exe_01M6M3D3FRG49JM5BK3MD9Q0X0\", \"warm\":true, \"startupMs\":\"12\", \"resetMs\":\"7\", \"sandboxRun\":3, \"reuse\":\"POOL_REUSE_RESET\"}}",
+        "{\"stdout\":\"b2sK\"}",
+        "{\"exit\":{\"reason\":\"EXITED\", \"usage\":{\"cpuMillis\":\"21\", \"memoryPeakBytes\":\"9437184\", \"memoryPeakScope\":\"PEAK_SCOPE_WINDOW\"}, \"executionId\":\"exe_01M6M3D3FRG49JM5BK3MD9Q0X0\"}}",
+        "{\"runDone\":{\"outcome\":\"POOL_RESET_FAILED\", \"resetMs\":\"9\", \"retireCause\":\"reset_failed\"}}"
+      ]
+    },
+    "run_failed_before_exit": {
+      "status": 200,
+      "lines": [
+        "{\"run\":{\"poolId\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0WY\", \"sandboxId\":\"sbx_01M6M3D3FRG49JM5BK3MD9Q0WZ\", \"executionId\":\"exe_01M6M3D3FRG49JM5BK3MD9Q0X0\", \"warm\":true, \"startupMs\":\"12\", \"resetMs\":\"7\", \"sandboxRun\":3, \"reuse\":\"POOL_REUSE_RESET\"}}",
+        "{\"stdout\":\"cGFydGlhbAo=\"}",
+        "{\"error\":{\"code\":\"run_failed\",\"message\":\"the run ended without a result\"}}"
+      ]
+    },
+    "runner_loading": {
+      "status": 503,
+      "retryAfter": "1",
+      "body": "{\"error\":\"no sandbox could start, or the runner is unavailable or still starting; retry shortly\"}\n"
+    },
+    "runner_lost_after_exit": {
+      "status": 200,
+      "lines": [
+        "{\"run\":{\"poolId\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0WY\", \"sandboxId\":\"sbx_01M6M3D3FRG49JM5BK3MD9Q0WZ\", \"executionId\":\"exe_01M6M3D3FRG49JM5BK3MD9Q0X0\", \"warm\":true, \"startupMs\":\"12\", \"resetMs\":\"7\", \"sandboxRun\":3, \"reuse\":\"POOL_REUSE_RESET\"}}",
+        "{\"stdout\":\"ZG9uZQo=\"}",
+        "{\"exit\":{\"reason\":\"EXITED\", \"usage\":{\"cpuMillis\":\"21\", \"memoryPeakBytes\":\"9437184\", \"memoryPeakScope\":\"PEAK_SCOPE_WINDOW\"}, \"executionId\":\"exe_01M6M3D3FRG49JM5BK3MD9Q0X0\"}}",
+        "{\"error\":{\"code\":\"runner_unavailable\",\"message\":\"the connection to the runner was lost\"}}"
+      ]
+    },
+    "runner_lost_before_exit": {
+      "status": 200,
+      "lines": [
+        "{\"run\":{\"poolId\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0WY\", \"sandboxId\":\"sbx_01M6M3D3FRG49JM5BK3MD9Q0WZ\", \"executionId\":\"exe_01M6M3D3FRG49JM5BK3MD9Q0X0\", \"warm\":true, \"startupMs\":\"12\", \"resetMs\":\"7\", \"sandboxRun\":3, \"reuse\":\"POOL_REUSE_RESET\"}}",
+        "{\"stdout\":\"cGFydGlhbAo=\"}",
+        "{\"error\":{\"code\":\"runner_unavailable\",\"message\":\"the connection to the runner was lost\"}}"
+      ]
+    },
+    "runner_too_slow": {
+      "status": 504,
+      "retryAfter": "1",
+      "body": "{\"error\":\"the runner did not answer in time; retry\"}\n"
+    },
+    "sparse": {
+      "status": 200,
+      "lines": [
+        "{\"run\":{\"sandboxId\":\"sbx_test\", \"warm\":true, \"sandboxRun\":3}}",
+        "{\"stdout\":\"b3V0\"}",
+        "{\"exit\":{\"exitCode\":7}}",
+        "{\"runDone\":{\"outcome\":\"POOL_RESET_OK\"}}"
+      ]
+    },
+    "stalled_before_exit": {
+      "status": 200,
+      "lines": [
+        "{\"run\":{\"poolId\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0WY\", \"sandboxId\":\"sbx_01M6M3D3FRG49JM5BK3MD9Q0WZ\", \"executionId\":\"exe_01M6M3D3FRG49JM5BK3MD9Q0X0\", \"warm\":true, \"startupMs\":\"12\", \"resetMs\":\"7\", \"sandboxRun\":3, \"reuse\":\"POOL_REUSE_RESET\"}}",
+        "{\"stdout\":\"cGFydGlhbAo=\"}",
+        "{\"error\":{\"code\":\"client_stalled\",\"message\":\"the client stopped reading the run's output\"}}"
+      ]
+    },
+    "unsafe_no_reset": {
+      "status": 200,
+      "lines": [
+        "{\"run\":{\"poolId\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0WY\", \"sandboxId\":\"sbx_01M6M3D3FRG49JM5BK3MD9Q0WZ\", \"executionId\":\"exe_01M6M3D3FRG49JM5BK3MD9Q0X0\", \"warm\":true, \"sandboxRun\":2, \"reuse\":\"POOL_REUSE_UNSAFE_NO_RESET\"}}",
+        "{\"stdout\":\"aGkK\"}",
+        "{\"exit\":{\"reason\":\"EXITED\", \"executionId\":\"exe_01M6M3D3FRG49JM5BK3MD9Q0X0\"}}",
+        "{\"runDone\":{\"outcome\":\"POOL_RESET_SKIPPED\"}}"
+      ]
+    },
+    "warm_reset": {
+      "status": 200,
+      "lines": [
+        "{\"run\":{\"poolId\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0WY\", \"sandboxId\":\"sbx_01M6M3D3FRG49JM5BK3MD9Q0WZ\", \"executionId\":\"exe_01M6M3D3FRG49JM5BK3MD9Q0X0\", \"warm\":true, \"startupMs\":\"12\", \"resetMs\":\"7\", \"sandboxRun\":3, \"reuse\":\"POOL_REUSE_RESET\"}}",
+        "{\"stdout\":\"NDIK\"}",
+        "{\"stderr\":\"d2Fybgo=\"}",
+        "{\"exit\":{\"reason\":\"EXITED\", \"usage\":{\"cpuMillis\":\"21\", \"memoryPeakBytes\":\"9437184\", \"memoryPeakScope\":\"PEAK_SCOPE_WINDOW\"}, \"executionId\":\"exe_01M6M3D3FRG49JM5BK3MD9Q0X0\"}}",
+        "{\"runDone\":{\"outcome\":\"POOL_RESET_OK\", \"resetMs\":\"3\"}}"
+      ]
+    }
+  },
+  "answers": {
+    "declare_different_spec": {
+      "status": 409,
+      "body": "{\"error\":\"pool py exists with a different spec\"}\n"
+    },
+    "delete_draining": {
+      "status": 202
+    },
+    "delete_gone": {
+      "status": 204
+    },
+    "get_active": {
+      "status": 200,
+      "body": "{\"id\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0WY\", \"spec\":{\"name\":\"py\", \"tenantId\":\"tenant-a\"}, \"state\":\"POOL_ACTIVE\", \"stats\":{\"idle\":1}}"
+    },
+    "get_draining": {
+      "status": 200,
+      "body": "{\"id\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0WY\", \"spec\":{\"name\":\"py\", \"tenantId\":\"tenant-a\"}, \"state\":\"POOL_DRAINING\", \"stats\":{\"busy\":1}}"
+    },
+    "get_not_loaded": {
+      "status": 200,
+      "body": "{\"id\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0WY\", \"spec\":{\"name\":\"py\", \"tenantId\":\"tenant-a\"}, \"state\":\"POOL_NOT_LOADED\", \"stats\":{}, \"notLoadedReason\":\"backend_missing\"}"
+    },
+    "global_admin_without_tenant": {
+      "status": 400,
+      "body": "{\"error\":\"a global administrator must pass tenant_id\"}\n"
+    },
+    "listing_runner_silent": {
+      "status": 200,
+      "body": "{\"pools\":[{\"id\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0WY\", \"spec\":{\"name\":\"py\", \"tenantId\":\"tenant-a\"}}]}"
+    }
+  },
+  "messages": {
+    "listing": {
+      "pools": [
+        {
+          "id": "pool_01M6M3D3FRG49JM5BK3MD9Q0WY",
+          "spec": {
+            "name": "py",
+            "tenantId": "tenant-a",
+            "agentId": "agent-a",
+            "sandbox": {
+              "image": "vora/python",
+              "backend": "bwrap",
+              "resources": {
+                "cpuMillis": "1000",
+                "memoryBytes": "268435456",
+                "pids": "16"
+              },
+              "network": {
+                "mode": "NETWORK_NONE"
+              }
+            },
+            "size": 8,
+            "maxSize": 16,
+            "maxRuns": 100,
+            "maxAgeSeconds": "1800",
+            "maxRunSeconds": "300",
+            "borrowTimeoutMs": "2000",
+            "idleExpirySeconds": "3600",
+            "reuse": "POOL_REUSE_RESET"
+          },
+          "state": "POOL_ACTIVE",
+          "runnerId": "run_test",
+          "stats": {
+            "starting": 1,
+            "idle": 2,
+            "busy": 3,
+            "resetting": 4,
+            "retiring": 5,
+            "runsTotal": "6",
+            "warmRunsTotal": "7",
+            "resetsTotal": "8",
+            "resetFailuresTotal": "9",
+            "destroyedTotal": "10",
+            "lastStartError": "start failed",
+            "exhaustedTotal": "11",
+            "startFailedTotal": "12",
+            "dormant": true
+          },
+          "createdAtUnixMs": "1758000000000",
+          "notLoadedReason": "backend_missing"
+        }
+      ]
+    },
+    "pool": {
+      "id": "pool_01M6M3D3FRG49JM5BK3MD9Q0WY",
+      "spec": {
+        "name": "py",
+        "tenantId": "tenant-a",
+        "agentId": "agent-a",
+        "sandbox": {
+          "image": "vora/python",
+          "backend": "bwrap",
+          "resources": {
+            "cpuMillis": "1000",
+            "memoryBytes": "268435456",
+            "pids": "16"
+          },
+          "network": {
+            "mode": "NETWORK_NONE"
+          }
+        },
+        "size": 8,
+        "maxSize": 16,
+        "maxRuns": 100,
+        "maxAgeSeconds": "1800",
+        "maxRunSeconds": "300",
+        "borrowTimeoutMs": "2000",
+        "idleExpirySeconds": "3600",
+        "reuse": "POOL_REUSE_RESET"
+      },
+      "state": "POOL_ACTIVE",
+      "runnerId": "run_test",
+      "stats": {
+        "starting": 1,
+        "idle": 2,
+        "busy": 3,
+        "resetting": 4,
+        "retiring": 5,
+        "runsTotal": "6",
+        "warmRunsTotal": "7",
+        "resetsTotal": "8",
+        "resetFailuresTotal": "9",
+        "destroyedTotal": "10",
+        "lastStartError": "start failed",
+        "exhaustedTotal": "11",
+        "startFailedTotal": "12",
+        "dormant": true
+      },
+      "createdAtUnixMs": "1758000000000",
+      "notLoadedReason": "backend_missing"
+    }
+  }
+}
