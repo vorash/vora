@@ -533,10 +533,17 @@ func TestReaperHandsAnExpiredMemberToItsPool(t *testing.T) {
 	if err := h.s.ReapExpired(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, func() bool { return h.backend.isGone(member.ID) }, "the pool to retire the expired member")
+	// The backend is gone before the record says so, so wait for the record itself.
+	waitFor(t, func() bool {
+		rec, err := h.s.store.Load(member.ID)
+		return err == nil && rec.State.Terminal()
+	}, "the pool to retire the expired member")
 	rec, _ := h.s.store.Load(member.ID)
 	if rec.State != sandbox.StateDestroyed {
 		t.Fatalf("expired member is %s, want DESTROYED through its pool, not EXPIRED by the reaper", rec.State)
+	}
+	if !h.backend.isGone(member.ID) {
+		t.Fatal("the record says DESTROYED, but the backend still has the sandbox")
 	}
 	waitFor(t, func() bool {
 		st := h.get(p.GetId()).GetStats()
