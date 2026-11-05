@@ -827,8 +827,8 @@ func (a poolSandboxes) Destroy(ctx context.Context, sandboxID string) error {
 }
 
 // Event records a pool event on the member's trail. Reason repeats kind and
-// detail, because the Postgres audit store has no columns for them until
-// step 17 and would otherwise store an empty row per reset.
+// detail because reason is all the wire's SandboxEvent carries, and because a
+// row written before the store had those columns has nothing else.
 func (a poolSandboxes) Event(sandboxID, kind, detail string) {
 	a.s.events.append(sandbox.Event{
 		SandboxID: sandboxID,

@@ -125,21 +125,24 @@ message SandboxExec {
   ExitReason reason = 8;
   int64 stdout_bytes = 9;
   int64 stderr_bytes = 10;
-  // cpu_millis is the CPU the sandbox consumed during this execution.
-  int64 cpu_millis = 11;
+  // cpu_millis is the CPU the sandbox consumed during this execution. It and the
+  // other optional fields here are absent when not measured, and a measured zero
+  // is present: the exec ran unmetered, the window could not be read, or the
+  // record is older than the field.
+  optional int64 cpu_millis = 11;
   // memory_peak_bytes is the sandbox's memory peak during this execution's
   // window; memory_peak_scope says whether the kernel could scope it to the
   // window or it is the lifetime peak. The window is the sandbox's cgroup, so
   // concurrent executions in one sandbox have overlapping windows.
-  int64 memory_peak_bytes = 12;
+  optional int64 memory_peak_bytes = 12;
   // egress_allowed/denied count restricted-network decisions in the window.
-  int64 egress_allowed = 13;
-  int64 egress_denied = 14;
+  optional int64 egress_allowed = 13;
+  optional int64 egress_denied = 14;
   PeakScope memory_peak_scope = 15;
   // oom_kills and pids_limit_hits are per-execution deltas of the sandbox
   // cgroup's counters.
-  int64 oom_kills = 16;
-  int64 pids_limit_hits = 17;
+  optional int64 oom_kills = 16;
+  optional int64 pids_limit_hits = 17;
   // pool_id and sandbox_run are set for a pool run: sandbox_run marks run
   // boundaries inside a reused sandbox (1-based).
   string pool_id = 18;

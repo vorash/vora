@@ -28,23 +28,27 @@ type ExecRecord struct {
 	StdoutBytes int64              `json:"stdout_bytes"`
 	StderrBytes int64              `json:"stderr_bytes"`
 	// CPUMillis is the CPU the sandbox consumed during this execution (the
-	// cgroup cpu.stat usage delta across its window).
-	CPUMillis int64 `json:"cpu_millis,omitempty"`
+	// cgroup cpu.stat usage delta across its window). This and the other pointers
+	// below are nil when not measured, which is not the same answer as zero: the
+	// exec ran unmetered, the window could not be read, or the record predates the
+	// field. Records written before these were pointers left a measured zero out,
+	// so one of those reads back as nil too.
+	CPUMillis *int64 `json:"cpu_millis,omitempty"`
 	// MemoryPeakBytes is the sandbox's memory peak during this execution's
 	// window. MemoryPeakScope says whether the kernel could scope it to the
 	// window or it is the lifetime peak. Records written before usage windows
 	// hold the lifetime peak at exit with no scope.
-	MemoryPeakBytes int64             `json:"memory_peak_bytes,omitempty"`
+	MemoryPeakBytes *int64            `json:"memory_peak_bytes,omitempty"`
 	MemoryPeakScope runtime.PeakScope `json:"memory_peak_scope,omitempty"`
 	// OOMKills and PidsLimitHits are the cgroup's counter deltas across the
 	// window. Windows are per sandbox, so concurrent executions in one sandbox
 	// count each other's usage.
-	OOMKills      int64 `json:"oom_kills,omitempty"`
-	PidsLimitHits int64 `json:"pids_limit_hits,omitempty"`
+	OOMKills      *int64 `json:"oom_kills,omitempty"`
+	PidsLimitHits *int64 `json:"pids_limit_hits,omitempty"`
 	// EgressAllowed and EgressDenied count the restricted-network policy
 	// decisions that fell inside this execution's window.
-	EgressAllowed int64 `json:"egress_allowed,omitempty"`
-	EgressDenied  int64 `json:"egress_denied,omitempty"`
+	EgressAllowed *int64 `json:"egress_allowed,omitempty"`
+	EgressDenied  *int64 `json:"egress_denied,omitempty"`
 	// PoolID and SandboxRun are set for a pool run. SandboxRun is 1-based and
 	// marks run boundaries inside a reused sandbox.
 	PoolID     string `json:"pool_id,omitempty"`

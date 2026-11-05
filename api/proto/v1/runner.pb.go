@@ -789,21 +789,24 @@ type SandboxExec struct {
 	Reason           ExitReason             `protobuf:"varint,8,opt,name=reason,proto3,enum=vora.v1.ExitReason" json:"reason,omitempty"`
 	StdoutBytes      int64                  `protobuf:"varint,9,opt,name=stdout_bytes,json=stdoutBytes,proto3" json:"stdout_bytes,omitempty"`
 	StderrBytes      int64                  `protobuf:"varint,10,opt,name=stderr_bytes,json=stderrBytes,proto3" json:"stderr_bytes,omitempty"`
-	// cpu_millis is the CPU the sandbox consumed during this execution.
-	CpuMillis int64 `protobuf:"varint,11,opt,name=cpu_millis,json=cpuMillis,proto3" json:"cpu_millis,omitempty"`
+	// cpu_millis is the CPU the sandbox consumed during this execution. It and the
+	// other optional fields here are absent when not measured, and a measured zero
+	// is present: the exec ran unmetered, the window could not be read, or the
+	// record is older than the field.
+	CpuMillis *int64 `protobuf:"varint,11,opt,name=cpu_millis,json=cpuMillis,proto3,oneof" json:"cpu_millis,omitempty"`
 	// memory_peak_bytes is the sandbox's memory peak during this execution's
 	// window; memory_peak_scope says whether the kernel could scope it to the
 	// window or it is the lifetime peak. The window is the sandbox's cgroup, so
 	// concurrent executions in one sandbox have overlapping windows.
-	MemoryPeakBytes int64 `protobuf:"varint,12,opt,name=memory_peak_bytes,json=memoryPeakBytes,proto3" json:"memory_peak_bytes,omitempty"`
+	MemoryPeakBytes *int64 `protobuf:"varint,12,opt,name=memory_peak_bytes,json=memoryPeakBytes,proto3,oneof" json:"memory_peak_bytes,omitempty"`
 	// egress_allowed/denied count restricted-network decisions in the window.
-	EgressAllowed   int64     `protobuf:"varint,13,opt,name=egress_allowed,json=egressAllowed,proto3" json:"egress_allowed,omitempty"`
-	EgressDenied    int64     `protobuf:"varint,14,opt,name=egress_denied,json=egressDenied,proto3" json:"egress_denied,omitempty"`
+	EgressAllowed   *int64    `protobuf:"varint,13,opt,name=egress_allowed,json=egressAllowed,proto3,oneof" json:"egress_allowed,omitempty"`
+	EgressDenied    *int64    `protobuf:"varint,14,opt,name=egress_denied,json=egressDenied,proto3,oneof" json:"egress_denied,omitempty"`
 	MemoryPeakScope PeakScope `protobuf:"varint,15,opt,name=memory_peak_scope,json=memoryPeakScope,proto3,enum=vora.v1.PeakScope" json:"memory_peak_scope,omitempty"`
 	// oom_kills and pids_limit_hits are per-execution deltas of the sandbox
 	// cgroup's counters.
-	OomKills      int64 `protobuf:"varint,16,opt,name=oom_kills,json=oomKills,proto3" json:"oom_kills,omitempty"`
-	PidsLimitHits int64 `protobuf:"varint,17,opt,name=pids_limit_hits,json=pidsLimitHits,proto3" json:"pids_limit_hits,omitempty"`
+	OomKills      *int64 `protobuf:"varint,16,opt,name=oom_kills,json=oomKills,proto3,oneof" json:"oom_kills,omitempty"`
+	PidsLimitHits *int64 `protobuf:"varint,17,opt,name=pids_limit_hits,json=pidsLimitHits,proto3,oneof" json:"pids_limit_hits,omitempty"`
 	// pool_id and sandbox_run are set for a pool run: sandbox_run marks run
 	// boundaries inside a reused sandbox (1-based).
 	PoolId        string `protobuf:"bytes,18,opt,name=pool_id,json=poolId,proto3" json:"pool_id,omitempty"`
@@ -913,29 +916,29 @@ func (x *SandboxExec) GetStderrBytes() int64 {
 }
 
 func (x *SandboxExec) GetCpuMillis() int64 {
-	if x != nil {
-		return x.CpuMillis
+	if x != nil && x.CpuMillis != nil {
+		return *x.CpuMillis
 	}
 	return 0
 }
 
 func (x *SandboxExec) GetMemoryPeakBytes() int64 {
-	if x != nil {
-		return x.MemoryPeakBytes
+	if x != nil && x.MemoryPeakBytes != nil {
+		return *x.MemoryPeakBytes
 	}
 	return 0
 }
 
 func (x *SandboxExec) GetEgressAllowed() int64 {
-	if x != nil {
-		return x.EgressAllowed
+	if x != nil && x.EgressAllowed != nil {
+		return *x.EgressAllowed
 	}
 	return 0
 }
 
 func (x *SandboxExec) GetEgressDenied() int64 {
-	if x != nil {
-		return x.EgressDenied
+	if x != nil && x.EgressDenied != nil {
+		return *x.EgressDenied
 	}
 	return 0
 }
@@ -948,15 +951,15 @@ func (x *SandboxExec) GetMemoryPeakScope() PeakScope {
 }
 
 func (x *SandboxExec) GetOomKills() int64 {
-	if x != nil {
-		return x.OomKills
+	if x != nil && x.OomKills != nil {
+		return *x.OomKills
 	}
 	return 0
 }
 
 func (x *SandboxExec) GetPidsLimitHits() int64 {
-	if x != nil {
-		return x.PidsLimitHits
+	if x != nil && x.PidsLimitHits != nil {
+		return *x.PidsLimitHits
 	}
 	return 0
 }
@@ -2017,7 +2020,7 @@ const file_api_proto_v1_runner_proto_rawDesc = "" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12\x17\n" +
 	"\apool_id\x18\x02 \x01(\tR\x06poolId\"E\n" +
 	"\x17GetSandboxExecsResponse\x12*\n" +
-	"\x05execs\x18\x01 \x03(\v2\x14.vora.v1.SandboxExecR\x05execs\"\xb2\x05\n" +
+	"\x05execs\x18\x01 \x03(\v2\x14.vora.v1.SandboxExecR\x05execs\"\xbc\x06\n" +
 	"\vSandboxExec\x12!\n" +
 	"\fexecution_id\x18\x01 \x01(\tR\vexecutionId\x12\x18\n" +
 	"\acommand\x18\x02 \x01(\tR\acommand\x12\x12\n" +
@@ -2029,18 +2032,25 @@ const file_api_proto_v1_runner_proto_rawDesc = "" +
 	"\x06reason\x18\b \x01(\x0e2\x13.vora.v1.ExitReasonR\x06reason\x12!\n" +
 	"\fstdout_bytes\x18\t \x01(\x03R\vstdoutBytes\x12!\n" +
 	"\fstderr_bytes\x18\n" +
-	" \x01(\x03R\vstderrBytes\x12\x1d\n" +
+	" \x01(\x03R\vstderrBytes\x12\"\n" +
 	"\n" +
-	"cpu_millis\x18\v \x01(\x03R\tcpuMillis\x12*\n" +
-	"\x11memory_peak_bytes\x18\f \x01(\x03R\x0fmemoryPeakBytes\x12%\n" +
-	"\x0eegress_allowed\x18\r \x01(\x03R\regressAllowed\x12#\n" +
-	"\regress_denied\x18\x0e \x01(\x03R\fegressDenied\x12>\n" +
-	"\x11memory_peak_scope\x18\x0f \x01(\x0e2\x12.vora.v1.PeakScopeR\x0fmemoryPeakScope\x12\x1b\n" +
-	"\toom_kills\x18\x10 \x01(\x03R\boomKills\x12&\n" +
-	"\x0fpids_limit_hits\x18\x11 \x01(\x03R\rpidsLimitHits\x12\x17\n" +
+	"cpu_millis\x18\v \x01(\x03H\x00R\tcpuMillis\x88\x01\x01\x12/\n" +
+	"\x11memory_peak_bytes\x18\f \x01(\x03H\x01R\x0fmemoryPeakBytes\x88\x01\x01\x12*\n" +
+	"\x0eegress_allowed\x18\r \x01(\x03H\x02R\regressAllowed\x88\x01\x01\x12(\n" +
+	"\regress_denied\x18\x0e \x01(\x03H\x03R\fegressDenied\x88\x01\x01\x12>\n" +
+	"\x11memory_peak_scope\x18\x0f \x01(\x0e2\x12.vora.v1.PeakScopeR\x0fmemoryPeakScope\x12 \n" +
+	"\toom_kills\x18\x10 \x01(\x03H\x04R\boomKills\x88\x01\x01\x12+\n" +
+	"\x0fpids_limit_hits\x18\x11 \x01(\x03H\x05R\rpidsLimitHits\x88\x01\x01\x12\x17\n" +
 	"\apool_id\x18\x12 \x01(\tR\x06poolId\x12\x1f\n" +
 	"\vsandbox_run\x18\x13 \x01(\rR\n" +
-	"sandboxRun\"8\n" +
+	"sandboxRunB\r\n" +
+	"\v_cpu_millisB\x14\n" +
+	"\x12_memory_peak_bytesB\x11\n" +
+	"\x0f_egress_allowedB\x10\n" +
+	"\x0e_egress_deniedB\f\n" +
+	"\n" +
+	"_oom_killsB\x12\n" +
+	"\x10_pids_limit_hits\"8\n" +
 	"\x17GetSandboxEgressRequest\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\"L\n" +
@@ -2280,6 +2290,7 @@ func file_api_proto_v1_runner_proto_init() {
 	}
 	file_api_proto_v1_common_proto_init()
 	file_api_proto_v1_pool_proto_init()
+	file_api_proto_v1_runner_proto_msgTypes[15].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
