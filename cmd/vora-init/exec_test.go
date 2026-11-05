@@ -3,14 +3,20 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
+	"github.com/vorash/vora/internal/agentproto"
 )
 
 // holderSeconds outlives every bound below, so a test that passes cannot have
@@ -100,5 +106,87 @@ func TestExecExitIgnoresEscapedStdinHolder(t *testing.T) {
 	}
 	if res.exit == nil || res.exit.GetReason() != v1.ExitReason_EXITED || res.exit.GetExitCode() != 0 {
 		t.Fatalf("exit = %v, want EXITED 0: the command itself succeeded", res.exit)
+	}
+}
+
+func pidAlive(t *testing.T, pid int) bool {
+	t.Helper()
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		t.Fatalf("read stat: %v", err)
+	}
+	// A killed child of the agent stays listed as a zombie until something reaps it.
+	return !strings.Contains(string(stat), ") Z ")
+}
+
+func execStdout(ctx context.Context, t *testing.T, client *agentproto.Client, script string) string {
+	t.Helper()
+	stream, err := client.Exec(ctx, &v1.ExecRequest{Command: "/bin/sh", Args: []string{"-c", script}, Cwd: "/"})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	defer stream.Close()
+	var out strings.Builder
+	for {
+		chunk, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return out.String()
+		}
+		if err != nil {
+			t.Fatalf("Recv: %v", err)
+		}
+		out.Write(chunk.Stdout)
+	}
+}
+
+// Starting a server in one exec and talking to it in the next is ordinary use, and it
+// is what ssh allows. gRPC cancels a handler's context once it returns, so a kill meant
+// for a client that went away also ran after every normal exit, and took out whatever
+// the exec had left running in its group.
+func TestBackgroundProcessOutlivesItsExec(t *testing.T) {
+	_, client := startAgentProcess(t, 2)
+	for _, start := range []string{"sleep " + holderSeconds, "nohup sleep " + holderSeconds} {
+		out := execStdout(t.Context(), t, client, start+" </dev/null >/dev/null 2>&1 & echo $!")
+		pid, err := strconv.Atoi(strings.TrimSpace(out))
+		if err != nil {
+			t.Fatalf("pid %q: %v", out, err)
+		}
+		t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+		time.Sleep(200 * time.Millisecond)
+		if !pidAlive(t, pid) {
+			t.Fatalf("%q: gone 200ms after its exec ended", start)
+		}
+	}
+}
+
+// The kill still has a job: a client that disconnects must not leave its command running.
+func TestClientGoneKillsTheExec(t *testing.T) {
+	_, client := startAgentProcess(t, 2)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	stream, err := client.Exec(ctx, &v1.ExecRequest{Command: "/bin/sh", Args: []string{"-c", "echo $$; exec sleep " + holderSeconds}, Cwd: "/"})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	defer stream.Close()
+	chunk, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("Recv: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(chunk.Stdout)))
+	if err != nil {
+		t.Fatalf("pid %q: %v", chunk.Stdout, err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	cancel()
+	deadline := time.Now().Add(3 * time.Second)
+	for pidAlive(t, pid) {
+		if time.Now().After(deadline) {
+			t.Fatal("command still running 3s after its client went away")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
