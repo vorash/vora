@@ -768,6 +768,34 @@ func TestCancelRacingAGrantReturnsTheMember(t *testing.T) {
 	}
 }
 
+// A waiter can also be handed a slot to cold-start into. If it has gone by
+// then, the slot must not stay reserved for it.
+func TestCancelRacingASlotGrantFreesTheSlot(t *testing.T) {
+	h := newHarness(t, rawSpec(0, 1), Options{})
+	p := h.pool
+	var taken *member
+	p.withLock(func() { taken = p.placeholder(true) })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errc := make(chan error, 1)
+	go func() { _, _, err := h.run(ctx, nil); errc <- err }()
+	h.waitWaiters(1)
+	p.withLock(func() {
+		cancel()
+		time.Sleep(time.Millisecond) // lets the borrower reach mu, not required for the outcome
+		p.remove(taken)
+	})
+	if err := receive(t, errc, "the cancelled borrower"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	if s := p.Stats(); s.Starting != 0 {
+		t.Fatalf("the slot stayed reserved: %+v", s)
+	}
+	if pl, _, err := h.run(context.Background(), nil); err != nil || pl.Warm {
+		t.Fatalf("the next client: %+v %v, want a cold start", pl, err)
+	}
+}
+
 func TestTimeoutRacingAGrantUsesTheMember(t *testing.T) {
 	raw := rawSpec(1, 1)
 	raw.BorrowTimeout = time.Millisecond
