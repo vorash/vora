@@ -236,8 +236,7 @@ func TestRefusalsAreLoggedAtARate(t *testing.T) {
 }
 
 // Getting this wrong one way opens a sandbox to its own workload, and the other way locks
-// a host-run agent's client out. The PID decides first because comm cannot be trusted to
-// be readable outside a sandbox, where it does not matter.
+// a host-run agent's client out.
 func TestRefuseSandboxPeersDecision(t *testing.T) {
 	if !refuseSandboxPeers(agentPID) {
 		t.Fatal("PID 2 must refuse sandbox peers, whatever PID 1 is called")
