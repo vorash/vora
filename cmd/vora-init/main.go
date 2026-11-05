@@ -379,11 +379,13 @@ func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.Exe
 	// Enforce the caller's deadline here: this is the only layer that can kill
 	// the workload and still send an exit record over the open stream.
 	var timedOut atomic.Bool
+	stopDeadline := func() bool { return false }
 	if req.GetTimeoutSeconds() > 0 {
 		timer := time.AfterFunc(time.Duration(req.GetTimeoutSeconds())*time.Second, func() {
 			timedOut.Store(true)
 			killGroup()
 		})
+		stopDeadline = timer.Stop
 		defer timer.Stop()
 	}
 
@@ -396,9 +398,10 @@ func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.Exe
 		return &v1.ExecChunk{Payload: &v1.ExecChunk_Stderr{Stderr: b}}
 	})
 
-	// Kill the process group if the client goes away. gRPC also cancels ctx once this
-	// handler returns, so the kill must be disarmed before then, or it takes out whatever
-	// a finished exec left running in its group.
+	// Kill the process group if the client goes away. A finished exec may leave a
+	// process running in its group on purpose, so the kill is disarmed once the
+	// command has exited, before the exit chunk: a client can close the stream the
+	// moment it reads that chunk, and gRPC cancels ctx once this handler returns.
 	stopWatchingClient := context.AfterFunc(ctx, killGroup)
 	defer stopWatchingClient()
 
@@ -411,6 +414,8 @@ func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.Exe
 	// gives up, as it would over ssh.
 	wg.Wait()
 	waitErr := cmd.Wait()
+	stopWatchingClient()
+	stopDeadline()
 
 	exitCode := 0
 	if waitErr != nil && !errors.Is(waitErr, exec.ErrWaitDelay) {
