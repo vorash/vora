@@ -263,6 +263,20 @@ func TestBwrapPipeHolder(t *testing.T) {
 	}
 }
 
+// A small pids limit must not break ordinary execs. Everything in the sandbox
+// counts against the limit, including the agent's threads, so anything the agent
+// adds per exec eats the workload's budget. A shim written in Go needed OS threads
+// of its own: at this limit about half of execs died with `fatal error: newosproc`
+// and the agent soon crashed the same way, which ended the sandbox.
+func TestBwrapLowPids(t *testing.T) {
+	backend, h := newBwrapSandboxWith(t, nil, runtime.ResourceLimits{CPUMillis: 1000, MemoryBytes: 256 << 20, Pids: 16})
+	for i := range 150 {
+		if got := execStdout(t, backend, h, "/bin/sh", []string{"-c", "echo ok"}); got != "ok\n" {
+			t.Fatalf("exec %d at pids=16: stdout = %q, want %q", i, got, "ok\n")
+		}
+	}
+}
+
 // execStdout runs a command and returns its stdout only.
 func execStdout(t *testing.T, backend *bwrap.Backend, h runtime.Handle, command string, args []string) string {
 	t.Helper()
