@@ -260,7 +260,16 @@ func TestBwrapReusableFailsClosed(t *testing.T) {
 	t.Run("the workload stopped the agent", func(t *testing.T) {
 		m := newMember(t)
 		m.exec(t, "setsid sh -c 'sleep 0.2; kill -STOP 2' </dev/null >/dev/null 2>&1 &")
-		time.Sleep(time.Second)
+		// Polled from the host, since nothing goes through a stopped agent, so a
+		// slow host cannot turn the background kill into a flake.
+		waitFor(t, 5*time.Second, func() bool {
+			for _, pid := range m.procs(t) {
+				if stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)); err == nil && strings.Contains(string(stat), ") T ") {
+					return true
+				}
+			}
+			return false
+		})
 		start := time.Now()
 		_, err := m.reset(context.Background())
 		took := time.Since(start)
@@ -276,10 +285,10 @@ func TestBwrapReusableFailsClosed(t *testing.T) {
 	t.Run("the workload killed the agent", func(t *testing.T) {
 		m := newMember(t)
 		m.exec(t, "setsid sh -c 'sleep 0.2; kill -KILL 2' </dev/null >/dev/null 2>&1 &")
-		time.Sleep(time.Second)
-		if _, err := cgroup.Procs(m.dir); !errors.Is(err, cgroup.ErrNotFound) {
-			t.Fatalf("the sandbox's cgroup is still there (%v): the agent was not killed, so this proves nothing", err)
-		}
+		waitFor(t, 5*time.Second, func() bool {
+			_, err := cgroup.Procs(m.dir)
+			return errors.Is(err, cgroup.ErrNotFound)
+		})
 		start := time.Now()
 		_, err := m.reset(context.Background())
 		took := time.Since(start)
