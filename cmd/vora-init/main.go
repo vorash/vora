@@ -29,6 +29,7 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
@@ -44,6 +45,10 @@ func main() {
 	// only has to keep the sandbox alive. Running Vora's own static binary as
 	// init is also what lets a shell-less (distroless) image boot at all.
 	if len(os.Args) > 1 && os.Args[1] == "pause" {
+		if err := setNonDumpable(); err != nil {
+			fmt.Fprintln(os.Stderr, "vora-init:", err)
+			os.Exit(1)
+		}
 		pause()
 		return
 	}
@@ -62,6 +67,13 @@ func main() {
 		os.Exit(1)
 	}
 	a := newAgent(*socket, *grace, logger)
+	// After newAgent, which opens /proc/self/oom_score_adj: that open fails once
+	// this has run, and every exec would then leave the agent as the OOM victim.
+	// Before listening, so no workload can run while the agent is still dumpable.
+	if err := setNonDumpable(); err != nil {
+		logger.Error("set non-dumpable", "error", err)
+		os.Exit(1)
+	}
 
 	lis, err := listenAgent(*socket)
 	if err != nil {
@@ -96,6 +108,22 @@ func main() {
 		grpcServer.Stop()
 	}
 	os.Exit(0)
+}
+
+// setNonDumpable stops a workload running as the same uid from reading or
+// rewriting this process through /proc/<pid>/mem, /proc/<pid>/environ or ptrace.
+// This process outlives every run in a sandbox, so anything injected into it
+// would carry over to the next one. The flag is per address space, so it covers
+// every thread, and execve clears it, so workloads do not inherit it.
+//
+// It also hands this process's /proc/self files to root: opening
+// /proc/self/oom_score_adj for writing fails from here on. A file opened before
+// this call stays writable.
+func setNonDumpable() error {
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+		return fmt.Errorf("set non-dumpable: %w", err)
+	}
+	return nil
 }
 
 // listenAgent opens the agent's control socket. The socket is owned by the

@@ -4,7 +4,9 @@ package integration
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -91,6 +93,113 @@ func TestGvisorBackendLifecycle(t *testing.T) {
 	if err := backend.Destroy(ctx, h); err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
+}
+
+// TestGvisorVoraReadOnly asserts a workload cannot change anything under /vora
+// or reach PID 1 through /proc. A warm pool reuses a sandbox across untrusted
+// runs and runs /vora/vora-init inside it to reset it, so a run that replaced the
+// binary or rewrote PID 1 would own every later run. The workload is uid 0 inside
+// the sentry, so only the read-only mount and the PR_SET_DUMPABLE check protect them.
+func TestGvisorVoraReadOnly(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("gVisor Method 2 requires a rootlesskit userns or root (run under rootlesskit)")
+	}
+	if _, err := os.Stat("/dev/kvm"); err != nil {
+		t.Skipf("/dev/kvm unavailable: %v", err)
+	}
+	rootfs := imageRootfs(t, "base")
+
+	cfg := config.Config{StateDir: t.TempDir(), GvisorPlatform: "kvm", GvisorRunRoot: filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "vora-gvisor-itest")}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	subtree, err := cgroup.NewSubtree()
+	if err != nil {
+		t.Skipf("cgroup subtree unavailable: %v", err)
+	}
+	backend, err := gvisor.New(cfg, logger, subtree)
+	if err != nil {
+		t.Skipf("gvisor backend unavailable: %v", err)
+	}
+
+	id := "sbx_gv_ro_" + strings.ReplaceAll(time.Now().UTC().Format("150405.000000000"), ".", "")
+	ws := workspace.NewManager(cfg.SandboxesDir())
+	wsp := ws.Paths(id)
+	wsp.RootfsDir = rootfs
+	if _, err := ws.Create(wsp); err != nil {
+		t.Fatalf("workspace: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Destroy(id) })
+
+	ctx := context.Background()
+	h, err := backend.Create(ctx, runtime.SandboxSpec{
+		ID:        id,
+		Image:     "base",
+		Resources: runtime.ResourceLimits{CPUMillis: 1000, MemoryBytes: 256 << 20, Pids: 64},
+		Network:   runtime.NetworkPolicy{Mode: runtime.NetworkNone},
+		TTL:       time.Minute,
+		Workspace: wsp,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := backend.Start(ctx, h); err != nil {
+		t.Fatalf("Start with /vora read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = backend.Destroy(context.Background(), h) })
+
+	hostBinary := filepath.Join(wsp.IPCDir, "vora-init")
+	want := sha256Hex(t, hostBinary)
+
+	script, err := os.ReadFile(filepath.Join("..", "testdata", "tamper_vora_init.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, code := execGvisor(t, backend, h, "/usr/bin/python3", []string{"-c", string(script)})
+	t.Logf("tamper attempts:\n%s", out)
+	if code != 0 {
+		t.Fatalf("a tamper attempt was not stopped (exit %d):\n%s", code, out)
+	}
+	// Unlike bwrap, nothing inside needs to write /vora, so no file may appear.
+	if !strings.Contains(out, "create EROFS") {
+		t.Errorf("creating a file in /vora was not refused with EROFS:\n%s", out)
+	}
+	if !strings.Contains(out, "sha256 "+want) {
+		t.Errorf("binary inside the sandbox changed, want sha256 %s:\n%s", want, out)
+	}
+	if got := sha256Hex(t, hostBinary); got != want {
+		t.Errorf("binary on the host changed: sha256 %s, want %s", got, want)
+	}
+
+	// The open is the check: reading mem at offset 0 fails on any process.
+	out, code = execGvisor(t, backend, h, "/usr/bin/python3", []string{"-c", `
+import errno, os, sys
+exposed = False
+for name in ("mem", "environ"):
+    try:
+        os.close(os.open(f"/proc/1/{name}", os.O_RDONLY))
+        print(name, "OK")
+        exposed = True
+    except OSError as e:
+        print(name, errno.errorcode[e.errno])
+        exposed = exposed or e.errno not in (errno.EACCES, errno.EPERM)
+sys.exit(1 if exposed else 0)
+`})
+	t.Logf("PID 1 /proc attempts:\n%s", out)
+	if code != 0 {
+		t.Errorf("PID 1 /proc files exposed (exit %d):\n%s", code, out)
+	}
+
+	if got := strings.TrimSpace(runGvisor(t, backend, h, "/bin/sh", []string{"-c", "echo alive"})); got != "alive" {
+		t.Fatalf("sandbox stopped serving after the attempts: %q", got)
+	}
+}
+
+func sha256Hex(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
 func runGvisor(t *testing.T, b *gvisor.Backend, h runtime.Handle, command string, args []string) string {

@@ -15,8 +15,8 @@ import (
 )
 
 // The sandbox init is Vora's own static binary, exposed by the ipc directory
-// (bound at /vora), never a program from the image: a shell-less (distroless)
-// image has no /bin/sh to keep the sandbox alive. See issue #40.
+// (bound read-only at /vora), never a program from the image: a shell-less
+// (distroless) image has no /bin/sh to keep the sandbox alive. See issue #40.
 const (
 	initInside = "/vora/vora-init"
 	initMode   = "pause"
@@ -60,7 +60,10 @@ func writeBundle(runsc, bundleDir string, spec runtime.SandboxSpec, resolvConf s
 	s.Mounts = append(s.Mounts,
 		bindMount(spec.Workspace.WorkspaceDir, "/workspace"),
 		bindMount(spec.Workspace.HomeDir, "/root"),
-		bindMount(spec.Workspace.IPCDir, "/vora"),
+		// Read-only so a workload cannot replace the init binary. Unlike bwrap,
+		// nothing inside needs to write here: there is no agent or control socket,
+		// and the runner installs the binary from the host before the sandbox starts.
+		roBindMount(spec.Workspace.IPCDir, "/vora"),
 		tmpfsMount("/tmp"),
 	)
 	if resolvConf != "" {
