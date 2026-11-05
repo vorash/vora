@@ -30,6 +30,7 @@ proves it. If the mechanism is removed, the test must fail.
 | PIDs | A's fork attempts hit its own `pids.max`; B's process budget is untouched | `pids.max` | `TestForkBombContained` |
 | Control socket | A's control socket lives in its own `ipc/` directory bound only into A; reconnects pin the socket inode and peer credentials and refuse symlink/replacement | per-sandbox bind mount + peer check; the socket is `0600` and the runner's state and per-sandbox directories are `0700`, so other local users cannot reach it even when the home directory is world-traversable | `TestAgentSocketIsOwnerOnly`, `TestCreateMakesPrivateDirectories`, `TestControlSocketIsolation`, `TestReplacedControlSocketFailsClosed` |
 | Metadata / secrets | A has no network and no runner credentials in env, files or `/proc/self/environ`; brokered credentials are attached outside the sandbox | no network; broker route (ADR 013) | `TestNoSecretsLeak` (+ broker case) |
+| Process environment (bwrap) | A's `/proc/1/environ` is empty; its other processes hold only `HOME`, `PATH`, `PWD` and the spec env, never the runner's or the service manager's environment | empty `cmd.Env` on the netns path; `env -i` on the unit path | `TestEnvIsAllowlisted`, `TestNoSecretsLeak` (`none`); `TestNetnsCommandEnv` + `sandbox_env_scrubbed` in `scripts/test-system-unit.sh` (every network) |
 
 Runner admission also caps sandbox memory/CPU/PIDs/disk/TTL, total sandboxes,
 and per-tenant sandbox and snapshot counts before allocation. Tenant counts
