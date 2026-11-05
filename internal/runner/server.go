@@ -1157,10 +1157,11 @@ func (s *Server) ReapExpired(ctx context.Context) error {
 }
 
 // PruneAudit removes the tombstone, including the local audit trail, of
-// sandboxes that finished longer ago than the configured retention. Retention
-// is off by default: destroy never deletes audit, only this reaper does. It
-// only applies to the local JSONL trail: with an external audit store the
-// tombstone is what makes that store's rows reachable through the API.
+// sandboxes that finished longer ago than the configured retention, and the
+// local trail of pools that are gone. Retention is off by default: destroy never
+// deletes audit, only this reaper does. It only applies to the local JSONL
+// trail: with an external audit store the tombstone is what makes that store's
+// rows reachable through the API.
 func (s *Server) PruneAudit(ctx context.Context) error {
 	if !s.localAudit || s.cfg.AuditRetention <= 0 {
 		return nil
@@ -1176,7 +1177,7 @@ func (s *Server) PruneAudit(ctx context.Context) error {
 		}
 		s.pruneOne(ctx, rec.ID, cutoff)
 	}
-	return nil
+	return s.prunePoolTrails(cutoff)
 }
 
 // pruneOne removes one expired tombstone. It re-reads the record under the
