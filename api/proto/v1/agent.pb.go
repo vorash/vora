@@ -253,6 +253,175 @@ func (*ShutdownResponse) Descriptor() ([]byte, []int) {
 	return file_api_proto_v1_agent_proto_rawDescGZIP(), []int{5}
 }
 
+type CaptureRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CaptureRequest) Reset() {
+	*x = CaptureRequest{}
+	mi := &file_api_proto_v1_agent_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CaptureRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CaptureRequest) ProtoMessage() {}
+
+func (x *CaptureRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_v1_agent_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CaptureRequest.ProtoReflect.Descriptor instead.
+func (*CaptureRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_v1_agent_proto_rawDescGZIP(), []int{6}
+}
+
+type CaptureResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// manifest is opaque to the runner: internal/sandboxreset's JSON encoding.
+	Manifest      []byte `protobuf:"bytes,1,opt,name=manifest,proto3" json:"manifest,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CaptureResponse) Reset() {
+	*x = CaptureResponse{}
+	mi := &file_api_proto_v1_agent_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CaptureResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CaptureResponse) ProtoMessage() {}
+
+func (x *CaptureResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_v1_agent_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CaptureResponse.ProtoReflect.Descriptor instead.
+func (*CaptureResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_v1_agent_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *CaptureResponse) GetManifest() []byte {
+	if x != nil {
+		return x.Manifest
+	}
+	return nil
+}
+
+type ResetRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Manifest      []byte                 `protobuf:"bytes,1,opt,name=manifest,proto3" json:"manifest,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResetRequest) Reset() {
+	*x = ResetRequest{}
+	mi := &file_api_proto_v1_agent_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResetRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResetRequest) ProtoMessage() {}
+
+func (x *ResetRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_v1_agent_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResetRequest.ProtoReflect.Descriptor instead.
+func (*ResetRequest) Descriptor() ([]byte, []int) {
+	return file_api_proto_v1_agent_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *ResetRequest) GetManifest() []byte {
+	if x != nil {
+		return x.Manifest
+	}
+	return nil
+}
+
+type ResetResponse struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	EntriesRemoved uint32                 `protobuf:"varint,1,opt,name=entries_removed,json=entriesRemoved,proto3" json:"entries_removed,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *ResetResponse) Reset() {
+	*x = ResetResponse{}
+	mi := &file_api_proto_v1_agent_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResetResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResetResponse) ProtoMessage() {}
+
+func (x *ResetResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_v1_agent_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResetResponse.ProtoReflect.Descriptor instead.
+func (*ResetResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_v1_agent_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *ResetResponse) GetEntriesRemoved() uint32 {
+	if x != nil {
+		return x.EntriesRemoved
+	}
+	return 0
+}
+
 var File_api_proto_v1_agent_proto protoreflect.FileDescriptor
 
 const file_api_proto_v1_agent_proto_rawDesc = "" +
@@ -265,12 +434,21 @@ const file_api_proto_v1_agent_proto_rawDesc = "" +
 	"\x06signal\x18\x01 \x01(\x05R\x06signal\"\x10\n" +
 	"\x0eSignalResponse\"\x11\n" +
 	"\x0fShutdownRequest\"\x12\n" +
-	"\x10ShutdownResponse2\xf3\x01\n" +
+	"\x10ShutdownResponse\"\x10\n" +
+	"\x0eCaptureRequest\"-\n" +
+	"\x0fCaptureResponse\x12\x1a\n" +
+	"\bmanifest\x18\x01 \x01(\fR\bmanifest\"*\n" +
+	"\fResetRequest\x12\x1a\n" +
+	"\bmanifest\x18\x01 \x01(\fR\bmanifest\"8\n" +
+	"\rResetResponse\x12'\n" +
+	"\x0fentries_removed\x18\x01 \x01(\rR\x0eentriesRemoved2\xe9\x02\n" +
 	"\fAgentService\x123\n" +
 	"\x04Ping\x12\x14.vora.v1.PingRequest\x1a\x15.vora.v1.PingResponse\x122\n" +
 	"\x04Exec\x12\x14.vora.v1.ExecRequest\x1a\x12.vora.v1.ExecChunk0\x01\x129\n" +
 	"\x06Signal\x12\x16.vora.v1.SignalRequest\x1a\x17.vora.v1.SignalResponse\x12?\n" +
-	"\bShutdown\x12\x18.vora.v1.ShutdownRequest\x1a\x19.vora.v1.ShutdownResponseB(Z&github.com/vorash/vora/api/proto/v1;v1b\x06proto3"
+	"\bShutdown\x12\x18.vora.v1.ShutdownRequest\x1a\x19.vora.v1.ShutdownResponse\x12<\n" +
+	"\aCapture\x12\x17.vora.v1.CaptureRequest\x1a\x18.vora.v1.CaptureResponse\x126\n" +
+	"\x05Reset\x12\x15.vora.v1.ResetRequest\x1a\x16.vora.v1.ResetResponseB(Z&github.com/vorash/vora/api/proto/v1;v1b\x06proto3"
 
 var (
 	file_api_proto_v1_agent_proto_rawDescOnce sync.Once
@@ -284,7 +462,7 @@ func file_api_proto_v1_agent_proto_rawDescGZIP() []byte {
 	return file_api_proto_v1_agent_proto_rawDescData
 }
 
-var file_api_proto_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_api_proto_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_api_proto_v1_agent_proto_goTypes = []any{
 	(*PingRequest)(nil),      // 0: vora.v1.PingRequest
 	(*PingResponse)(nil),     // 1: vora.v1.PingResponse
@@ -292,23 +470,31 @@ var file_api_proto_v1_agent_proto_goTypes = []any{
 	(*SignalResponse)(nil),   // 3: vora.v1.SignalResponse
 	(*ShutdownRequest)(nil),  // 4: vora.v1.ShutdownRequest
 	(*ShutdownResponse)(nil), // 5: vora.v1.ShutdownResponse
-	(*ExecRequest)(nil),      // 6: vora.v1.ExecRequest
-	(*ExecChunk)(nil),        // 7: vora.v1.ExecChunk
+	(*CaptureRequest)(nil),   // 6: vora.v1.CaptureRequest
+	(*CaptureResponse)(nil),  // 7: vora.v1.CaptureResponse
+	(*ResetRequest)(nil),     // 8: vora.v1.ResetRequest
+	(*ResetResponse)(nil),    // 9: vora.v1.ResetResponse
+	(*ExecRequest)(nil),      // 10: vora.v1.ExecRequest
+	(*ExecChunk)(nil),        // 11: vora.v1.ExecChunk
 }
 var file_api_proto_v1_agent_proto_depIdxs = []int32{
-	0, // 0: vora.v1.AgentService.Ping:input_type -> vora.v1.PingRequest
-	6, // 1: vora.v1.AgentService.Exec:input_type -> vora.v1.ExecRequest
-	2, // 2: vora.v1.AgentService.Signal:input_type -> vora.v1.SignalRequest
-	4, // 3: vora.v1.AgentService.Shutdown:input_type -> vora.v1.ShutdownRequest
-	1, // 4: vora.v1.AgentService.Ping:output_type -> vora.v1.PingResponse
-	7, // 5: vora.v1.AgentService.Exec:output_type -> vora.v1.ExecChunk
-	3, // 6: vora.v1.AgentService.Signal:output_type -> vora.v1.SignalResponse
-	5, // 7: vora.v1.AgentService.Shutdown:output_type -> vora.v1.ShutdownResponse
-	4, // [4:8] is the sub-list for method output_type
-	0, // [0:4] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	0,  // 0: vora.v1.AgentService.Ping:input_type -> vora.v1.PingRequest
+	10, // 1: vora.v1.AgentService.Exec:input_type -> vora.v1.ExecRequest
+	2,  // 2: vora.v1.AgentService.Signal:input_type -> vora.v1.SignalRequest
+	4,  // 3: vora.v1.AgentService.Shutdown:input_type -> vora.v1.ShutdownRequest
+	6,  // 4: vora.v1.AgentService.Capture:input_type -> vora.v1.CaptureRequest
+	8,  // 5: vora.v1.AgentService.Reset:input_type -> vora.v1.ResetRequest
+	1,  // 6: vora.v1.AgentService.Ping:output_type -> vora.v1.PingResponse
+	11, // 7: vora.v1.AgentService.Exec:output_type -> vora.v1.ExecChunk
+	3,  // 8: vora.v1.AgentService.Signal:output_type -> vora.v1.SignalResponse
+	5,  // 9: vora.v1.AgentService.Shutdown:output_type -> vora.v1.ShutdownResponse
+	7,  // 10: vora.v1.AgentService.Capture:output_type -> vora.v1.CaptureResponse
+	9,  // 11: vora.v1.AgentService.Reset:output_type -> vora.v1.ResetResponse
+	6,  // [6:12] is the sub-list for method output_type
+	0,  // [0:6] is the sub-list for method input_type
+	0,  // [0:0] is the sub-list for extension type_name
+	0,  // [0:0] is the sub-list for extension extendee
+	0,  // [0:0] is the sub-list for field type_name
 }
 
 func init() { file_api_proto_v1_agent_proto_init() }
@@ -323,7 +509,7 @@ func file_api_proto_v1_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_proto_v1_agent_proto_rawDesc), len(file_api_proto_v1_agent_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -5,7 +5,8 @@
 // shutdown; Bubblewrap cannot exec into a running sandbox, so this agent is
 // what makes a sandbox a long-lived unit with repeatable `Exec` calls. Under
 // gVisor (`vora-init pause`) it only keeps the sandbox alive, because gVisor
-// execs with `runsc exec` and needs no in-sandbox agent.
+// execs with `runsc exec` and needs no in-sandbox agent. There, `vora-init capture`
+// and `vora-init reset` run as short-lived helpers instead of the agent's RPCs.
 //
 // It is a static binary owned by Vora, not by the image, so a shell-less
 // (distroless) image can boot on either backend.
@@ -52,6 +53,15 @@ func main() {
 		pause()
 		return
 	}
+	// Helpers skip everything the agent sets up below. No workload exists when the
+	// host runs them, they start no process that could inherit a filter, and they
+	// are gone before the pids limit could matter.
+	if len(os.Args) > 1 && os.Args[1] == "capture" {
+		os.Exit(runCaptureMode(context.Background(), helperResetter(), os.Stdout, os.Stderr))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "reset" {
+		os.Exit(runResetMode(context.Background(), helperResetter(), os.Stdin, os.Stdout, os.Stderr))
+	}
 
 	fixThreads()
 
@@ -69,6 +79,7 @@ func main() {
 		os.Exit(1)
 	}
 	a := newAgent(*socket, *grace, logger)
+	a.resetter = agentResetter()
 	// After newAgent, which opens /proc/self/oom_score_adj: that open fails once
 	// this has run, and every exec would then leave the agent as the OOM victim.
 	// Before listening, so no workload can run while the agent is still dumpable.
@@ -184,8 +195,14 @@ type agent struct {
 	activeStreams atomic.Int64
 
 	// execMu serialises command execution against the orphan reaper, which
-	// must never reap a child the Go runtime is waiting on.
+	// must never reap a child the Go runtime is waiting on, and against Capture
+	// and Reset.
 	execMu sync.Mutex
+	// resets counts finished resets, so a call queued on execMu can tell that one
+	// ran while it waited.
+	resets atomic.Uint64
+	// resetter is nil until main sets it, so a test's agent cannot reach a real one.
+	resetter *resetter
 
 	mu   sync.Mutex
 	send sync.Mutex // serialises stream.Send
@@ -266,14 +283,19 @@ func (a *agent) reapOrphans() {
 			return
 		case <-ch:
 			a.execMu.Lock()
-			for {
-				var ws syscall.WaitStatus
-				pid, err := syscall.Wait4(-1, &ws, syscall.WNOHANG, nil)
-				if pid <= 0 || err != nil {
-					break
-				}
-			}
+			reapChildren()
 			a.execMu.Unlock()
+		}
+	}
+}
+
+// reapChildren collects every child that has exited. The caller holds execMu.
+func reapChildren() {
+	for {
+		var ws syscall.WaitStatus
+		pid, err := syscall.Wait4(-1, &ws, syscall.WNOHANG, nil)
+		if pid <= 0 || err != nil {
+			return
 		}
 	}
 }
@@ -281,6 +303,7 @@ func (a *agent) reapOrphans() {
 // Exec implements agentproto.Handler.
 func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.ExecChunk) error) error {
 	a.touch()
+	arrived := a.resets.Load()
 	command := req.GetCommand()
 	if command == "" {
 		return fmt.Errorf("empty command")
@@ -305,6 +328,15 @@ func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.Exe
 	// cannot reap this child.
 	a.execMu.Lock()
 	defer a.execMu.Unlock()
+	// A workload can call this over the control socket and die with the call queued
+	// here. Starting it after a reset would put a process into the next run that the
+	// reset's proof never saw.
+	if a.resets.Load() != arrived {
+		return errors.New("exec was queued across a reset")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

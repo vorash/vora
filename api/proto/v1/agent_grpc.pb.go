@@ -23,6 +23,8 @@ const (
 	AgentService_Exec_FullMethodName     = "/vora.v1.AgentService/Exec"
 	AgentService_Signal_FullMethodName   = "/vora.v1.AgentService/Signal"
 	AgentService_Shutdown_FullMethodName = "/vora.v1.AgentService/Shutdown"
+	AgentService_Capture_FullMethodName  = "/vora.v1.AgentService/Capture"
+	AgentService_Reset_FullMethodName    = "/vora.v1.AgentService/Reset"
 )
 
 // AgentServiceClient is the client API for AgentService service.
@@ -37,6 +39,12 @@ type AgentServiceClient interface {
 	Exec(ctx context.Context, in *ExecRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ExecChunk], error)
 	Signal(ctx context.Context, in *SignalRequest, opts ...grpc.CallOption) (*SignalResponse, error)
 	Shutdown(ctx context.Context, in *ShutdownRequest, opts ...grpc.CallOption) (*ShutdownResponse, error)
+	// Capture lists the sandbox's writable mounts. The runner calls it once, before
+	// the first workload, and keeps the manifest. The agent stores nothing.
+	Capture(ctx context.Context, in *CaptureRequest, opts ...grpc.CallOption) (*CaptureResponse, error)
+	// Reset restores the sandbox to manifest and proves it. Any error means the
+	// sandbox is not proven clean, and the runner must destroy it.
+	Reset(ctx context.Context, in *ResetRequest, opts ...grpc.CallOption) (*ResetResponse, error)
 }
 
 type agentServiceClient struct {
@@ -96,6 +104,26 @@ func (c *agentServiceClient) Shutdown(ctx context.Context, in *ShutdownRequest, 
 	return out, nil
 }
 
+func (c *agentServiceClient) Capture(ctx context.Context, in *CaptureRequest, opts ...grpc.CallOption) (*CaptureResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CaptureResponse)
+	err := c.cc.Invoke(ctx, AgentService_Capture_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentServiceClient) Reset(ctx context.Context, in *ResetRequest, opts ...grpc.CallOption) (*ResetResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResetResponse)
+	err := c.cc.Invoke(ctx, AgentService_Reset_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AgentServiceServer is the server API for AgentService service.
 // All implementations must embed UnimplementedAgentServiceServer
 // for forward compatibility.
@@ -108,6 +136,12 @@ type AgentServiceServer interface {
 	Exec(*ExecRequest, grpc.ServerStreamingServer[ExecChunk]) error
 	Signal(context.Context, *SignalRequest) (*SignalResponse, error)
 	Shutdown(context.Context, *ShutdownRequest) (*ShutdownResponse, error)
+	// Capture lists the sandbox's writable mounts. The runner calls it once, before
+	// the first workload, and keeps the manifest. The agent stores nothing.
+	Capture(context.Context, *CaptureRequest) (*CaptureResponse, error)
+	// Reset restores the sandbox to manifest and proves it. Any error means the
+	// sandbox is not proven clean, and the runner must destroy it.
+	Reset(context.Context, *ResetRequest) (*ResetResponse, error)
 	mustEmbedUnimplementedAgentServiceServer()
 }
 
@@ -129,6 +163,12 @@ func (UnimplementedAgentServiceServer) Signal(context.Context, *SignalRequest) (
 }
 func (UnimplementedAgentServiceServer) Shutdown(context.Context, *ShutdownRequest) (*ShutdownResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Shutdown not implemented")
+}
+func (UnimplementedAgentServiceServer) Capture(context.Context, *CaptureRequest) (*CaptureResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Capture not implemented")
+}
+func (UnimplementedAgentServiceServer) Reset(context.Context, *ResetRequest) (*ResetResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Reset not implemented")
 }
 func (UnimplementedAgentServiceServer) mustEmbedUnimplementedAgentServiceServer() {}
 func (UnimplementedAgentServiceServer) testEmbeddedByValue()                      {}
@@ -216,6 +256,42 @@ func _AgentService_Shutdown_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AgentService_Capture_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CaptureRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).Capture(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_Capture_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).Capture(ctx, req.(*CaptureRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AgentService_Reset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).Reset(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_Reset_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).Reset(ctx, req.(*ResetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AgentService_ServiceDesc is the grpc.ServiceDesc for AgentService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -234,6 +310,14 @@ var AgentService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Shutdown",
 			Handler:    _AgentService_Shutdown_Handler,
+		},
+		{
+			MethodName: "Capture",
+			Handler:    _AgentService_Capture_Handler,
+		},
+		{
+			MethodName: "Reset",
+			Handler:    _AgentService_Reset_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

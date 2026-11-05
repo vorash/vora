@@ -18,11 +18,19 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/runtime"
 )
+
+// MaxManifestBytes is the largest manifest Capture and Reset can carry. Neither end
+// sets a message limit, so gRPC's default of 4 MiB on receive applies to both RPCs.
+// The margin covers the message's field tag and length. Both ends check this, so a
+// template too big for a warm pool says so instead of failing inside gRPC.
+const MaxManifestBytes = 4<<20 - 16
 
 // Handler is the process-management side of the agent, implemented by
 // vora-init. Exec must send exactly one final chunk with Exit set.
@@ -35,6 +43,11 @@ type Handler interface {
 	Signal(ctx context.Context, sig int32) error
 	// Shutdown asks the agent to terminate the sandbox.
 	Shutdown(ctx context.Context) error
+	// Capture returns the manifest of the sandbox's writable mounts.
+	Capture(ctx context.Context) ([]byte, error)
+	// Reset restores the sandbox to manifest and returns how many entries it
+	// removed. A nil error means the sandbox is proven clean.
+	Reset(ctx context.Context, manifest []byte) (int, error)
 }
 
 // Server adapts a Handler to the generated AgentService server.
@@ -70,6 +83,34 @@ func (s *Server) Shutdown(ctx context.Context, _ *v1.ShutdownRequest) (*v1.Shutd
 		return nil, err
 	}
 	return &v1.ShutdownResponse{}, nil
+}
+
+// Capture lists the sandbox's writable mounts.
+func (s *Server) Capture(ctx context.Context, _ *v1.CaptureRequest) (*v1.CaptureResponse, error) {
+	manifest, err := s.handler.Capture(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkManifestSize(manifest); err != nil {
+		return nil, err
+	}
+	return &v1.CaptureResponse{Manifest: manifest}, nil
+}
+
+// Reset restores the sandbox to the manifest.
+func (s *Server) Reset(ctx context.Context, req *v1.ResetRequest) (*v1.ResetResponse, error) {
+	removed, err := s.handler.Reset(ctx, req.GetManifest())
+	if err != nil {
+		return nil, err
+	}
+	return &v1.ResetResponse{EntriesRemoved: uint32(removed)}, nil
+}
+
+func checkManifestSize(manifest []byte) error {
+	if len(manifest) > MaxManifestBytes {
+		return status.Errorf(codes.ResourceExhausted, "agentproto: manifest is %d bytes, over the %d the agent RPCs carry", len(manifest), MaxManifestBytes)
+	}
+	return nil
 }
 
 // Client is a gRPC client for the in-sandbox agent.
@@ -200,6 +241,28 @@ func (c *Client) Signal(ctx context.Context, sig int32) error {
 func (c *Client) Shutdown(ctx context.Context) error {
 	_, err := c.stub.Shutdown(ctx, &v1.ShutdownRequest{})
 	return err
+}
+
+// Capture asks the agent for the manifest of the sandbox's writable mounts.
+func (c *Client) Capture(ctx context.Context) ([]byte, error) {
+	resp, err := c.stub.Capture(ctx, &v1.CaptureRequest{})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetManifest(), nil
+}
+
+// Reset asks the agent to restore the sandbox to manifest. A nil error means the
+// sandbox is proven clean. It returns how many entries the agent removed.
+func (c *Client) Reset(ctx context.Context, manifest []byte) (int, error) {
+	if err := checkManifestSize(manifest); err != nil {
+		return 0, err
+	}
+	resp, err := c.stub.Reset(ctx, &v1.ResetRequest{Manifest: manifest})
+	if err != nil {
+		return 0, err
+	}
+	return int(resp.GetEntriesRemoved()), nil
 }
 
 // ExecStream adapts the gRPC stream to runtime.ExecStream.
