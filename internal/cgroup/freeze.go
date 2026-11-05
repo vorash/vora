@@ -127,10 +127,11 @@ func pollChange(f *os.File, slice time.Duration) error {
 	}
 }
 
-// Thaw unfreezes the cgroup at dir. A cgroup that is gone needs no thaw.
+// Thaw unfreezes the cgroup at dir. A cgroup that is gone needs no thaw: the
+// open fails with ENOENT, or the write with ENODEV if it went between the two.
 func Thaw(dir string) error {
 	err := writeCgroupFile(dir, "cgroup.freeze", "0")
-	if err == nil || os.IsNotExist(err) {
+	if err == nil || os.IsNotExist(err) || errors.Is(err, unix.ENODEV) {
 		return nil
 	}
 	return fmt.Errorf("cgroup: thaw: %w", err)
@@ -144,18 +145,23 @@ func Thaw(dir string) error {
 // it can be hit. It returns how many processes it signalled. Any error means
 // the process set is not proven.
 func KillOthers(ctx context.Context, dir string, keep []int) (int, error) {
-	if err := Freeze(ctx, dir); err != nil {
-		_ = Thaw(dir)
-		return 0, err
-	}
-	killed, err := killOutside(dir, keep)
-	if thawErr := Thaw(dir); err == nil {
-		err = thawErr
-	}
+	killed, err := killFrozen(ctx, dir, keep)
 	if err != nil {
 		return killed, err
 	}
 	return killed, waitProcs(ctx, dir, keep)
+}
+
+func killFrozen(ctx context.Context, dir string, keep []int) (killed int, err error) {
+	defer func() {
+		if thawErr := Thaw(dir); err == nil {
+			err = thawErr
+		}
+	}()
+	if err := Freeze(ctx, dir); err != nil {
+		return 0, err
+	}
+	return killOutside(dir, keep)
 }
 
 // killOutside signals every listed process not in keep. The caller holds the
