@@ -14,6 +14,13 @@ service AgentService {
   rpc Exec(ExecRequest) returns (stream ExecChunk);
   rpc Signal(SignalRequest) returns (SignalResponse);
   rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+  // Capture lists the sandbox's writable mounts. The runner calls it once, before
+  // the first workload, and keeps the manifest. The agent stores nothing.
+  rpc Capture(CaptureRequest) returns (CaptureResponse);
+  // Reset restores the sandbox's processes and writable mounts to manifest and proves
+  // them. It does not cover IPC namespaces, which are for seccomp to close. Any error
+  // means the sandbox is not proven clean, and the runner must destroy it.
+  rpc Reset(ResetRequest) returns (ResetResponse);
 }
 
 message PingRequest {}
@@ -31,3 +38,18 @@ message SignalResponse {}
 message ShutdownRequest {}
 
 message ShutdownResponse {}
+
+message CaptureRequest {}
+
+message CaptureResponse {
+  // manifest is opaque to the runner: internal/sandboxreset's JSON encoding.
+  bytes manifest = 1;
+}
+
+message ResetRequest {
+  bytes manifest = 1;
+}
+
+message ResetResponse {
+  uint32 entries_removed = 1;
+}

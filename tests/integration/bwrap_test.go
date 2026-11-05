@@ -132,6 +132,13 @@ func newBwrapSandboxWithEnv(t *testing.T, env map[string]string) (*bwrap.Backend
 
 func newBwrapSandboxWith(t *testing.T, env map[string]string, limits runtime.ResourceLimits) (*bwrap.Backend, runtime.Handle) {
 	t.Helper()
+	backend, h, _ := newBwrapSandboxPaths(t, env, limits)
+	return backend, h
+}
+
+// newBwrapSandboxPaths also returns the sandbox's paths on the host.
+func newBwrapSandboxPaths(t *testing.T, env map[string]string, limits runtime.ResourceLimits) (*bwrap.Backend, runtime.Handle, runtime.WorkspaceSpec) {
+	t.Helper()
 
 	initBin := buildBinary(t, "vora-init")
 	t.Setenv("VORA_INIT_BINARY", initBin)
@@ -142,7 +149,13 @@ func newBwrapSandboxWith(t *testing.T, env map[string]string, limits runtime.Res
 	}
 	rootfs := imageRootfs(t, "base")
 
-	stateDir := t.TempDir()
+	// Not t.TempDir: it embeds the test's name, and the control socket under it must
+	// fit in a Unix socket path's 108 bytes.
+	stateDir, err := os.MkdirTemp("", "vora-it-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
 	cfg := config.Config{StateDir: stateDir, SystemdMode: config.SystemdUser}
 	wsManager := workspace.NewManager(cfg.SandboxesDir())
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
@@ -178,7 +191,7 @@ func newBwrapSandboxWith(t *testing.T, env map[string]string, limits runtime.Res
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = backend.Destroy(ctx, h) })
-	return backend, h
+	return backend, h, ws
 }
 
 // Exec output must survive a command that writes and exits immediately. The
