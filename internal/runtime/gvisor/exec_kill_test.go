@@ -13,13 +13,15 @@ import (
 )
 
 // fakeExecRunsc stands in for runsc: `exec` reports a sandbox PID through
-// -internal-pid-file and then runs for $FAKE_EXEC_SECONDS; `kill` is only logged.
+// -internal-pid-file and then runs for $FAKE_EXEC_SECONDS; `kill` is only logged;
+// `state` prints $FAKE_STATE. $FAKE_REFUSE makes exec fail as runsc does, before any PID,
+// and $FAKE_EXIT makes it report a PID and exit with that code.
 const fakeExecRunsc = `#!/bin/sh
 sub=""
 pidfile=""
 prev=""
 for a in "$@"; do
-  case "$a" in exec|kill) [ -z "$sub" ] && sub="$a" ;; esac
+  case "$a" in exec|kill|state) [ -z "$sub" ] && sub="$a" ;; esac
   [ "$prev" = "-internal-pid-file" ] && pidfile="$a"
   prev="$a"
 done
@@ -27,6 +29,18 @@ if [ "$sub" = "kill" ]; then
   echo "$@" >> "$FAKE_KILL_LOG"
   [ -f "$FAKE_SLEEP_PID" ] && kill "$(cat "$FAKE_SLEEP_PID")" 2>/dev/null
   exit 0
+fi
+if [ "$sub" = "state" ]; then
+  printf '{"status":"%s"}\n' "$FAKE_STATE"
+  exit 0
+fi
+if [ -n "$FAKE_REFUSE" ]; then
+  echo "cannot execute" >&2
+  exit 128
+fi
+if [ -n "$FAKE_EXIT" ]; then
+  echo 4242 > "$pidfile"
+  exit "$FAKE_EXIT"
 fi
 # A process that left the command's group: "kill -pid" never reaches it.
 [ -n "$FAKE_HOLDER_SECONDS" ] && { sleep "$FAKE_HOLDER_SECONDS" <&0 & }
@@ -161,6 +175,39 @@ func TestExecThatFinishesIsNotKilled(t *testing.T) {
 	}
 	if got := readKillLog(t, killLog); got != "" {
 		t.Fatalf("a finished exec was killed: %q", got)
+	}
+}
+
+// An exec into a stopped sandbox used to read as the program exiting 128, which a caller
+// counts as the program's own result (#120). The rows next to it must keep their reason: a
+// program may exit 128, and a command that is missing is the caller's mistake.
+func TestExecReasonWhenRunscExits128(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		refuse, state string
+		exit          string
+		want          runtime.ExitReason
+	}{
+		{name: "sandbox stopped", refuse: "1", state: "stopped", want: runtime.ReasonRuntimeFailure},
+		{name: "missing command in a running sandbox", refuse: "1", state: "running", want: runtime.ReasonExited},
+		{name: "program exits 128 in a stopped sandbox", exit: "128", state: "stopped", want: runtime.ReasonExited},
+		{name: "program exits 128", exit: "128", state: "running", want: runtime.ReasonExited},
+		{name: "program exits 3", exit: "3", state: "stopped", want: runtime.ReasonExited},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, hd, _ := fakeExecBackend(t, "0")
+			t.Setenv("FAKE_REFUSE", tc.refuse)
+			t.Setenv("FAKE_EXIT", tc.exit)
+			t.Setenv("FAKE_STATE", tc.state)
+			stream, err := b.Exec(t.Context(), runtime.Handle(fakeHandle{hd.id}), runtime.ExecRequest{Command: "true"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = stream.Close() }()
+			if got := lastChunk(t, stream).Exit.Reason; got != tc.want {
+				t.Fatalf("reason = %s, want %s", got, tc.want)
+			}
+		})
 	}
 }
 

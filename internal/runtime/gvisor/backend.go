@@ -9,6 +9,7 @@ package gvisor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -513,7 +514,7 @@ func (b *Backend) Exec(ctx context.Context, h runtime.Handle, req runtime.ExecRe
 		return nil, err
 	}
 
-	es := &execStream{ctx: execCtx, ch: make(chan runtime.ExecChunk, 16), done: make(chan struct{}), cancel: cancel, cmd: cmd}
+	es := &execStream{ctx: execCtx, ch: make(chan runtime.ExecChunk, 16), done: make(chan struct{}), cancel: cancel, cmd: cmd, pidFile: pidFile, stopped: func() bool { return b.stopped(hd.id) }}
 	// The command's stdout/stderr pipes outlive the killed runsc client for as
 	// long as the command runs, so the kill cannot wait for them to drain.
 	go func() {
@@ -740,6 +741,9 @@ func isMissing(out string) bool {
 // exited. It only has to cover draining what is already buffered.
 const execPipeGrace = time.Second
 
+// runscExitFailure is the exit code of a runsc that failed, rather than of a command.
+const runscExitFailure = 128
+
 // execStream adapts a runsc exec process to runtime.ExecStream.
 type execStream struct {
 	ch     chan runtime.ExecChunk
@@ -748,6 +752,9 @@ type execStream struct {
 	cancel context.CancelFunc
 	cmd    *exec.Cmd
 	once   sync.Once
+	// pidFile is where runsc reports the command's sandbox PID once it has started.
+	pidFile string
+	stopped func() bool
 	// finished is set once the command has run to completion, so a later
 	// cancel (the consumer closing the stream) does not kill anything.
 	finished atomic.Bool
@@ -798,12 +805,44 @@ func (e *execStream) stream(stdout, stderr io.Reader) {
 	reason := runtime.ReasonExited
 	if errors.Is(e.ctx.Err(), context.DeadlineExceeded) {
 		reason = runtime.ReasonTimeout
+	} else if e.refusedByDeadSandbox(code) {
+		reason = runtime.ReasonRuntimeFailure
 	}
 	select {
 	case e.ch <- runtime.ExecChunk{Exit: &runtime.ExecResult{ExitCode: code, Reason: reason}}:
 	case <-e.done:
 	}
 	close(e.ch)
+}
+
+// refusedByDeadSandbox tells a sandbox that has stopped from a program's own exit. runsc
+// exits 128 when it cannot run a command, and a program can exit 128 too, but it has then
+// reported a PID. A missing command also exits 128 with no PID, and that one is the
+// caller's mistake, so the sandbox's state decides. pidFile only goes away once the
+// context ends.
+func (e *execStream) refusedByDeadSandbox(code int) bool {
+	if code != runscExitFailure || e.ctx.Err() != nil {
+		return false
+	}
+	if _, err := os.Stat(e.pidFile); !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	return e.stopped()
+}
+
+// stopped reports whether runsc says the sandbox is no longer running. A runsc that fails
+// to answer says nothing, so that is false.
+func (b *Backend) stopped(id string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := b.run(ctx, "state", "--", id)
+	if err != nil {
+		return isMissing(out)
+	}
+	var state struct {
+		Status string `json:"status"`
+	}
+	return json.Unmarshal([]byte(out), &state) == nil && state.Status == "stopped"
 }
 
 func pipeExec(r io.Reader, send func([]byte), wg *sync.WaitGroup) {
