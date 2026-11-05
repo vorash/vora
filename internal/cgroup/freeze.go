@@ -242,6 +242,12 @@ func waitProcs(ctx context.Context, dir string, keep []int) error {
 		if slices.Equal(pids, want) {
 			return nil
 		}
+		// A kept process that is gone cannot come back, so waiting proves nothing.
+		for _, pid := range want {
+			if !slices.Contains(pids, pid) {
+				return fmt.Errorf("cgroup: process %d is gone: cgroup holds %v, want %v", pid, pids, want)
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("cgroup: processes still present: %v, want %v: %w", pids, want, ctx.Err())

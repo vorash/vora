@@ -119,6 +119,22 @@ func TestKillOthersProvesTheProcessSet(t *testing.T) {
 	}
 }
 
+// A kept process that is gone cannot come back. The reset fails at once rather
+// than spending the settle time on a sandbox that is going to be destroyed.
+func TestKillOthersFailsAtOnceWhenAKeptProcessIsGone(t *testing.T) {
+	dir := t.TempDir()
+	alive, gone := os.Getpid(), neverPID(t)
+	fakeFreezer(t, dir, []int{alive}, "1")
+	start := time.Now()
+	_, err := KillOthers(context.Background(), dir, []int{alive, gone})
+	if err == nil || !strings.Contains(err.Error(), strconv.Itoa(gone)) {
+		t.Fatalf("KillOthers = %v, want an error naming process %d", err, gone)
+	}
+	if took := time.Since(start); took > settleTimeout/5 {
+		t.Fatalf("KillOthers took %v to notice", took)
+	}
+}
+
 // sleeper starts a process this test owns and can check on. It leads its own
 // process group, so that a kill gone wrong can only reach the sleeper.
 func sleeper(t *testing.T) *exec.Cmd {
