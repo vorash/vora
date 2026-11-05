@@ -27,7 +27,9 @@ type poolRecord struct {
 
 func validPoolID(id string) bool { return ulid.ValidPrefix(id, ulid.PrefixPool) }
 
-func (s *Server) poolPath(id pool.ID) string { return filepath.Join(s.cfg.PoolsDir(), string(id)+".json") }
+func (s *Server) poolPath(id pool.ID) string {
+	return filepath.Join(s.cfg.PoolsDir(), string(id)+".json")
+}
 
 // savePool writes rec atomically.
 func (s *Server) savePool(rec poolRecord) error {

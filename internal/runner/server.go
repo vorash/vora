@@ -758,9 +758,10 @@ type execOptions struct {
 	// the exec's stdout cannot hold a pool member.
 	hardDeadline time.Duration
 	// beforeFirst runs once, after the backend accepted the command and before
-	// anything is forwarded. The pool sends its run frame here. If runExec
-	// fails and beforeFirst never ran, the exec did not start.
-	beforeFirst func() error
+	// anything is forwarded, with the minted execution id. The pool sends its
+	// run frame here. If runExec fails and beforeFirst never ran, the exec did
+	// not start.
+	beforeFirst func(executionID string) error
 }
 
 // timedOutExitCode is the exit code of a run the runner's hard deadline
@@ -801,7 +802,7 @@ func (s *Server) runExec(ctx context.Context, sandboxID string, backend runtime.
 	}
 	defer es.Close()
 	if opts.beforeFirst != nil {
-		if err := opts.beforeFirst(); err != nil {
+		if err := opts.beforeFirst(execReq.ExecutionID); err != nil {
 			return failed(), err
 		}
 	}

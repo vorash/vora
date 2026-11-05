@@ -658,10 +658,14 @@ func (x *GetPoolRequest) GetTenantId() string {
 }
 
 type DeletePoolRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	PoolId        string                 `protobuf:"bytes,1,opt,name=pool_id,json=poolId,proto3" json:"pool_id,omitempty"`
-	TenantId      string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
-	Actor         *Actor                 `protobuf:"bytes,3,opt,name=actor,proto3" json:"actor,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	PoolId   string                 `protobuf:"bytes,1,opt,name=pool_id,json=poolId,proto3" json:"pool_id,omitempty"`
+	TenantId string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	Actor    *Actor                 `protobuf:"bytes,3,opt,name=actor,proto3" json:"actor,omitempty"`
+	// wait_ms is how long to wait for busy members to finish before answering
+	// drained=false. 0 answers at once. Keep it under the call's own deadline,
+	// or the answer never reaches the caller.
+	WaitMs        int64 `protobuf:"varint,4,opt,name=wait_ms,json=waitMs,proto3" json:"wait_ms,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -715,6 +719,13 @@ func (x *DeletePoolRequest) GetActor() *Actor {
 		return x.Actor
 	}
 	return nil
+}
+
+func (x *DeletePoolRequest) GetWaitMs() int64 {
+	if x != nil {
+		return x.WaitMs
+	}
+	return 0
 }
 
 // drained is false while busy members are still finishing; the call is
@@ -1183,11 +1194,12 @@ const file_api_proto_v1_pool_proto_rawDesc = "" +
 	"\x05actor\x18\x02 \x01(\v2\x0e.vora.v1.ActorR\x05actor\"F\n" +
 	"\x0eGetPoolRequest\x12\x17\n" +
 	"\apool_id\x18\x01 \x01(\tR\x06poolId\x12\x1b\n" +
-	"\ttenant_id\x18\x02 \x01(\tR\btenantId\"o\n" +
+	"\ttenant_id\x18\x02 \x01(\tR\btenantId\"\x88\x01\n" +
 	"\x11DeletePoolRequest\x12\x17\n" +
 	"\apool_id\x18\x01 \x01(\tR\x06poolId\x12\x1b\n" +
 	"\ttenant_id\x18\x02 \x01(\tR\btenantId\x12$\n" +
-	"\x05actor\x18\x03 \x01(\v2\x0e.vora.v1.ActorR\x05actor\".\n" +
+	"\x05actor\x18\x03 \x01(\v2\x0e.vora.v1.ActorR\x05actor\x12\x17\n" +
+	"\await_ms\x18\x04 \x01(\x03R\x06waitMs\".\n" +
 	"\x12DeletePoolResponse\x12\x18\n" +
 	"\adrained\x18\x01 \x01(\bR\adrained\"\x98\x01\n" +
 	"\x10RunInPoolRequest\x12\x17\n" +

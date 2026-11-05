@@ -309,14 +309,19 @@ func (s *Server) GetPool(ctx context.Context, req *v1.GetPoolRequest) (*v1.Pool,
 	return s.poolToProto(e), nil
 }
 
-// DeletePool drains the pool under the request's deadline and reports
-// whether every member is gone. While busy members finish, the pool stays
-// registered as draining and the caller repeats the call.
+// DeletePool drains the pool for up to wait_ms and reports whether every
+// member is gone. While busy members finish, the pool stays registered as
+// draining and the caller repeats the call.
 func (s *Server) DeletePool(ctx context.Context, req *v1.DeletePoolRequest) (*v1.DeletePoolResponse, error) {
 	e, err := s.lookupPool(req.GetPoolId(), req.GetTenantId())
 	if err != nil {
 		return nil, err
 	}
+	if req.GetWaitMs() < 0 {
+		return nil, status.Error(codes.InvalidArgument, "wait_ms must not be negative")
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(req.GetWaitMs())*time.Millisecond)
+	defer cancel()
 	if !e.draining.Swap(true) {
 		rec := poolRecord{ID: e.spec.ID(), Spec: e.spec.Raw(), CreatedAt: e.createdAt, Draining: true}
 		if err := s.savePool(rec); err != nil {
@@ -377,9 +382,9 @@ func (s *Server) RunInPool(req *v1.RunInPoolRequest, stream grpc.ServerStreaming
 			poolID:       string(e.spec.ID()),
 			sandboxRun:   pl.SandboxRun,
 			hardDeadline: execReq.Timeout + s.execGrace,
-			beforeFirst: func() error {
+			beforeFirst: func(executionID string) error {
 				started = true
-				return stream.Send(runFrameToProto(e.spec.ID(), pl, ""))
+				return stream.Send(runFrameToProto(e.spec.ID(), pl, executionID))
 			},
 		}, func(c *v1.ExecChunk) error { return stream.Send(execToRunChunk(c)) })
 		if err != nil && !started {

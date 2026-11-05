@@ -292,12 +292,12 @@ func checkTemplate(t runtime.SandboxSpec, limits Limits) error {
 // it.
 func (s Spec) Raw() RawSpec { return s.raw }
 
-func (s Spec) ID() ID                { return s.raw.ID }
-func (s Spec) Name() string          { return s.raw.Name }
-func (s Spec) TenantID() string      { return s.raw.TenantID }
-func (s Spec) AgentID() string       { return s.raw.AgentID }
-func (s Spec) Size() int             { return s.size }
-func (s Spec) MaxSize() int          { return s.maxSize }
+func (s Spec) ID() ID                       { return s.raw.ID }
+func (s Spec) Name() string                 { return s.raw.Name }
+func (s Spec) TenantID() string             { return s.raw.TenantID }
+func (s Spec) AgentID() string              { return s.raw.AgentID }
+func (s Spec) Size() int                    { return s.size }
+func (s Spec) MaxSize() int                 { return s.maxSize }
 func (s Spec) MaxRuns() int                 { return s.maxRuns }
 func (s Spec) MaxAge() time.Duration        { return s.maxAge }
 func (s Spec) MaxRun() time.Duration        { return s.maxRun }

@@ -87,6 +87,10 @@ message DeletePoolRequest {
   string pool_id = 1;
   string tenant_id = 2;
   Actor actor = 3;
+  // wait_ms is how long to wait for busy members to finish before answering
+  // drained=false. 0 answers at once. Keep it under the call's own deadline,
+  // or the answer never reaches the caller.
+  int64 wait_ms = 4;
 }
 
 // drained is false while busy members are still finishing; the call is
