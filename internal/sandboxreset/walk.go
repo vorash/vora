@@ -159,8 +159,10 @@ func entryFromStat(rel string, st *unix.Stat_t) (Entry, error) {
 	case unix.S_IFREG:
 		e.Type = TypeFile
 		e.Size = st.Size
+		e.CtimeNs = st.Ctim.Nano()
 	case unix.S_IFLNK:
 		e.Type = TypeSymlink
+		e.CtimeNs = st.Ctim.Nano()
 	case unix.S_IFCHR:
 		e.Type = TypeCharDev
 		e.Rdev = st.Rdev
@@ -169,8 +171,10 @@ func entryFromStat(rel string, st *unix.Stat_t) (Entry, error) {
 		e.Rdev = st.Rdev
 	case unix.S_IFSOCK:
 		e.Type = TypeSocket
+		e.CtimeNs = st.Ctim.Nano()
 	case unix.S_IFIFO:
 		e.Type = TypeFIFO
+		e.CtimeNs = st.Ctim.Nano()
 	default:
 		return Entry{}, fmt.Errorf("%s: unknown file type %#o", shortRel(rel), st.Mode&unix.S_IFMT)
 	}

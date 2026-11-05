@@ -70,17 +70,14 @@ func TestRestoreRemovesWhatARunPlanted(t *testing.T) {
 	s.mknod("mnt/planted-sock", unix.S_IFSOCK|0o600)
 	s.write("mnt/bad\xffname", "names that are not UTF-8 still go")
 	s.symlink("nonexistent/dangling", "mnt/dangling")
-	if err := os.Link(s.path("mnt/file"), s.path("mnt/hardlink-to-listed")); err != nil {
-		t.Fatal(err)
-	}
 
 	removed, err := restore(t, m, info)
 	if err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
 	// .hidden, .config tree (5 objects), two planted in listed dirs, pipe, sock,
-	// bad name, dangling link, hard link.
-	if want := 13; removed != want {
+	// bad name, dangling link.
+	if want := 12; removed != want {
 		t.Errorf("removed = %d, want %d", removed, want)
 	}
 	s.assertNames("mnt", seededNames...)
@@ -445,6 +442,95 @@ func TestRestoreRejectsAttributesOnOtherEntryTypes(t *testing.T) {
 				t.Fatalf("err = %v, want ErrUnrestorable", err)
 			}
 		})
+	}
+}
+
+// None of these changes a type, mode, owner, size, content, link target or attribute
+// that the listing holds. They only leave data in timestamps, or leave no other trace,
+// so only the change time can show them.
+func TestRestoreRejectsChangesOnlyTheChangeTimeShows(t *testing.T) {
+	sameTimes := func(s *sandbox, rel string) {
+		st := s.lstat(rel)
+		s.utimes(rel, st.Atim, st.Mtim)
+	}
+	encoded := func(s *sandbox, rel string) {
+		s.utimes(rel, unix.Timespec{Sec: 1234567, Nsec: 1}, unix.Timespec{Sec: 7654321, Nsec: 2})
+	}
+	for name, change := range map[string]func(s *sandbox){
+		"utimes on a file, same values":    func(s *sandbox) { sameTimes(s, "mnt/file") },
+		"utimes on a file":                 func(s *sandbox) { encoded(s, "mnt/file") },
+		"utimes on a nested file":          func(s *sandbox) { encoded(s, "mnt/dir/inner") },
+		"utimes on a symlink":              func(s *sandbox) { encoded(s, "mnt/link") },
+		"utimes on a symlink, same values": func(s *sandbox) { sameTimes(s, "mnt/link") },
+		"utimes on a fifo":                 func(s *sandbox) { encoded(s, "mnt/pipe") },
+		"utimes on a socket":               func(s *sandbox) { encoded(s, "mnt/sock") },
+		"utimes on a file-root mount":      func(s *sandbox) { encoded(s, "root-file") },
+		"chmod and back":                   func(s *sandbox) { s.chmod("mnt/file", 0o600); s.chmod("mnt/file", 0o644) },
+		"attribute set and removed": func(s *sandbox) {
+			s.setxattr("mnt/file", "user.leak", "x")
+			s.removexattr("mnt/file", "user.leak")
+		},
+		"rewritten with the same bytes": func(s *sandbox) { s.write("mnt/file", "hello") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newSandbox(t)
+			seedTree(s)
+			s.write("root-file", "x")
+			info := s.info(rw(s.path("root-file")))
+			m := capture(t, info)
+			waitForClockTick(t)
+			change(s)
+			if _, err := restore(t, m, info); !errors.Is(err, ErrUnrestorable) {
+				t.Fatalf("err = %v, want ErrUnrestorable", err)
+			}
+		})
+	}
+}
+
+// The prune removes the link, but the file's change time cannot go back, so the run
+// fails the reset.
+func TestRestoreFailsAfterAHardLinkToAListedFile(t *testing.T) {
+	s := newSandbox(t)
+	seedTree(s)
+	info := s.info()
+	m := capture(t, info)
+	waitForClockTick(t)
+	if err := os.Link(s.path("mnt/file"), s.path("mnt/hardlink-to-listed")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restore(t, m, info); !errors.Is(err, ErrUnrestorable) {
+		t.Fatalf("err = %v, want ErrUnrestorable", err)
+	}
+}
+
+// Every run reads what the image holds, and a reset must not destroy a sandbox for
+// that. Reads move access times, so this first proves that they did move here.
+func TestRestoreAcceptsReadsOfListedEntries(t *testing.T) {
+	s := newSandbox(t)
+	seedTree(s)
+	info := s.info()
+	m := capture(t, info)
+	before := s.lstat("mnt/file").Atim
+	waitForClockTick(t)
+
+	if _, err := os.ReadFile(s.path("mnt/file")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.ReadFile(s.path("mnt/dir/inner")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Readlink(s.path("mnt/link")); err != nil {
+		t.Fatal(err)
+	}
+	s.names("mnt")
+	s.names("mnt/dir")
+	s.lstat("mnt/sock")
+
+	if s.lstat("mnt/file").Atim == before {
+		t.Skipf("reads do not move access times on the filesystem under %s", s.base)
+	}
+	if removed, err := restore(t, m, info); err != nil || removed != 0 {
+		t.Fatalf("Restore: removed %d, %v", removed, err)
 	}
 }
 

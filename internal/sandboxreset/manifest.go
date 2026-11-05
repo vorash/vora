@@ -86,6 +86,12 @@ type Entry struct {
 	// Xattrs is a digest of every extended attribute, POSIX ACLs included. It is
 	// empty when there are none.
 	Xattrs string `json:"xattrs,omitempty"`
+	// CtimeNs is the change time in nanoseconds of everything but a directory or a
+	// device node. A run cannot set it, and setting the other times, a mode, an owner
+	// or an attribute moves it. A device node is a host inode under bwrap, which the
+	// host can touch. A hard link planted to a listed file moves it when removed, so
+	// that run fails the reset.
+	CtimeNs int64 `json:"ctime_ns,omitempty"`
 }
 
 // validate is the check at the boundary where a manifest comes back from the

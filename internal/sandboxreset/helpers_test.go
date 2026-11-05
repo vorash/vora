@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -146,6 +147,41 @@ func (s *sandbox) removexattr(rel, name string) {
 	s.t.Helper()
 	if err := unix.Removexattr(s.path(rel), name); err != nil {
 		s.t.Fatal(err)
+	}
+}
+
+func (s *sandbox) lstat(rel string) unix.Stat_t {
+	s.t.Helper()
+	var st unix.Stat_t
+	if err := unix.Lstat(s.path(rel), &st); err != nil {
+		s.t.Fatal(err)
+	}
+	return st
+}
+
+func (s *sandbox) utimes(rel string, atime, mtime unix.Timespec) {
+	s.t.Helper()
+	if err := unix.UtimesNanoAt(unix.AT_FDCWD, s.path(rel), []unix.Timespec{atime, mtime}, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		s.t.Fatal(err)
+	}
+}
+
+// waitForClockTick lets the coarse clock that some filesystems stamp files from
+// move on, so a change after this cannot get the timestamp of a change before it.
+func waitForClockTick(t *testing.T) {
+	t.Helper()
+	var start, now unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_REALTIME_COARSE, &start); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if err := unix.ClockGettime(unix.CLOCK_REALTIME_COARSE, &now); err != nil {
+			t.Fatal(err)
+		}
+		if now != start {
+			return
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

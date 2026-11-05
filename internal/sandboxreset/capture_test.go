@@ -110,8 +110,34 @@ func TestCaptureRecordsWhatEachEntryKindNeeds(t *testing.T) {
 			t.Fatal(err)
 		}
 		want.UID, want.GID, want.Ino = st.Uid, st.Gid, st.Ino
+		if want.Type != TypeDir {
+			want.CtimeNs = st.Ctim.Nano()
+		}
 		if got := entry(t, l, rel); got != want {
 			t.Errorf("%s: got %+v, want %+v", rel, got, want)
+		}
+	}
+}
+
+// A device node is a host inode under bwrap, and the host can touch it, so a change
+// time there would fail a reset no run caused.
+func TestEntryRecordsAChangeTimeOnlyWhereARunIsTheOnlyWriter(t *testing.T) {
+	ctime := unix.Timespec{Sec: 1000, Nsec: 5}
+	for mode, want := range map[uint32]int64{
+		unix.S_IFREG:  ctime.Nano(),
+		unix.S_IFLNK:  ctime.Nano(),
+		unix.S_IFSOCK: ctime.Nano(),
+		unix.S_IFIFO:  ctime.Nano(),
+		unix.S_IFCHR:  0,
+		unix.S_IFBLK:  0,
+		unix.S_IFDIR:  0,
+	} {
+		got, err := entryFromStat("x", &unix.Stat_t{Mode: mode, Ctim: ctime})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.CtimeNs != want {
+			t.Errorf("mode %#o: CtimeNs = %d, want %d", mode, got.CtimeNs, want)
 		}
 	}
 }
