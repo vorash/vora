@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -353,16 +354,10 @@ func (s *Server) RunInPool(req *v1.RunInPoolRequest, stream grpc.ServerStreaming
 	if err != nil {
 		return err
 	}
-	if req.GetExec().GetExecutionId() != "" {
-		return status.Error(codes.InvalidArgument, "execution_id is assigned by the runner")
+	if err := validateRunExec(req.GetExec(), e.spec.MaxRun()); err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
 	}
 	execReq := execRequestFromProto(req.GetExec())
-	switch {
-	case execReq.Timeout <= 0:
-		return status.Error(codes.InvalidArgument, "timeout_seconds is required")
-	case execReq.Timeout > e.spec.MaxRun():
-		return status.Errorf(codes.InvalidArgument, "timeout_seconds exceeds the pool's max_run of %s", e.spec.MaxRun())
-	}
 	keyID := req.GetActor().GetKeyId()
 
 	sender := &runSender{stream: stream}
@@ -392,17 +387,67 @@ func (s *Server) RunInPool(req *v1.RunInPoolRequest, stream grpc.ServerStreaming
 			},
 		}, func(c *v1.ExecChunk) error { return sender.send(execToRunChunk(c)) })
 		if err != nil && !started {
+			// A client that left says nothing about the member, as in pool.admit:
+			// it goes through its reset and stays.
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return fmt.Errorf("%w: %w", pool.ErrNotStarted, err)
 		}
 		return err
 	})
-	if placement.SandboxID != "" && !errors.Is(err, pool.ErrNotStarted) {
+	if started {
 		s.observeRun(e, placement, reason, time.Since(execStart), done)
 	}
 	if err != nil {
 		return poolStatus(err)
 	}
 	return sender.send(runDoneToProto(done))
+}
+
+// Limits on what an exec passes to a process. runsc takes the command, args and
+// env on its own argv, and exec fails with E2BIG past these (MAX_ARG_STRLEN, and
+// well inside the default ARG_MAX), which would read as a broken member.
+const (
+	maxExecStringBytes = 128<<10 - 1
+	maxExecArgvBytes   = 1 << 20
+)
+
+// validateRunExec refuses what a backend would refuse for the request's own
+// content. A refused exec reads as a broken member and retires it, so this runs
+// before a member is borrowed and a bad request costs none.
+func validateRunExec(exec *v1.ExecRequest, maxRun time.Duration) error {
+	if exec.GetExecutionId() != "" {
+		return errors.New("execution_id is assigned by the runner")
+	}
+	if exec.GetCommand() == "" {
+		return errors.New("command is required")
+	}
+	timeout, err := secondsFromProto("timeout_seconds", exec.GetTimeoutSeconds())
+	switch {
+	case err != nil:
+		return err
+	case timeout == 0:
+		return errors.New("timeout_seconds is required")
+	case timeout > maxRun:
+		return fmt.Errorf("timeout_seconds exceeds the pool's max_run of %s", maxRun)
+	}
+	total := 0
+	for _, list := range [][]string{{exec.GetCommand(), exec.GetCwd()}, exec.GetArgs(), exec.GetEnv()} {
+		for _, v := range list {
+			total += len(v)
+			switch {
+			case strings.IndexByte(v, 0) >= 0:
+				return errors.New("command, args, cwd and env must not contain a NUL byte")
+			case len(v) > maxExecStringBytes:
+				return fmt.Errorf("a command, arg, cwd or env entry exceeds %d bytes", maxExecStringBytes)
+			}
+		}
+	}
+	if total > maxExecArgvBytes {
+		return fmt.Errorf("command, args, cwd and env exceed %d bytes", maxExecArgvBytes)
+	}
+	return nil
 }
 
 // errClientStalled ends a run whose client stopped reading.
@@ -454,12 +499,15 @@ func (r *runSender) wait(limit context.Context) error {
 	}
 }
 
-// observeRun records one run that reached a member.
+// observeRun records one run whose program started. It also observes
+// vora_exec_duration_seconds, as a pooled run already counts in the other
+// vora_exec_* metrics and a histogram missing pool traffic would disagree with them.
 func (s *Server) observeRun(e *poolEntry, pl pool.Placement, reason runtime.ExitReason, took time.Duration, done pool.Done) {
 	start := "cold"
 	if pl.Warm {
 		start = "warm"
 	}
+	s.metrics.ExecDuration.Observe(took.Seconds())
 	label := e.label()
 	s.metrics.PoolRunsTotal.WithLabelValues(label, start, string(reason)).Inc()
 	s.metrics.PoolRunDuration.WithLabelValues(label, start).Observe(took.Seconds())
