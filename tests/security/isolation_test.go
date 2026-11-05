@@ -141,10 +141,22 @@ except Exception:
 //
 // Why it matters: credentials in the environment or /proc are trivially
 // exfiltrated by untrusted code; Vora brokers credentials outside the sandbox.
+// The workload runs as the same uid as PID 1 and PID 2, so their /proc environ
+// is as readable to it as its own (vorash/vora#126).
+//
+// A NetworkNone sandbox starts through the user manager, which never sees this
+// process's environment, so on bwrap the secret goes in the manager too: without
+// that this test cannot fail on that path. Start paths that run from the runner
+// (full, restricted, private) need CAP_NET_ADMIN, which the isolation job lacks:
+// scripts/test-system-unit.sh checks them end to end, and TestNetnsCommandEnv
+// checks what they pass.
 func TestNoSecretsLeak(t *testing.T) {
 	secret := "hunter2-" + strings.Repeat("x", 16)
 	t.Setenv(testSecret, secret)
 	forEachBackend(t, func(t *testing.T, f *fixture) {
+		if _, ok := f.backend.(*bwrap.Backend); ok {
+			setManagerEnv(t, testSecret, secret)
+		}
 		h := f.create("sbx_secret", limits(128, 64))
 
 		out, _, _ := f.exec(h, "env")
@@ -157,6 +169,12 @@ func TestNoSecretsLeak(t *testing.T) {
 		}
 		if strings.Contains(out, testSecret) {
 			t.Fatal("runner secret name leaked into /proc/self/environ")
+		}
+		for _, pid := range []string{"1", "2"} {
+			environ := f.procEnviron(h, pid)
+			if strings.Contains(environ, secret) || strings.Contains(environ, testSecret) {
+				t.Fatalf("runner secret leaked into /proc/%s/environ", pid)
+			}
 		}
 	})
 }

@@ -121,8 +121,8 @@ func TestArgsBindsResolver(t *testing.T) {
 // nsenter can join a sandbox's netns, and bwrap refuses to run holding
 // capabilities when it is not setuid. The launch must clear them in between.
 func TestNsenterBwrapArgsDropCapabilitiesBeforeBwrap(t *testing.T) {
-	got := nsenterBwrapArgs(4242, "/usr/bin/bwrap", []string{"--unshare-user", "--", "/vora/vora-init"})
-	want := []string{"-t", "4242", "-n", "setpriv", "--ambient-caps=-all", "--inh-caps=-all", "--", "/usr/bin/bwrap", "--unshare-user", "--", "/vora/vora-init"}
+	got := nsenterBwrapArgs(4242, "/usr/bin/setpriv", "/usr/bin/bwrap", []string{"--unshare-user", "--", "/vora/vora-init"})
+	want := []string{"-t", "4242", "-n", "/usr/bin/setpriv", "--ambient-caps=-all", "--inh-caps=-all", "--", "/usr/bin/bwrap", "--unshare-user", "--", "/vora/vora-init"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("nsenter argv = %v\nwant           %v", got, want)
 	}

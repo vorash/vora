@@ -29,6 +29,11 @@ IMAGES=(
 )
 NETWORKS=(none restricted full private)
 
+# Fake secrets, one in each environment a sandbox must not inherit.
+RUNNER_MARKER=VORA_TEST_RUNNER_MARKER
+MANAGER_MARKER=VORA_TEST_MANAGER_MARKER
+SPEC_VAR=VORA_TEST_SPEC_VAR
+
 # nerdctl's rootless containerd scripts (Ubuntu packages containerd and
 # rootlesskit but not these), pinned to v2.4.0.
 NERDCTL_COMMIT=bbc533ce69509508731f7993ef1cc078bcb99245
@@ -123,6 +128,7 @@ install_unit() {
   # Force containerd images: in auto mode a containerd failure falls back to
   # the image cache and would hide a rootfs path problem.
   sed -i 's/^VORA_IMAGES_MODE=.*/VORA_IMAGES_MODE=containerd/' /etc/vora/runner.env
+  echo "$RUNNER_MARKER=fake-not-a-secret" >>/etc/vora/runner.env
   systemctl restart vora-runner.service
   wait_socket
 }
@@ -174,6 +180,7 @@ create() {
     restricted) args+=(--allow-domain example.com) ;;
     private) args+=(--tenant ci) ;;
   esac
+  args+=("${@:3}")
   out="$(cli --json "${args[@]}")" || return 1
   sed -n 's/.*"id": *"\([^"]*\)".*/\1/p' <<<"$out" | head -1
 }
@@ -214,6 +221,45 @@ sandbox_has_no_capabilities() {
   id="$(create "${IMAGES[0]}" full)" && [[ -n "$id" ]] || return 1
   [[ "$(cli exec "$id" -- grep -cE '^Cap(Inh|Prm|Eff|Amb):[[:space:]]+0+$' /proc/self/status)" == 4 ]] || rc=1
   cli sandbox destroy "$id" >/dev/null || rc=1
+  return "$rc"
+}
+
+# Variable names in a sandbox process's environment, one per line. Fails when
+# the file cannot be read.
+environ_names() {
+  cli exec "$1" -- cat "/proc/$2/environ" | tr '\0' '\n' | cut -d= -f1
+}
+
+# The runner's environment holds its secrets, and a workload runs as the same
+# uid as PID 1 (bwrap) and PID 2 (vora-init), so it can read their environ
+# (vorash/vora#126). none starts through the user manager, the others from the
+# runner; neither environment may reach the sandbox. PID 1 must be empty: its
+# environ is what it was started with. The rest get HOME, PATH and PWD from
+# bwrap plus the spec env, which must still arrive.
+sandbox_env_scrubbed() {
+  local network="$1" id names proc extra rc=0
+  tr '\0' '\n' <"/proc/$(systemctl show -p MainPID --value vora-runner.service)/environ" | grep -q "^$RUNNER_MARKER=" || {
+    echo "the runner has no $RUNNER_MARKER, so this check proves nothing" >&2; return 1; }
+  as_vora systemctl --user set-environment "$MANAGER_MARKER=fake-not-a-secret" || return 1
+  id="$(create "${IMAGES[0]}" "$network" --env "$SPEC_VAR=spec-value")" && [[ -n "$id" ]] || rc=1
+  if [[ "$rc" -eq 0 ]]; then
+    [[ "$(cli exec "$id" -- cat /proc/1/cmdline | tr '\0' ' ')" == *bwrap* ]] || { echo "PID 1 is not bwrap" >&2; rc=1; }
+    [[ "$(cli exec "$id" -- cat /proc/2/cmdline | tr '\0' ' ')" == *vora-init* ]] || { echo "PID 2 is not vora-init" >&2; rc=1; }
+    if names="$(environ_names "$id" 1)"; then
+      [[ -z "$names" ]] || { echo "network=$network: /proc/1/environ holds: ${names//$'\n'/ }" >&2; rc=1; }
+    else
+      echo "network=$network: cannot read /proc/1/environ" >&2; rc=1
+    fi
+    for proc in 2 self; do
+      # Only PID 2 may be unreadable: a non-dumpable vora-init holds nothing to read.
+      names="$(environ_names "$id" "$proc")" || [[ "$proc" == 2 ]] || { echo "network=$network: cannot read /proc/$proc/environ" >&2; rc=1; }
+      extra="$(grep -vxE "HOME|PATH|PWD|$SPEC_VAR" <<<"$names" || true)"
+      [[ -z "$extra" ]] || { echo "network=$network: /proc/$proc/environ holds: ${extra//$'\n'/ }" >&2; rc=1; }
+    done
+    [[ "$(cli exec "$id" -- printenv "$SPEC_VAR")" == spec-value ]] || { echo "network=$network: the spec env did not arrive" >&2; rc=1; }
+    cli sandbox destroy "$id" >/dev/null || rc=1
+  fi
+  as_vora systemctl --user unset-environment "$MANAGER_MARKER" || rc=1
   return "$rc"
 }
 
@@ -329,6 +375,9 @@ test_unit() {
     for network in "${NETWORKS[@]}"; do
       check "sandbox ${image%%@*} network=$network" run_sandbox "$image" "$network"
     done
+  done
+  for network in "${NETWORKS[@]}"; do
+    check "sandbox environment scrubbed network=$network" sandbox_env_scrubbed "$network"
   done
   check "runner holds only its three capabilities" runner_capabilities
   check "netns sandbox holds no capabilities" sandbox_has_no_capabilities
