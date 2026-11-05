@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -144,9 +145,16 @@ else:
 type ipcSandbox struct {
 	backend runtime.Backend
 	h       runtime.Handle
-	// capture returns what reset needs to put the sandbox back.
-	capture func(t *testing.T) []byte
-	reset   func(t *testing.T, manifest []byte)
+	// capture returns what tryReset needs to put the sandbox back.
+	capture  func(t *testing.T) []byte
+	tryReset func(manifest []byte) error
+}
+
+func (s ipcSandbox) reset(t *testing.T, manifest []byte) {
+	t.Helper()
+	if err := s.tryReset(manifest); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
 }
 
 func (s ipcSandbox) probe(t *testing.T, mode string) map[string]int {
@@ -229,11 +237,9 @@ func newBwrapIPCSandbox(t *testing.T, denyIPC bool) ipcSandbox {
 		backend: rs.backend,
 		h:       rs.h,
 		capture: rs.capture,
-		reset: func(t *testing.T, manifest []byte) {
-			t.Helper()
-			if _, err := rs.reset(manifest); err != nil {
-				t.Fatalf("Reset: %v", err)
-			}
+		tryReset: func(manifest []byte) error {
+			_, err := rs.reset(manifest)
+			return err
 		},
 	}
 }
@@ -293,12 +299,12 @@ func newGvisorIPCSandbox(t *testing.T, denyIPC bool) ipcSandbox {
 			t.Helper()
 			return []byte(mustExec(t, backend, h, "/vora/vora-init", "capture"))
 		},
-		reset: func(t *testing.T, manifest []byte) {
-			t.Helper()
+		tryReset: func(manifest []byte) error {
 			stdout, stderr, code := execSandbox(t, backend, h, runtime.ExecRequest{Command: "/vora/vora-init", Args: []string{"reset"}, Stdin: manifest})
 			if code != 0 {
-				t.Fatalf("vora-init reset: exit %d, stdout %q, stderr %q", code, stdout, stderr)
+				return fmt.Errorf("vora-init reset: exit %d, stdout %q, stderr %q", code, stdout, stderr)
 			}
+			return nil
 		},
 	}
 }
