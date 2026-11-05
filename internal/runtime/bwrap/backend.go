@@ -56,6 +56,9 @@ type Backend struct {
 	keepalive time.Duration
 	pinging   sync.WaitGroup
 
+	// holds is cgroup.Holds, replaced by tests whose cgroup is a plain directory.
+	holds func(dir string, pid int) (bool, error)
+
 	mu      sync.Mutex
 	handles map[string]*handle
 }
@@ -105,6 +108,7 @@ func New(cfg config.Config, cgroups cgroup.Manager, logger *slog.Logger) (*Backe
 		life:       life,
 		endLife:    endLife,
 		keepalive:  keepaliveInterval,
+		holds:      cgroup.Holds,
 		handles:    make(map[string]*handle),
 	}, nil
 }

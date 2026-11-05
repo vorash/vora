@@ -13,9 +13,13 @@ import (
 // cgroupRoot is the cgroup v2 mount point.
 var cgroupRoot = "/sys/fs/cgroup"
 
-// readStats reads resource usage from a cgroup v2 directory.
+// readStats reads resource usage from the cgroup at cgroupPath under the mount.
 func readStats(cgroupPath string) (*runtime.Stats, error) {
-	base := filepath.Join(cgroupRoot, cgroupPath)
+	return readStatsDir(filepath.Join(cgroupRoot, cgroupPath))
+}
+
+// readStatsDir reads resource usage from a cgroup v2 directory.
+func readStatsDir(base string) (*runtime.Stats, error) {
 	if _, err := os.Stat(base); err != nil {
 		if os.IsNotExist(err) {
 			return nil, ErrNotFound
