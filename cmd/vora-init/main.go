@@ -47,12 +47,6 @@ func main() {
 		pause()
 		return
 	}
-	// Each exec starts as `vora-init workload <path> <argv...>`; see
-	// workloadCommand. It runs before seccomp.Install because the filter is
-	// already inherited from the agent.
-	if len(os.Args) > 3 && os.Args[1] == workloadArg {
-		runWorkload(os.Args[2], os.Args[3:])
-	}
 
 	socket := flag.String("socket", "/run/vora/control.sock", "control socket path inside the sandbox")
 	grace := flag.Duration("grace", 20*time.Second, "exit if the runner has not contacted us for this long")
@@ -152,6 +146,7 @@ func pause() {
 type agent struct {
 	socket   string
 	grace    time.Duration
+	oom      *oomScore
 	logger   *slog.Logger
 	lastSeen atomic.Int64
 	// activeStreams counts open gRPC streams: a long silent exec is proof the
@@ -179,6 +174,12 @@ func newAgent(socket string, grace time.Duration, logger *slog.Logger) *agent {
 		done:   make(chan struct{}),
 	}
 	a.lastSeen.Store(time.Now().UnixNano())
+	oom, err := openOOMScore()
+	if err != nil {
+		// Only costs the choice of OOM victim; the sandbox can still run execs.
+		logger.Warn("exec oom score unavailable", "error", err)
+	}
+	a.oom = oom
 	return a
 }
 
@@ -259,7 +260,8 @@ func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.Exe
 	if cwd == "" {
 		cwd = "/workspace"
 	}
-	cmd := workloadCommand(command, req.GetArgs(), cwd)
+	cmd := exec.Command(command, req.GetArgs()...)
+	cmd.Dir = cwd
 	cmd.Env = append(os.Environ(), req.GetEnv()...)
 	if len(req.GetStdin()) > 0 {
 		cmd.Stdin = bytes.NewReader(req.GetStdin())
@@ -290,7 +292,11 @@ func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.Exe
 		return send(c)
 	}
 
-	if err := cmd.Start(); err != nil {
+	err, scoreErr := a.oom.startWorkload(cmd)
+	if scoreErr != nil {
+		a.logger.Warn("exec oom score", "error", scoreErr)
+	}
+	if err != nil {
 		_ = sendChunk(&v1.ExecChunk{Payload: &v1.ExecChunk_Stderr{Stderr: []byte("vora-init: " + err.Error() + "\n")}})
 		_ = sendChunk(&v1.ExecChunk{Payload: &v1.ExecChunk_Exit{Exit: &v1.ExecExit{
 			ExitCode: 127,

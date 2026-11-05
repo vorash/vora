@@ -263,6 +263,34 @@ func TestBwrapPipeHolder(t *testing.T) {
 	}
 }
 
+// A small pids limit must not break ordinary execs. Everything in the sandbox
+// counts against the limit, including the agent's threads, so anything the agent
+// adds per exec eats the workload's budget. A shim written in Go needed OS threads
+// of its own, so execs died with `fatal error: newosproc` and the agent soon
+// crashed the same way, which ended the sandbox.
+//
+// The agent's idle thread count depends on the host's core count, so the limit is
+// set relative to what this host measures: room for the shell and little else.
+func TestBwrapLowPids(t *testing.T) {
+	probe, ph := newBwrapSandbox(t)
+	st, err := probe.Stats(context.Background(), ph)
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	limit := st.Pids + lowPidsHeadroom
+	t.Logf("idle tasks %d, pids limit %d", st.Pids, limit)
+
+	backend, h := newBwrapSandboxWith(t, nil, runtime.ResourceLimits{CPUMillis: 1000, MemoryBytes: 256 << 20, Pids: limit})
+	for i := range 150 {
+		if got := execStdout(t, backend, h, "/bin/sh", []string{"-c", "echo ok"}); got != "ok\n" {
+			t.Fatalf("exec %d at pids=%d: stdout = %q, want %q", i, limit, got, "ok\n")
+		}
+	}
+}
+
+// lowPidsHeadroom covers the exec's shell plus a thread or two the agent may add.
+const lowPidsHeadroom = 3
+
 // execStdout runs a command and returns its stdout only.
 func execStdout(t *testing.T, backend *bwrap.Backend, h runtime.Handle, command string, args []string) string {
 	t.Helper()

@@ -4,13 +4,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"syscall"
+	"strings"
 )
-
-// workloadArg is the hidden subcommand the agent re-executes itself with to
-// start an exec.
-const workloadArg = "workload"
 
 // workloadOOMScoreAdj makes every workload process the OOM killer's first
 // choice in the sandbox cgroup. The kernel kills the process with the highest
@@ -19,44 +14,51 @@ const workloadArg = "workload"
 // would end the sandbox; killing a workload process only ends its exec.
 const workloadOOMScoreAdj = "1000"
 
-// workloadCommand returns the command for one exec, started through
-// `vora-init workload` so the OOM score is raised before any user code runs
-// and every process the workload forks inherits it. os/exec has no pre-exec
-// hook, and writing /proc/<pid>/oom_score_adj after Start is too late: Start
-// returns once the child has already exec'd, so the workload can fork or
-// allocate first. Only the child raises its score; the agent keeps its own.
+// oomScore raises the agent's own OOM score across a fork, so the child inherits
+// the raised score before any user code runs, and so does everything it forks.
 //
-// The command is resolved here rather than in the shim, so a missing or
-// non-executable command still fails Start and is reported as a runtime
-// failure, not as an exit code from the shim.
-func workloadCommand(command string, args []string, dir string) *exec.Cmd {
-	cmd := exec.Command(command, args...)
-	cmd.Dir = dir
-	if cmd.Err == nil {
-		// exec.Command looks up bare names only; check paths too, relative to
-		// the directory the command will run in.
-		path := cmd.Path
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(dir, path)
-		}
-		_, cmd.Err = exec.LookPath(path)
-	}
-	if cmd.Err != nil {
-		return cmd
-	}
-	shim := exec.Command("/proc/self/exe", append([]string{workloadArg, cmd.Path, command}, args...)...)
-	shim.Dir = dir
-	return shim
+// Nothing else does this without a cost: os/exec has no pre-exec hook, writing
+// /proc/<pid>/oom_score_adj after Start is too late because the child has already
+// exec'd, and a re-exec shim needs OS threads of its own, which count against the
+// sandbox's pids limit and crash a Go process when refused.
+//
+// An unprivileged process may lower its score again as long as it stays at or
+// above oom_score_adj_min, which its baseline is. The agent is the likeliest
+// victim only for the length of the fork, and a kill then ends this sandbox alone.
+type oomScore struct {
+	// file stays open from startup because a write needs no further permission
+	// check, which keeps this working if the agent later stops being dumpable.
+	file     *os.File
+	baseline string
 }
 
-// runWorkload is the `vora-init workload` shim: it raises its own OOM score
-// and replaces itself with the command. It never returns.
-func runWorkload(path string, argv []string) {
-	if err := os.WriteFile("/proc/self/oom_score_adj", []byte(workloadOOMScoreAdj), 0); err != nil {
-		fmt.Fprintf(os.Stderr, "vora-init: raise oom_score_adj: %v\n", err)
-		os.Exit(127)
+func openOOMScore() (*oomScore, error) {
+	f, err := os.OpenFile("/proc/self/oom_score_adj", os.O_RDWR, 0)
+	if err != nil {
+		return nil, err
 	}
-	err := syscall.Exec(path, argv, os.Environ())
-	fmt.Fprintf(os.Stderr, "vora-init: exec %s: %v\n", path, err)
-	os.Exit(127)
+	buf := make([]byte, 16)
+	n, err := f.ReadAt(buf, 0)
+	if n == 0 {
+		_ = f.Close()
+		return nil, fmt.Errorf("read oom_score_adj: %w", err)
+	}
+	return &oomScore{file: f, baseline: strings.TrimSpace(string(buf[:n]))}, nil
+}
+
+// startWorkload starts cmd with the raised score. A failure to raise or restore
+// is logged by the caller and does not stop the exec: it only changes who the OOM
+// killer picks, and the command the caller asked for should still run.
+func (o *oomScore) startWorkload(cmd *exec.Cmd) (startErr, scoreErr error) {
+	if o == nil {
+		return cmd.Start(), nil
+	}
+	if _, err := o.file.WriteAt([]byte(workloadOOMScoreAdj), 0); err != nil {
+		return cmd.Start(), fmt.Errorf("raise oom_score_adj: %w", err)
+	}
+	startErr = cmd.Start()
+	if _, err := o.file.WriteAt([]byte(o.baseline), 0); err != nil {
+		scoreErr = fmt.Errorf("restore oom_score_adj: %w", err)
+	}
+	return startErr, scoreErr
 }
