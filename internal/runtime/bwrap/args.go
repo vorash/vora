@@ -2,6 +2,7 @@ package bwrap
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 )
@@ -39,6 +40,8 @@ type BuildOptions struct {
 	// DenyIPC has the agent add seccomp.IPCSyscalls to its filter.
 	DenyIPC bool
 }
+
+const binfmtMisc = "/proc/sys/fs/binfmt_misc"
 
 // Args builds the bubblewrap argv for a sandbox. It is pure so it can be
 // unit-tested without a running sandbox.
@@ -101,6 +104,16 @@ func Args(opts BuildOptions) ([]string, error) {
 		"--ro-bind", filepath.Join(opts.IPCDir, "vora-init"), InitInside,
 		"--tmpfs", "/tmp",
 		"--proc", "/proc",
+		// A user namespace owns the IPC and PID namespace sysctls, so a workload could
+		// write them. kernel.cad_pid is among them on kernel 7.0 yet sets the host's value.
+		"--ro-bind", "/proc/sys", "/proc/sys",
+	)
+	// The bind above carries the host's binfmt_misc mount with it, which would show what
+	// the host has registered. The target must already exist: /proc/sys is read-only now.
+	if info, err := os.Stat(binfmtMisc); err == nil && info.IsDir() {
+		argv = append(argv, "--tmpfs", binfmtMisc)
+	}
+	argv = append(argv,
 		"--dev", "/dev",
 		"--chdir", "/workspace",
 		"--setenv", "HOME", "/root",
