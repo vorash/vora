@@ -28,6 +28,8 @@ const (
 // fakeKernel is a sandbox of two processes, which reads as the same thing until a test
 // changes it.
 type fakeKernel struct {
+	memOpens  bool
+	memErr    error
 	threads   map[int][]int
 	attrs     map[int]ThreadAttrs
 	threadErr map[int]error
@@ -77,6 +79,16 @@ func (k *fakeKernel) Thread(tid int) (ThreadAttrs, error) {
 
 func (k *fakeKernel) Rlimits(pid int) ([]Rlimit, error) {
 	return k.rlimits[pid], k.rlimitErr
+}
+
+func (k *fakeKernel) OpenForWrite(pid int, name string) error {
+	if k.memOpens {
+		return nil
+	}
+	if k.memErr != nil {
+		return k.memErr
+	}
+	return unix.EACCES
 }
 
 func (k *fakeKernel) ProcFile(pid int, name string) (string, error) {
@@ -606,5 +618,43 @@ func TestAffinityStringDropsOnlyTrailingZeroWords(t *testing.T) {
 	}
 	if got := affinityString(&none); got != "0" {
 		t.Errorf("none = %q", got)
+	}
+}
+
+// PID 1 outlives every run and shares a workload's uid. Only the host's Yama or AppArmor
+// setting keeps its memory out of reach, so a host without them must not get a member.
+func TestPID1MemoryHasToBeOutOfReach(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		opens    bool
+		err      error
+		wantFail bool
+	}{
+		{name: "refused", err: unix.EACCES},
+		{name: "not permitted", err: unix.EPERM},
+		{name: "no such file", err: fs.ErrNotExist},
+		{name: "opens", opens: true, wantFail: true},
+		{name: "an unexpected error", err: unix.EIO, wantFail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k := newFakeKernel()
+			m := captureFake(t, k)
+			k.memOpens, k.memErr = tc.opens, tc.err
+
+			_, _, captureErr := CaptureKernel(t.Context(), k, bothPIDs)
+			checkErr := CheckKernel(t.Context(), k, bothPIDs, m)
+			if tc.wantFail {
+				if captureErr == nil {
+					t.Fatal("capture passed on a host where a workload could rewrite PID 1")
+				}
+				if !errors.Is(checkErr, ErrProcessChanged) {
+					t.Fatalf("check = %v, want ErrProcessChanged", checkErr)
+				}
+				return
+			}
+			if captureErr != nil || checkErr != nil {
+				t.Fatalf("capture %v, check %v, want both to pass", captureErr, checkErr)
+			}
+		})
 	}
 }

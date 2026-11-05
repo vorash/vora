@@ -63,6 +63,9 @@ const timerSlackFile = "timerslack_ns"
 
 // KernelReader is how Capture's and Reset's kernel checks read a sandbox. It only reads.
 type KernelReader interface {
+	// OpenForWrite opens a file under /proc/<pid> for writing and closes it. It writes
+	// nothing.
+	OpenForWrite(pid int, name string) error
 	// ThreadIDs lists a process's threads.
 	ThreadIDs(pid int) ([]int, error)
 	// Thread reads one thread. A thread that is gone reads as an error holding ESRCH.
@@ -82,6 +85,9 @@ type KernelReader interface {
 // before a workload has run, and no single baseline would then hold.
 func CaptureKernel(ctx context.Context, r KernelReader, pids []int) ([]Process, map[string]string, error) {
 	if err := sealTimerSlack(r); err != nil {
+		return nil, nil, fmt.Errorf("sandboxreset: capture: %w", err)
+	}
+	if err := sealPID1Memory(r); err != nil {
 		return nil, nil, fmt.Errorf("sandboxreset: capture: %w", err)
 	}
 	processes := make([]Process, 0, len(pids))
@@ -137,6 +143,9 @@ func CheckKernel(ctx context.Context, r KernelReader, pids []int, m Manifest) er
 		return fmt.Errorf("%w: the manifest holds no sysctls", ErrSysctlChanged)
 	}
 	if err := sealTimerSlack(r); err != nil {
+		return fmt.Errorf("%w: %w", ErrProcessChanged, err)
+	}
+	if err := sealPID1Memory(r); err != nil {
 		return fmt.Errorf("%w: %w", ErrProcessChanged, err)
 	}
 	for _, want := range m.Processes {
@@ -246,6 +255,22 @@ func sealTimerSlack(r KernelReader) error {
 	return fmt.Errorf("%s is readable here, so a workload could change it", timerSlackFile)
 }
 
+// sealPID1Memory fails if this process can open PID 1's memory for writing. PID 1 is
+// dumpable and shares a workload's uid, and it outlives every run, so a workload that
+// could open this could change PID 1 in a way no check here can see. What stops it is the
+// host's Yama or AppArmor setting, not anything Vora controls, so a member on a host
+// without them must not be reused. Opening it writes nothing.
+func sealPID1Memory(r KernelReader) error {
+	err := r.OpenForWrite(1, "mem")
+	if errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM) || errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("/proc/1/mem: %w", err)
+	}
+	return errors.New("/proc/1/mem opens for writing here, so a workload could rewrite PID 1")
+}
+
 // changedSysctls names what differs between two walks, a few entries at most. It is
 // empty when they match. A file that appeared counts: a new one means the sandbox gained
 // something, such as a network device, that the listing does not describe.
@@ -340,6 +365,14 @@ func (liveKernel) Rlimits(pid int) ([]Rlimit, error) {
 		rlimits[resource] = Rlimit{Soft: got.Cur, Hard: got.Max}
 	}
 	return rlimits, nil
+}
+
+func (liveKernel) OpenForWrite(pid int, name string) error {
+	f, err := os.OpenFile(fmt.Sprintf("/proc/%d/%s", pid, name), os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 func (liveKernel) ProcFile(pid int, name string) (string, error) {

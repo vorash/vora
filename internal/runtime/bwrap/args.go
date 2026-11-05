@@ -41,7 +41,10 @@ type BuildOptions struct {
 	DenyIPC bool
 }
 
-const binfmtMisc = "/proc/sys/fs/binfmt_misc"
+const (
+	binfmtMisc   = "/proc/sys/fs/binfmt_misc"
+	procPressure = "/proc/pressure"
+)
 
 var pid1Masked = []string{"/proc/1/clear_refs", "/proc/1/task/1/clear_refs", "/proc/1/sched", "/proc/1/task/1/sched"}
 
@@ -115,6 +118,11 @@ func Args(opts BuildOptions) ([]string, error) {
 	// Writable, this tmpfs would keep what a run left in it, since a reset leaves /proc alone.
 	if info, err := os.Stat(binfmtMisc); err == nil && info.IsDir() {
 		argv = append(argv, "--tmpfs", binfmtMisc, "--remount-ro", binfmtMisc)
+	}
+	// A write here registers a pressure trigger on the host's own PSI group, which holds
+	// kernel memory outside the sandbox's limits for as long as the fd stays open.
+	if info, err := os.Stat(procPressure); err == nil && info.IsDir() {
+		argv = append(argv, "--ro-bind", procPressure, procPressure)
 	}
 	// PID 1 is the same uid as a workload and outlives every run, and a write to these
 	// resets its page and scheduler statistics for a later run to read. No program needs

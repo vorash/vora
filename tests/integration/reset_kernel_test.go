@@ -420,7 +420,6 @@ print(json.dumps(sorted(found)))
 // finds out what it does, which is how kernel.cad_pid would have been caught. A task's
 // directory repeats its process's files.
 var accountedForBwrap = map[string]string{
-	`/proc/pressure/(cpu|io|memory|irq)`:             "a PSI trigger, which lives and dies with the fd",
 	`/proc/1(/task/1)?/(oom_adj|oom_score_adj)`:      "compared",
 	`/proc/1(/task/1)?/coredump_filter`:              "compared",
 	`/proc/1/autogroup`:                              "compared",
