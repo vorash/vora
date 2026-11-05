@@ -46,8 +46,7 @@ type Manifest struct {
 // MountListing is one writable mount and everything under it, up to the next
 // mount boundary.
 type MountListing struct {
-	Path   string `json:"path"`
-	FSType string `json:"fstype"`
+	Path string `json:"path"`
 	// Entries is sorted by Rel and always holds the mount root, Rel ".". The
 	// root is not always a directory: bwrap binds /dev/null as its own mount.
 	Entries []Entry `json:"entries"`
@@ -98,8 +97,8 @@ func (m Manifest) validate() error {
 	}
 	for i, want := range plan {
 		l := m.Mounts[i]
-		if l.Path != want.Path || l.FSType != want.FSType {
-			return fmt.Errorf("listing %d is %s (%s), its table selects %s (%s)", i, l.Path, l.FSType, want.Path, want.FSType)
+		if l.Path != want.Path {
+			return fmt.Errorf("listing %d is %s, its table selects %s", i, l.Path, want.Path)
 		}
 		if err := validateEntries(l, want.Nested); err != nil {
 			return fmt.Errorf("listing %s: %w", l.Path, err)

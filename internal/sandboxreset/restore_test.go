@@ -519,6 +519,9 @@ func TestRestoreFailsClosedOnBadMountinfo(t *testing.T) {
 	if _, err := restore(t, m, ""); err == nil {
 		t.Error("empty mountinfo was accepted")
 	}
+	if _, err := restore(t, Manifest{}, info); err == nil {
+		t.Error("an empty manifest was accepted")
+	}
 	s.assertNames("mnt", "planted")
 }
 
@@ -581,33 +584,33 @@ func TestRemoveRefusesADirectoryOnAnotherDevice(t *testing.T) {
 	s.assertNames("mnt/foreign", "file")
 }
 
-func TestVerifyReportsWithoutChangingAnything(t *testing.T) {
+// Restore prunes before this walk, so calling Restore cannot show that the walk
+// would catch something the prune left.
+func TestTheProofWalkReportsWhatThePruneLeft(t *testing.T) {
 	s := newSandbox(t)
 	seedTree(s)
-	info := s.info()
-	m := capture(t, info)
-	verify := func() error { return Verify(context.Background(), m, strings.NewReader(info)) }
-
-	if err := verify(); err != nil {
-		t.Fatalf("clean tree: %v", err)
-	}
+	m := capture(t, s.info())
 	s.write("mnt/planted", "x")
-	if err := verify(); !errors.Is(err, ErrNotClean) {
+	if err := verifyListings(context.Background(), m); !errors.Is(err, ErrNotClean) {
 		t.Fatalf("planted file: err = %v, want ErrNotClean", err)
 	}
 	s.assertExists("mnt/planted")
 	s.remove("mnt/planted")
-
 	s.write("mnt/file", "jello")
-	if err := verify(); !errors.Is(err, ErrUnrestorable) {
+	if err := verifyListings(context.Background(), m); !errors.Is(err, ErrUnrestorable) {
 		t.Fatalf("changed file: err = %v, want ErrUnrestorable", err)
 	}
-	if err := Verify(context.Background(), m, strings.NewReader(s.info(ro(s.path("new"))))); !errors.Is(err, ErrMountsChanged) {
-		t.Fatalf("changed table: err = %v, want ErrMountsChanged", err)
+}
+
+func TestRestoreRemovesNothingFromACleanMemberAndPasses(t *testing.T) {
+	s := newSandbox(t)
+	seedTree(s)
+	info := s.info()
+	m := capture(t, info)
+	if removed, err := restore(t, m, info); err != nil || removed != 0 {
+		t.Fatalf("Restore on a clean tree: removed %d, %v", removed, err)
 	}
-	if err := Verify(context.Background(), Manifest{}, strings.NewReader(info)); err == nil {
-		t.Fatal("empty manifest verified")
-	}
+	s.assertNames("mnt", seededNames...)
 }
 
 // These call validate directly and never Restore, because the point of several
@@ -628,7 +631,6 @@ func TestManifestValidationRefusesWhatRestoreCouldBeMisledBy(t *testing.T) {
 		"listing for real path":   func(m *Manifest) { m.Mounts[0].Path = "/etc" },
 		"listing path with dots":  func(m *Manifest) { m.Mounts[0].Path = s.mount + "/../.." },
 		"listing not in table":    func(m *Manifest) { m.Mounts = append(m.Mounts, MountListing{Path: "/var"}) },
-		"fstype differs":          func(m *Manifest) { m.Mounts[0].FSType = "ext4" },
 		"table says root rw":      func(m *Manifest) { m.Table[0].Writable = true },
 		"table path relative":     func(m *Manifest) { m.Table[1].Path = "tmp" },
 		"table path with dots":    func(m *Manifest) { m.Table[1].Path = s.mount + "/../etc" },

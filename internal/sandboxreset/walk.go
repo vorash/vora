@@ -36,7 +36,7 @@ func Capture(ctx context.Context, mountinfo io.Reader) (Manifest, error) {
 		if err != nil {
 			return Manifest{}, fmt.Errorf("sandboxreset: capture %s: %w", p.Path, err)
 		}
-		m.Mounts = append(m.Mounts, MountListing{Path: p.Path, FSType: p.FSType, Entries: entries})
+		m.Mounts = append(m.Mounts, MountListing{Path: p.Path, Entries: entries})
 	}
 	// A mount in the table that the walk did not reach, such as one covered by a
 	// later mount, fails here.

@@ -119,7 +119,6 @@ func unescapeOctal(s string) (string, error) {
 // by path relative to it.
 type plannedMount struct {
 	Path   string
-	FSType string
 	Nested map[string]bool
 }
 
@@ -142,7 +141,7 @@ func selectMounts(table []Mount) ([]plannedMount, error) {
 	planned := map[string]*plannedMount{}
 	for p, m := range visible {
 		if m.Writable && p != "/" && !isExcludedMount(p) {
-			planned[p] = &plannedMount{Path: p, FSType: m.FSType, Nested: map[string]bool{}}
+			planned[p] = &plannedMount{Path: p, Nested: map[string]bool{}}
 		}
 	}
 	if len(planned) == 0 {

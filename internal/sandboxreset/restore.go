@@ -21,8 +21,15 @@ import (
 // mountinfo must be the live table. The caller must have stopped every other
 // process in the sandbox first, or the proof says nothing about the next moment.
 func Restore(ctx context.Context, m Manifest, mountinfo io.Reader) (removed int, err error) {
-	if err := checkManifest(m, mountinfo); err != nil {
+	if err := m.validate(); err != nil {
+		return 0, fmt.Errorf("sandboxreset: restore: invalid manifest: %w", err)
+	}
+	live, err := parseMountinfo(mountinfo)
+	if err != nil {
 		return 0, fmt.Errorf("sandboxreset: restore: %w", err)
+	}
+	if !slices.Equal(m.Table, live) {
+		return 0, fmt.Errorf("sandboxreset: restore: %w: captured %+v, live %+v", ErrMountsChanged, m.Table, live)
 	}
 	for _, l := range m.Mounts {
 		n, err := pruneMount(ctx, l)
@@ -35,31 +42,6 @@ func Restore(ctx context.Context, m Manifest, mountinfo io.Reader) (removed int,
 		return removed, fmt.Errorf("sandboxreset: restore: %w", err)
 	}
 	return removed, nil
-}
-
-// Verify proves that every writable mount matches m exactly, changing nothing.
-func Verify(ctx context.Context, m Manifest, mountinfo io.Reader) error {
-	if err := checkManifest(m, mountinfo); err != nil {
-		return fmt.Errorf("sandboxreset: verify: %w", err)
-	}
-	if err := verifyListings(ctx, m); err != nil {
-		return fmt.Errorf("sandboxreset: verify: %w", err)
-	}
-	return nil
-}
-
-func checkManifest(m Manifest, mountinfo io.Reader) error {
-	if err := m.validate(); err != nil {
-		return fmt.Errorf("invalid manifest: %w", err)
-	}
-	live, err := parseMountinfo(mountinfo)
-	if err != nil {
-		return err
-	}
-	if !slices.Equal(m.Table, live) {
-		return fmt.Errorf("%w: captured %+v, live %+v", ErrMountsChanged, m.Table, live)
-	}
-	return nil
 }
 
 func verifyListings(ctx context.Context, m Manifest) error {
