@@ -48,8 +48,10 @@ fi
 # Like the real runsc, the command outlives this client and keeps its pipes.
 sleep "$FAKE_EXEC_SECONDS" &
 echo $! > "$FAKE_SLEEP_PID"
+sleeper=$!
 [ -n "$pidfile" ] && echo 4242 > "$pidfile"
-wait
+wait "$sleeper"
+exit $?
 `
 
 func fakeExecBackend(t *testing.T, execSeconds string) (*Backend, *handle, string) {
