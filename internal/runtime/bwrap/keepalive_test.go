@@ -31,8 +31,10 @@ func (a *countingAgent) PID() int {
 func (a *countingAgent) Exec(context.Context, *v1.ExecRequest, func(*v1.ExecChunk) error) error {
 	return nil
 }
-func (a *countingAgent) Signal(context.Context, int32) error { return nil }
-func (a *countingAgent) Shutdown(context.Context) error      { return nil }
+func (a *countingAgent) Signal(context.Context, int32) error        { return nil }
+func (a *countingAgent) Shutdown(context.Context) error             { return nil }
+func (a *countingAgent) Capture(context.Context) ([]byte, error)    { return nil, nil }
+func (a *countingAgent) Reset(context.Context, []byte) (int, error) { return 0, nil }
 
 // readySandbox registers a handle whose agent is ready, as Start leaves it,
 // and returns the agent and a function that stops the agent's server.

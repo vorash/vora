@@ -149,7 +149,13 @@ func newBwrapSandboxPaths(t *testing.T, env map[string]string, limits runtime.Re
 	}
 	rootfs := imageRootfs(t, "base")
 
-	stateDir := t.TempDir()
+	// Not t.TempDir: it embeds the test's name, and the control socket under it must
+	// fit in a Unix socket path's 108 bytes.
+	stateDir, err := os.MkdirTemp("", "vora-it-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
 	cfg := config.Config{StateDir: stateDir, SystemdMode: config.SystemdUser}
 	wsManager := workspace.NewManager(cfg.SandboxesDir())
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
