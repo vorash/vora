@@ -33,6 +33,7 @@ service RunnerService {
   rpc CreatePool(CreatePoolRequest) returns (Pool);
   rpc GetPool(GetPoolRequest) returns (Pool);
   rpc DeletePool(DeletePoolRequest) returns (DeletePoolResponse);
+  rpc GetPoolEvents(GetPoolEventsRequest) returns (GetSandboxEventsResponse);
   rpc RunInPool(RunInPoolRequest) returns (stream RunChunk);
 }
 
@@ -100,6 +101,13 @@ message SandboxEvent {
   string reason = 4;
   string runner_id = 5;
   int64 timestamp_unix_ms = 6;
+}
+
+// GetPoolEventsRequest reads the trail of a pool itself (pool_create, pool_drain,
+// pool_delete), which outlives the pool. A member's events stay under its own id.
+message GetPoolEventsRequest {
+  string pool_id = 1;
+  string tenant_id = 2;
 }
 
 message GetSandboxExecsRequest {

@@ -40,6 +40,7 @@ const (
 	RunnerService_CreatePool_FullMethodName       = "/vora.v1.RunnerService/CreatePool"
 	RunnerService_GetPool_FullMethodName          = "/vora.v1.RunnerService/GetPool"
 	RunnerService_DeletePool_FullMethodName       = "/vora.v1.RunnerService/DeletePool"
+	RunnerService_GetPoolEvents_FullMethodName    = "/vora.v1.RunnerService/GetPoolEvents"
 	RunnerService_RunInPool_FullMethodName        = "/vora.v1.RunnerService/RunInPool"
 )
 
@@ -73,6 +74,7 @@ type RunnerServiceClient interface {
 	CreatePool(ctx context.Context, in *CreatePoolRequest, opts ...grpc.CallOption) (*Pool, error)
 	GetPool(ctx context.Context, in *GetPoolRequest, opts ...grpc.CallOption) (*Pool, error)
 	DeletePool(ctx context.Context, in *DeletePoolRequest, opts ...grpc.CallOption) (*DeletePoolResponse, error)
+	GetPoolEvents(ctx context.Context, in *GetPoolEventsRequest, opts ...grpc.CallOption) (*GetSandboxEventsResponse, error)
 	RunInPool(ctx context.Context, in *RunInPoolRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RunChunk], error)
 }
 
@@ -303,6 +305,16 @@ func (c *runnerServiceClient) DeletePool(ctx context.Context, in *DeletePoolRequ
 	return out, nil
 }
 
+func (c *runnerServiceClient) GetPoolEvents(ctx context.Context, in *GetPoolEventsRequest, opts ...grpc.CallOption) (*GetSandboxEventsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSandboxEventsResponse)
+	err := c.cc.Invoke(ctx, RunnerService_GetPoolEvents_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *runnerServiceClient) RunInPool(ctx context.Context, in *RunInPoolRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RunChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &RunnerService_ServiceDesc.Streams[1], RunnerService_RunInPool_FullMethodName, cOpts...)
@@ -352,6 +364,7 @@ type RunnerServiceServer interface {
 	CreatePool(context.Context, *CreatePoolRequest) (*Pool, error)
 	GetPool(context.Context, *GetPoolRequest) (*Pool, error)
 	DeletePool(context.Context, *DeletePoolRequest) (*DeletePoolResponse, error)
+	GetPoolEvents(context.Context, *GetPoolEventsRequest) (*GetSandboxEventsResponse, error)
 	RunInPool(*RunInPoolRequest, grpc.ServerStreamingServer[RunChunk]) error
 	mustEmbedUnimplementedRunnerServiceServer()
 }
@@ -425,6 +438,9 @@ func (UnimplementedRunnerServiceServer) GetPool(context.Context, *GetPoolRequest
 }
 func (UnimplementedRunnerServiceServer) DeletePool(context.Context, *DeletePoolRequest) (*DeletePoolResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeletePool not implemented")
+}
+func (UnimplementedRunnerServiceServer) GetPoolEvents(context.Context, *GetPoolEventsRequest) (*GetSandboxEventsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetPoolEvents not implemented")
 }
 func (UnimplementedRunnerServiceServer) RunInPool(*RunInPoolRequest, grpc.ServerStreamingServer[RunChunk]) error {
 	return status.Error(codes.Unimplemented, "method RunInPool not implemented")
@@ -821,6 +837,24 @@ func _RunnerService_DeletePool_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunnerService_GetPoolEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetPoolEventsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).GetPoolEvents(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_GetPoolEvents_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).GetPoolEvents(ctx, req.(*GetPoolEventsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _RunnerService_RunInPool_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(RunInPoolRequest)
 	if err := stream.RecvMsg(m); err != nil {
@@ -918,6 +952,10 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeletePool",
 			Handler:    _RunnerService_DeletePool_Handler,
+		},
+		{
+			MethodName: "GetPoolEvents",
+			Handler:    _RunnerService_GetPoolEvents_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
