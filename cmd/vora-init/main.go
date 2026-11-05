@@ -14,6 +14,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -264,6 +265,9 @@ func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.Exe
 		cmd.Stdin = bytes.NewReader(req.GetStdin())
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Bounds the stdin copy in Wait: a process that left the group can keep the
+	// read end of the stdin pipe open without ever reading it.
+	cmd.WaitDelay = pipeGrace
 
 	// Hold execMu from before Start until after Wait so the orphan reaper
 	// cannot reap this child.
@@ -299,13 +303,25 @@ func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.Exe
 	a.trackPID(pgid, true)
 	defer a.trackPID(pgid, false)
 
+	// killGroup ends the exec. A process that left the group with setsid survives
+	// the kill and keeps the pipes open, so the readers get a bounded time to
+	// drain what the group wrote and then their read ends close. Without this a
+	// workload could outlive its timeout and hold execMu against every other exec.
+	killGroup := func() {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		time.AfterFunc(pipeGrace, func() {
+			_ = stdout.Close()
+			_ = stderr.Close()
+		})
+	}
+
 	// Enforce the caller's deadline here: this is the only layer that can kill
 	// the workload and still send an exit record over the open stream.
 	var timedOut atomic.Bool
 	if req.GetTimeoutSeconds() > 0 {
 		timer := time.AfterFunc(time.Duration(req.GetTimeoutSeconds())*time.Second, func() {
 			timedOut.Store(true)
-			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			killGroup()
 		})
 		defer timer.Stop()
 	}
@@ -325,21 +341,22 @@ func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.Exe
 	go func() {
 		<-waitCtx.Done()
 		if ctx.Err() != nil {
-			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			killGroup()
 		}
 	}()
 
 	// Drain stdout and stderr before reaping: cmd.Wait closes the read ends of
 	// the pipes StdoutPipe/StderrPipe handed out, so whatever the readers have
 	// not taken yet — the tail of a burst, or all of a fast command's output —
-	// would be discarded while the exit chunk still reported success. Reading to
-	// EOF cannot outlive the command: the child's end closes when it exits, and
-	// the kill above closes it when the caller goes away.
+	// would be discarded while the exit chunk still reported success. A kill
+	// bounds this read through killGroup. Without a kill, a background process
+	// that inherited the pipes keeps the stream open until it exits or the caller
+	// gives up, as it would over ssh.
 	wg.Wait()
 	waitErr := cmd.Wait()
 
 	exitCode := 0
-	if waitErr != nil {
+	if waitErr != nil && !errors.Is(waitErr, exec.ErrWaitDelay) {
 		if ee, ok := waitErr.(*exec.ExitError); ok {
 			exitCode = ee.ExitCode()
 			if exitCode < 0 {
@@ -358,6 +375,10 @@ func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.Exe
 		Reason:   reason,
 	}}})
 }
+
+// pipeGrace is how long the agent keeps an exec's pipes open after the exec was
+// killed or has exited. It only has to cover draining what is already buffered.
+const pipeGrace = time.Second
 
 type chunkFunc func([]byte) *v1.ExecChunk
 
