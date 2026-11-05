@@ -411,6 +411,26 @@ func TestCaptureReadsALinksOwnAttributesNotItsTargets(t *testing.T) {
 	}
 }
 
+// The walk and this read are separate syscalls, so something swapped in between must
+// not have its attributes recorded for what the walk saw.
+func TestAttributesOfAnObjectSwappedInAreRefused(t *testing.T) {
+	s := newSandbox(t)
+	s.write("mnt/seen", "x")
+	s.write("mnt/swapped", "x")
+	parent, err := unix.Open(s.mount, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(parent) }()
+	seen := s.lstat("mnt/seen")
+	if _, err := xattrDigestAt(parent, "seen", &seen); err != nil {
+		t.Fatalf("the object the stat saw: %v", err)
+	}
+	if _, err := xattrDigestAt(parent, "swapped", &seen); err == nil {
+		t.Fatal("read the attributes of another object than the stat saw")
+	}
+}
+
 // Reading the attributes must not need an open that the mode forbids. The mount is
 // in the temp directory, so this reads nothing of the system's.
 func TestCaptureReadsAttributesOfNodesItCannotOpen(t *testing.T) {
@@ -418,8 +438,8 @@ func TestCaptureReadsAttributesOfNodesItCannotOpen(t *testing.T) {
 		t.Skip("root can open a mode-000 node")
 	}
 	s := newSandbox(t)
-	s.mknod("mnt/pipe", unix.S_IFIFO|0)
-	s.mknod("mnt/sock", unix.S_IFSOCK|0)
+	s.mknod("mnt/pipe", unix.S_IFIFO)
+	s.mknod("mnt/sock", unix.S_IFSOCK)
 	l := listing(t, capture(t, s.info()), s.mount)
 	if want := []string{".", "pipe", "sock"}; !slices.Equal(rels(l), want) {
 		t.Fatalf("entries %q, want %q", rels(l), want)
