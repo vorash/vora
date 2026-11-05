@@ -10,7 +10,7 @@ import (
 )
 
 func TestRejectReason(t *testing.T) {
-	res := &v1.ResourceLimits{CpuMillis: 1000, MemoryBytes: 512 << 20}
+	need := needFor(1, &v1.ResourceLimits{CpuMillis: 1000, MemoryBytes: 512 << 20})
 	r := Runner{
 		ID: "r", Backends: []string{"bwrap"}, NetworkModes: []string{"none", "restricted"},
 		CPUMillis: 4000, MemoryBytes: 4 << 30, MaxSandboxes: 10,
@@ -31,7 +31,7 @@ func TestRejectReason(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := rejectReason(r, c.backend, c.network, res, c.used); got != c.want {
+			if got := rejectReason(r, c.backend, c.network, need, c.used); got != c.want {
 				t.Fatalf("rejectReason = %q, want %q", got, c.want)
 			}
 		})

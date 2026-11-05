@@ -110,6 +110,23 @@ type SnapshotRoute struct {
 	SandboxID  string `json:"sandbox_id"`
 }
 
+// PoolRoute is the API's record of a pool: which runner holds it, who may use
+// it, and what it reserves. It is written before the runner is asked for the
+// pool and removed only once the runner says the pool is gone, so a pool the
+// runner may hold always has a route, and capacity is reserved for as long as
+// the route exists: MaxSize members of CPUMillis and MemoryBytes each. Members
+// get no SandboxRoute, so a runner replacing them never moves these books.
+type PoolRoute struct {
+	TenantID    string `json:"tenant_id"`
+	Name        string `json:"name"`
+	PoolID      string `json:"pool_id"`
+	RunnerID    string `json:"runner_id"`
+	AgentID     string `json:"agent_id,omitempty"`
+	MaxSize     int32  `json:"max_size"`
+	CPUMillis   int64  `json:"cpu_millis"`
+	MemoryBytes int64  `json:"memory_bytes"`
+}
+
 // Store persists control-plane state.
 type Store interface {
 	CreateKey(ctx context.Context, key APIKey) error
@@ -131,6 +148,18 @@ type Store interface {
 	SetSnapshotRoute(ctx context.Context, route SnapshotRoute) error
 	SnapshotRoute(ctx context.Context, snapshotID string) (SnapshotRoute, error)
 	DeleteSnapshotRoute(ctx context.Context, snapshotID string) error
+
+	// InsertPoolRoute fails with ErrPoolRouteExists when (tenant, name) is taken.
+	InsertPoolRoute(ctx context.Context, route PoolRoute) error
+	// SetPoolRoute writes a route whether or not (tenant, name) exists.
+	SetPoolRoute(ctx context.Context, route PoolRoute) error
+	PoolRoute(ctx context.Context, tenant, name string) (PoolRoute, error)
+	// ListPoolRoutes lists one tenant's routes, or every route for an empty
+	// tenant, sorted by tenant and name.
+	ListPoolRoutes(ctx context.Context, tenant string) ([]PoolRoute, error)
+	// DeletePoolRoute removes the route only while it still names poolID, so a
+	// delete cannot remove the route of a pool declared after it began.
+	DeletePoolRoute(ctx context.Context, tenant, name, poolID string) error
 
 	Close() error
 }

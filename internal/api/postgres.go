@@ -65,6 +65,19 @@ create table if not exists snapshot_routes (
 alter table snapshot_routes add column if not exists agent_id text not null default '';
 create index if not exists snapshot_routes_tenant_idx on snapshot_routes (tenant_id);
 
+create table if not exists pool_routes (
+  tenant_id    text not null,
+  name         text not null,
+  pool_id      text not null,
+  runner_id    text not null,
+  agent_id     text not null default '',
+  max_size     integer not null,
+  cpu_millis   bigint not null default 0,
+  memory_bytes bigint not null default 0,
+  created_at   timestamptz not null default now(),
+  primary key (tenant_id, name)
+);
+
 -- The API connects as the table owner, which bypasses RLS; enabling it keeps
 -- api_keys (key hashes), runners and routing state out of Supabase's PostgREST
 -- API and away from the anon key.
@@ -72,11 +85,12 @@ alter table api_keys        enable row level security;
 alter table runners         enable row level security;
 alter table sandbox_routes  enable row level security;
 alter table snapshot_routes enable row level security;
+alter table pool_routes     enable row level security;
 
 do $$
 begin
   if exists (select 1 from pg_roles where rolname = 'anon') then
-    execute 'revoke all on api_keys, runners, sandbox_routes, snapshot_routes from anon, authenticated';
+    execute 'revoke all on api_keys, runners, sandbox_routes, snapshot_routes, pool_routes from anon, authenticated';
   end if;
 end $$;
 `
@@ -301,5 +315,66 @@ func (s *PostgresStore) SnapshotRoute(ctx context.Context, snapshotID string) (S
 
 func (s *PostgresStore) DeleteSnapshotRoute(ctx context.Context, snapshotID string) error {
 	_, err := s.pool.Exec(ctx, `delete from snapshot_routes where snapshot_id = $1`, snapshotID)
+	return err
+}
+
+func (s *PostgresStore) InsertPoolRoute(ctx context.Context, route PoolRoute) error {
+	tag, err := s.pool.Exec(ctx,
+		`insert into pool_routes (tenant_id, name, pool_id, runner_id, agent_id, max_size, cpu_millis, memory_bytes)
+		 values ($1,$2,$3,$4,$5,$6,$7,$8)
+		 on conflict (tenant_id, name) do nothing`,
+		route.TenantID, route.Name, route.PoolID, route.RunnerID, route.AgentID, route.MaxSize, route.CPUMillis, route.MemoryBytes)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrPoolRouteExists
+	}
+	return nil
+}
+
+func (s *PostgresStore) SetPoolRoute(ctx context.Context, route PoolRoute) error {
+	_, err := s.pool.Exec(ctx,
+		`insert into pool_routes (tenant_id, name, pool_id, runner_id, agent_id, max_size, cpu_millis, memory_bytes)
+		 values ($1,$2,$3,$4,$5,$6,$7,$8)
+		 on conflict (tenant_id, name) do update set pool_id = excluded.pool_id, runner_id = excluded.runner_id,
+		   agent_id = excluded.agent_id, max_size = excluded.max_size, cpu_millis = excluded.cpu_millis,
+		   memory_bytes = excluded.memory_bytes`,
+		route.TenantID, route.Name, route.PoolID, route.RunnerID, route.AgentID, route.MaxSize, route.CPUMillis, route.MemoryBytes)
+	return err
+}
+
+func (s *PostgresStore) PoolRoute(ctx context.Context, tenant, name string) (PoolRoute, error) {
+	route := PoolRoute{TenantID: tenant, Name: name}
+	err := s.pool.QueryRow(ctx,
+		`select pool_id, runner_id, agent_id, max_size, cpu_millis, memory_bytes from pool_routes where tenant_id = $1 and name = $2`, tenant, name).
+		Scan(&route.PoolID, &route.RunnerID, &route.AgentID, &route.MaxSize, &route.CPUMillis, &route.MemoryBytes)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PoolRoute{}, ErrNotFound
+	}
+	return route, err
+}
+
+func (s *PostgresStore) ListPoolRoutes(ctx context.Context, tenant string) ([]PoolRoute, error) {
+	rows, err := s.pool.Query(ctx,
+		`select tenant_id, name, pool_id, runner_id, agent_id, max_size, cpu_millis, memory_bytes
+		   from pool_routes where ($1 = '' or tenant_id = $1) order by tenant_id, name`, tenant)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PoolRoute
+	for rows.Next() {
+		var r PoolRoute
+		if err := rows.Scan(&r.TenantID, &r.Name, &r.PoolID, &r.RunnerID, &r.AgentID, &r.MaxSize, &r.CPUMillis, &r.MemoryBytes); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) DeletePoolRoute(ctx context.Context, tenant, name, poolID string) error {
+	_, err := s.pool.Exec(ctx, `delete from pool_routes where tenant_id = $1 and name = $2 and pool_id = $3`, tenant, name, poolID)
 	return err
 }

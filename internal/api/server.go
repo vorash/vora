@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
@@ -59,6 +60,11 @@ type RunnerClient interface {
 	DeleteSnapshot(ctx context.Context, id string) error
 	ForkSnapshotWithCredentials(ctx context.Context, id string, creds []*v1.BrokerCredential, actor *v1.Actor) (*v1.Sandbox, error)
 	Exec(ctx context.Context, req *v1.ExecSandboxRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.ExecChunk], error)
+	CreatePool(ctx context.Context, req *v1.CreatePoolRequest) (*v1.Pool, error)
+	GetPool(ctx context.Context, poolID, tenantID string) (*v1.Pool, error)
+	DeletePool(ctx context.Context, req *v1.DeletePoolRequest) (drained bool, err error)
+	RunInPool(ctx context.Context, req *v1.RunInPoolRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.RunChunk], error)
+	PoolExecs(ctx context.Context, sandboxID, poolID string) ([]*v1.SandboxExec, error)
 	Close() error
 }
 
@@ -97,6 +103,9 @@ type Server struct {
 	store  Store
 	logger *slog.Logger
 	now    func() time.Time
+
+	conns           runnerConns
+	runWriteTimeout time.Duration
 }
 
 // New builds a control-plane server.
@@ -130,11 +139,14 @@ func New(opts Options) *Server {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	return &Server{opts: opts, store: opts.Store, logger: opts.Logger, now: opts.Now}
+	return &Server{opts: opts, store: opts.Store, logger: opts.Logger, now: opts.Now, runWriteTimeout: defaultRunWriteTimeout}
 }
 
-// Close releases the store.
-func (s *Server) Close() error { return s.store.Close() }
+// Close releases the store and the pool routes' runner connections.
+func (s *Server) Close() error {
+	s.conns.closeAll()
+	return s.store.Close()
+}
 
 // ---------------------------------------------------------------------------
 // Runner registry (gRPC)
@@ -251,6 +263,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/sandboxes/{id}/files", s.auth(ScopeSandbox, s.getFile))
 	mux.HandleFunc("PUT /v1/sandboxes/{id}/files", s.auth(ScopeSandbox, s.putFile))
 	mux.HandleFunc("POST /v1/sandboxes/{id}/snapshot", s.auth(ScopeSandbox, s.snapshotSandbox))
+
+	mux.HandleFunc("PUT /v1/pools/{name}", s.auth(ScopeSandbox, s.putPool))
+	mux.HandleFunc("GET /v1/pools", s.auth(ScopeSandbox, s.listPools))
+	mux.HandleFunc("GET /v1/pools/{name}", s.auth(ScopeSandbox, s.getPool))
+	mux.HandleFunc("DELETE /v1/pools/{name}", s.auth(ScopeSandbox, s.deletePool))
+	mux.HandleFunc("POST /v1/pools/{name}/run", s.auth(ScopeSandbox, s.runPool))
+	mux.HandleFunc("GET /v1/pools/{name}/sandboxes/{id}/execs", s.auth(ScopeSandbox, s.poolSandboxExecs))
+	mux.HandleFunc("GET /v1/pools/{name}/sandboxes/{id}/events", s.auth(ScopeSandbox, s.poolSandboxEvents))
 
 	mux.HandleFunc("GET /v1/snapshots", s.auth(ScopeSandbox, s.listSnapshots))
 	mux.HandleFunc("GET /v1/snapshots/{id}", s.auth(ScopeSandbox, s.getSnapshot))
@@ -457,7 +477,7 @@ func (s *Server) listSandboxes(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getSandbox(w http.ResponseWriter, r *http.Request) {
 	rc, err := s.runnerFor(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		s.writeRouteError(w, r, r.PathValue("id"), err)
 		return
 	}
 	defer rc.Close()
@@ -484,7 +504,7 @@ func (s *Server) destroySandbox(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	route, err := s.authorizedRoute(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		s.writeRouteError(w, r, id, err)
 		return
 	}
 	rc, err := s.runnerByID(r.Context(), route.RunnerID)
@@ -511,7 +531,7 @@ func (s *Server) destroySandbox(w http.ResponseWriter, r *http.Request) {
 func (s *Server) statsSandbox(w http.ResponseWriter, r *http.Request) {
 	rc, err := s.runnerFor(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		s.writeRouteError(w, r, r.PathValue("id"), err)
 		return
 	}
 	defer rc.Close()
@@ -526,7 +546,7 @@ func (s *Server) statsSandbox(w http.ResponseWriter, r *http.Request) {
 func (s *Server) eventsSandbox(w http.ResponseWriter, r *http.Request) {
 	rc, err := s.runnerFor(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		s.writeRouteError(w, r, r.PathValue("id"), err)
 		return
 	}
 	defer rc.Close()
@@ -541,7 +561,7 @@ func (s *Server) eventsSandbox(w http.ResponseWriter, r *http.Request) {
 func (s *Server) execsSandbox(w http.ResponseWriter, r *http.Request) {
 	rc, err := s.runnerFor(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		s.writeRouteError(w, r, r.PathValue("id"), err)
 		return
 	}
 	defer rc.Close()
@@ -556,7 +576,7 @@ func (s *Server) execsSandbox(w http.ResponseWriter, r *http.Request) {
 func (s *Server) egressSandbox(w http.ResponseWriter, r *http.Request) {
 	rc, err := s.runnerFor(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		s.writeRouteError(w, r, r.PathValue("id"), err)
 		return
 	}
 	defer rc.Close()
@@ -580,7 +600,7 @@ func (s *Server) getFile(w http.ResponseWriter, r *http.Request) {
 	}
 	rc, err := s.runnerFor(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		s.writeRouteError(w, r, id, err)
 		return
 	}
 	defer rc.Close()
@@ -615,7 +635,7 @@ func (s *Server) putFile(w http.ResponseWriter, r *http.Request) {
 	}
 	rc, err := s.runnerFor(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		s.writeRouteError(w, r, id, err)
 		return
 	}
 	defer rc.Close()
@@ -643,7 +663,7 @@ func (s *Server) execSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 	rc, err := s.runnerFor(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		s.writeRouteError(w, r, id, err)
 		return
 	}
 	defer rc.Close()
@@ -880,23 +900,60 @@ type placement struct {
 	reason string
 }
 
-// placeRunner filters healthy runners by backend/network capability and by
+// placementNeed is what a placement must find free on a runner: one sandbox
+// for a plain create, max_size members for a pool.
+type placementNeed struct {
+	count int32
+	cpu   int64
+	mem   int64
+}
+
+func needFor(count int32, res *v1.ResourceLimits) placementNeed {
+	return placementNeed{
+		count: count,
+		cpu:   timesCount(count, res.GetCpuMillis()),
+		mem:   timesCount(count, res.GetMemoryBytes()),
+	}
+}
+
+// timesCount saturates, so a product too large to represent cannot wrap to a
+// value that looks free.
+func timesCount(count int32, each int64) int64 {
+	if each > 0 && int64(count) > math.MaxInt64/each {
+		return math.MaxInt64
+	}
+	return int64(count) * each
+}
+
+// placeRunner chooses a runner for one sandbox and dials it.
+func (s *Server) placeRunner(ctx context.Context, spec *v1.SandboxSpec) (*placement, error) {
+	chosen, reason, err := s.chooseRunner(ctx, spec, needFor(1, spec.GetResources()))
+	if err != nil {
+		return nil, err
+	}
+	rc, err := s.dialRunner(chosen)
+	if err != nil {
+		return nil, fmt.Errorf("api: runner %s unreachable: %w", chosen.ID, err)
+	}
+	return &placement{runner: chosen, client: rc, reason: reason}, nil
+}
+
+// chooseRunner filters healthy runners by backend/network capability and by
 // committed capacity, then picks the least-loaded candidate. The reason is
 // logged so placement is inspectable.
-func (s *Server) placeRunner(ctx context.Context, spec *v1.SandboxSpec) (*placement, error) {
+func (s *Server) chooseRunner(ctx context.Context, spec *v1.SandboxSpec, need placementNeed) (Runner, string, error) {
 	runners := s.runners(ctx)
 	if len(runners) == 0 {
-		return nil, ErrNoRunner
+		return Runner{}, "", ErrNoRunner
 	}
 	committed := s.committedByRunner(ctx)
 	backend := spec.GetBackend()
 	network := networkModeName(spec.GetNetwork().GetMode())
-	res := spec.GetResources()
 
 	candidates := make([]Runner, 0, len(runners))
 	rejections := make(map[string]string, len(runners))
 	for _, r := range runners {
-		if reason := rejectReason(r, backend, network, res, committed[r.ID]); reason != "" {
+		if reason := rejectReason(r, backend, network, need, committed[r.ID]); reason != "" {
 			rejections[r.ID] = reason
 			continue
 		}
@@ -904,7 +961,7 @@ func (s *Server) placeRunner(ctx context.Context, spec *v1.SandboxSpec) (*placem
 	}
 	if len(candidates) == 0 {
 		s.logger.Warn("no runner can take the sandbox", "backend", backend, "network", network, "rejections", rejections)
-		return nil, fmt.Errorf("%w: no runner matches the request (backend %q, network %q)", ErrNoRunner, backend, network)
+		return Runner{}, "", fmt.Errorf("%w: no runner matches the request (backend %q, network %q)", ErrNoRunner, backend, network)
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
@@ -920,21 +977,16 @@ func (s *Server) placeRunner(ctx context.Context, spec *v1.SandboxSpec) (*placem
 		}
 		return candidates[i].ID < candidates[j].ID
 	})
-	chosen := candidates[0]
 	reason := "least-loaded"
 	if len(candidates) == 1 {
 		reason = "only-runner"
 	}
-	rc, err := s.dialRunner(chosen)
-	if err != nil {
-		return nil, fmt.Errorf("api: runner %s unreachable: %w", chosen.ID, err)
-	}
-	return &placement{runner: chosen, client: rc, reason: reason}, nil
+	return candidates[0], reason, nil
 }
 
 // rejectReason returns a non-empty reason when the runner cannot host the
 // request, empty when it can.
-func rejectReason(r Runner, backend, network string, res *v1.ResourceLimits, used sandboxResources) string {
+func rejectReason(r Runner, backend, network string, need placementNeed, used sandboxResources) string {
 	if !r.SupportsBackend(backend) {
 		return "backend"
 	}
@@ -947,26 +999,31 @@ func rejectReason(r Runner, backend, network string, res *v1.ResourceLimits, use
 	if r.Running > running {
 		running = r.Running
 	}
-	if r.MaxSandboxes > 0 && running >= r.MaxSandboxes {
+	if r.MaxSandboxes > 0 && int64(running)+int64(need.count) > int64(r.MaxSandboxes) {
 		return "max_sandboxes"
 	}
-	if r.MemoryBytes > 0 && used.mem+res.GetMemoryBytes() > r.MemoryBytes {
+	if r.MemoryBytes > 0 && (need.mem > r.MemoryBytes || used.mem > r.MemoryBytes-need.mem) {
 		return "memory"
 	}
-	if r.CPUMillis > 0 && used.cpu+res.GetCpuMillis() > r.CPUMillis {
+	if r.CPUMillis > 0 && (need.cpu > r.CPUMillis || used.cpu > r.CPUMillis-need.cpu) {
 		return "cpu"
 	}
 	return ""
 }
 
-// committedByRunner sums the resources of the routes the API created, per
-// runner.
+// committedByRunner sums, per runner, the resources of the routes the API
+// created and the reservation of every pool route. Pool members have no
+// sandbox routes, so they are counted once, through their pool.
 func (s *Server) committedByRunner(ctx context.Context) map[string]sandboxResources {
 	routes, err := s.store.ListRoutes(ctx)
 	if err != nil {
 		return nil
 	}
-	out := make(map[string]sandboxResources, len(routes))
+	pools, err := s.store.ListPoolRoutes(ctx, "")
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]sandboxResources, len(routes)+len(pools))
 	for _, r := range routes {
 		if r.Destroyed {
 			continue
@@ -975,6 +1032,13 @@ func (s *Server) committedByRunner(ctx context.Context) map[string]sandboxResour
 		c.cpu += r.CPUMillis
 		c.mem += r.MemoryBytes
 		c.count++
+		out[r.RunnerID] = c
+	}
+	for _, r := range pools {
+		c := out[r.RunnerID]
+		c.cpu += timesCount(r.MaxSize, r.CPUMillis)
+		c.mem += timesCount(r.MaxSize, r.MemoryBytes)
+		c.count += r.MaxSize
 		out[r.RunnerID] = c
 	}
 	return out
@@ -1146,10 +1210,18 @@ func writeGRPCError(w http.ResponseWriter, err error) {
 		code = http.StatusBadRequest
 	case codes.NotFound:
 		code = http.StatusNotFound
-	case codes.AlreadyExists:
+	case codes.AlreadyExists, codes.FailedPrecondition:
 		code = http.StatusConflict
-	case codes.FailedPrecondition, codes.Unavailable:
-		code = http.StatusServiceUnavailable
+	case codes.ResourceExhausted:
+		w.Header().Set("Retry-After", "1")
+		code = http.StatusTooManyRequests
+	case codes.Unavailable:
+		// A runner still loading says so here, and a transport failure's text names
+		// the runner's address, so neither reaches the client as it stands.
+		slog.Warn("runner unavailable", "error", st.Message(), "trace_id", w.Header().Get("X-Trace-Id"))
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusServiceUnavailable, "the runner is unavailable or still starting; retry shortly")
+		return
 	case codes.Unauthenticated:
 		code = http.StatusUnauthorized
 	case codes.PermissionDenied:

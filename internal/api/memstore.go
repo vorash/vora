@@ -11,6 +11,9 @@ import (
 // ErrNotFound is returned when a record does not exist.
 var ErrNotFound = errors.New("api: not found")
 
+// ErrPoolRouteExists is returned when a tenant already has a pool of that name.
+var ErrPoolRouteExists = errors.New("api: pool route exists")
+
 // MemStore is an in-memory Store used for development and tests.
 type MemStore struct {
 	mu         sync.RWMutex
@@ -18,7 +21,10 @@ type MemStore struct {
 	runners    map[string]Runner
 	routes     map[string]SandboxRoute
 	snapRoutes map[string]SnapshotRoute
+	poolRoutes map[poolRouteKey]PoolRoute
 }
+
+type poolRouteKey struct{ tenant, name string }
 
 // NewMemStore returns an empty in-memory store.
 func NewMemStore() *MemStore {
@@ -27,6 +33,7 @@ func NewMemStore() *MemStore {
 		runners:    map[string]Runner{},
 		routes:     map[string]SandboxRoute{},
 		snapRoutes: map[string]SnapshotRoute{},
+		poolRoutes: map[poolRouteKey]PoolRoute{},
 	}
 }
 
@@ -186,6 +193,62 @@ func (m *MemStore) DeleteSnapshotRoute(_ context.Context, snapshotID string) err
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.snapRoutes, snapshotID)
+	return nil
+}
+
+func (m *MemStore) InsertPoolRoute(_ context.Context, route PoolRoute) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := poolRouteKey{route.TenantID, route.Name}
+	if _, taken := m.poolRoutes[key]; taken {
+		return ErrPoolRouteExists
+	}
+	m.poolRoutes[key] = route
+	return nil
+}
+
+func (m *MemStore) SetPoolRoute(_ context.Context, route PoolRoute) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.poolRoutes[poolRouteKey{route.TenantID, route.Name}] = route
+	return nil
+}
+
+func (m *MemStore) PoolRoute(_ context.Context, tenant, name string) (PoolRoute, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	route, ok := m.poolRoutes[poolRouteKey{tenant, name}]
+	if !ok {
+		return PoolRoute{}, ErrNotFound
+	}
+	return route, nil
+}
+
+func (m *MemStore) ListPoolRoutes(_ context.Context, tenant string) ([]PoolRoute, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]PoolRoute, 0, len(m.poolRoutes))
+	for _, route := range m.poolRoutes {
+		if tenant == "" || route.TenantID == tenant {
+			out = append(out, route)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TenantID != out[j].TenantID {
+			return out[i].TenantID < out[j].TenantID
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
+}
+
+func (m *MemStore) DeletePoolRoute(_ context.Context, tenant, name, poolID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := poolRouteKey{tenant, name}
+	if route, ok := m.poolRoutes[key]; ok && route.PoolID == poolID {
+		delete(m.poolRoutes, key)
+	}
 	return nil
 }
 

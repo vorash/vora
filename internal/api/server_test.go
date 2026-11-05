@@ -36,6 +36,7 @@ const (
 )
 
 type fakeRunner struct {
+	fakePools
 	specs          []*v1.SandboxSpec
 	creds          [][]*v1.BrokerCredential
 	sandboxes      []*v1.Sandbox
@@ -80,6 +81,9 @@ func (f *fakeRunner) StartSandboxAs(_ context.Context, id string, actor *v1.Acto
 }
 
 func (f *fakeRunner) GetSandbox(_ context.Context, id string) (*v1.Sandbox, error) {
+	if sb, ok := f.member(id); ok {
+		return sb, nil
+	}
 	return &v1.Sandbox{Id: id}, nil
 }
 
@@ -102,6 +106,13 @@ func (f *fakeRunner) StatsSandbox(_ context.Context, _ string) (*v1.Stats, error
 }
 
 func (f *fakeRunner) Events(_ context.Context, _ string) ([]*v1.SandboxEvent, error) {
+	if f.events != nil {
+		out := make([]*v1.SandboxEvent, 0, len(f.events))
+		for _, e := range f.events {
+			out = append(out, proto.Clone(e).(*v1.SandboxEvent))
+		}
+		return out, nil
+	}
 	return []*v1.SandboxEvent{{SandboxId: "sbx_test", To: "RUNNING"}}, nil
 }
 
