@@ -505,13 +505,13 @@ func (b *Backend) Exec(ctx context.Context, h runtime.Handle, req runtime.ExecRe
 	client := newExecClient(pidFile)
 	if err := hd.execs.begin(hd.id, client); err != nil {
 		cancel()
-		os.RemoveAll(pidDir)
+		_ = os.RemoveAll(pidDir)
 		return nil, err
 	}
 	abort := func(err error) (runtime.ExecStream, error) {
 		hd.execs.end(client, false)
 		cancel()
-		os.RemoveAll(pidDir)
+		_ = os.RemoveAll(pidDir)
 		return nil, err
 	}
 	stdout, stderr, closeClientEnds, err := outputPipes(cmd)
@@ -520,8 +520,8 @@ func (b *Backend) Exec(ctx context.Context, h runtime.Handle, req runtime.ExecRe
 	}
 	if err := cmd.Start(); err != nil {
 		closeClientEnds()
-		stdout.Close()
-		stderr.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
 		return abort(err)
 	}
 	closeClientEnds()
@@ -551,7 +551,7 @@ func (b *Backend) Exec(ctx context.Context, h runtime.Handle, req runtime.ExecRe
 			})
 		}
 		<-client.exited
-		os.RemoveAll(pidDir)
+		_ = os.RemoveAll(pidDir)
 	}()
 	go es.stream(stdout, stderr)
 	return es, nil
@@ -567,14 +567,14 @@ func outputPipes(cmd *exec.Cmd) (stdout, stderr *os.File, closeClientEnds func()
 	}
 	stderr, stderrW, err := os.Pipe()
 	if err != nil {
-		stdout.Close()
-		stdoutW.Close()
+		_ = stdout.Close()
+		_ = stdoutW.Close()
 		return nil, nil, nil, err
 	}
 	cmd.Stdout, cmd.Stderr = stdoutW, stderrW
 	return stdout, stderr, func() {
-		stdoutW.Close()
-		stderrW.Close()
+		_ = stdoutW.Close()
+		_ = stderrW.Close()
 	}, nil
 }
 
