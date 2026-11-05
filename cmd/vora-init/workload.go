@@ -1,11 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
 	goruntime "runtime"
-	"strings"
 	"sync"
 )
 
@@ -16,53 +16,46 @@ import (
 // would end the sandbox; killing a workload process only ends its exec.
 const workloadOOMScoreAdj = "1000"
 
-// oomScore raises the agent's own OOM score across a fork, so the child inherits
-// the raised score before any user code runs, and so does everything it forks.
+// startWorkload starts cmd and raises the score of the process it became, which
+// everything the workload forks then inherits. A failure to raise is logged by
+// the caller and does not stop the exec: it only changes who the OOM killer
+// picks, and the command the caller asked for should still run.
 //
-// Nothing else does this without a cost: os/exec has no pre-exec hook, writing
-// /proc/<pid>/oom_score_adj after Start is too late because the child has already
-// exec'd, and a re-exec shim needs OS threads of its own, which count against the
-// sandbox's pids limit and crash a Go process when refused.
+// The agent's own score never changes. Raising it across the fork so the child
+// inherits the value looked tighter, but a fork at the memory limit stalls in
+// reclaim for seconds, and an OOM in that window picks the agent: at the same
+// score it is the largest process in the sandbox. The window left here, from the
+// exec to the write, is microseconds unless the agent itself is stalled, and
+// while the limit is being hit the processes hitting it already carry the
+// raised score.
 //
-// An unprivileged process may lower its score again as long as it stays at or
-// above oom_score_adj_min, which its baseline is. The agent is the likeliest
-// victim only for the length of the fork, and a kill then ends this sandbox alone.
-type oomScore struct {
-	// file stays open from startup because a write needs no further permission
-	// check, which keeps this working if the agent later stops being dumpable.
-	file     *os.File
-	baseline string
+// Nothing else raises the child without a cost: os/exec has no pre-exec hook,
+// ptrace is denied by seccomp, and a re-exec shim needs OS threads of its own,
+// which count against the sandbox's pids limit and crash a Go process when
+// refused.
+func startWorkload(cmd *exec.Cmd) (startErr, scoreErr error) {
+	if err := cmd.Start(); err != nil {
+		return err, nil
+	}
+	pid := cmd.Process.Pid
+	err := os.WriteFile(fmt.Sprintf("/proc/%d/oom_score_adj", pid), []byte(workloadOOMScoreAdj), 0)
+	if err != nil && !exited(pid) {
+		scoreErr = fmt.Errorf("raise oom_score_adj: %w", err)
+	}
+	return nil, scoreErr
 }
 
-func openOOMScore() (*oomScore, error) {
-	f, err := os.OpenFile("/proc/self/oom_score_adj", os.O_RDWR, 0)
+// exited reports whether pid is gone or a zombie. A command that has already
+// exited has nothing left to score, and a zombie's /proc files belong to root,
+// so the write fails with EACCES rather than ESRCH.
+func exited(pid int) bool {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
-		return nil, err
+		return true
 	}
-	buf := make([]byte, 16)
-	n, err := f.ReadAt(buf, 0)
-	if n == 0 {
-		_ = f.Close()
-		return nil, fmt.Errorf("read oom_score_adj: %w", err)
-	}
-	return &oomScore{file: f, baseline: strings.TrimSpace(string(buf[:n]))}, nil
-}
-
-// startWorkload starts cmd with the raised score. A failure to raise or restore
-// is logged by the caller and does not stop the exec: it only changes who the OOM
-// killer picks, and the command the caller asked for should still run.
-func (o *oomScore) startWorkload(cmd *exec.Cmd) (startErr, scoreErr error) {
-	if o == nil {
-		return cmd.Start(), nil
-	}
-	if _, err := o.file.WriteAt([]byte(workloadOOMScoreAdj), 0); err != nil {
-		return cmd.Start(), fmt.Errorf("raise oom_score_adj: %w", err)
-	}
-	startErr = cmd.Start()
-	if _, err := o.file.WriteAt([]byte(o.baseline), 0); err != nil {
-		scoreErr = fmt.Errorf("restore oom_score_adj: %w", err)
-	}
-	return startErr, scoreErr
+	// The state follows the parenthesised comm, which may itself hold spaces.
+	i := bytes.LastIndexByte(b, ')')
+	return i < 0 || i+2 >= len(b) || b[i+2] == 'Z'
 }
 
 // spareThreads is how many threads fixThreads starts. The agent needs one running

@@ -61,7 +61,7 @@ func TestBrokerEndToEnd(t *testing.T) {
 	}
 	rootfs := imageRootfs(t, "base")
 
-	stateDir := t.TempDir()
+	stateDir := stateTempDir(t)
 	cfg := config.Config{
 		StateDir:             stateDir,
 		SystemdMode:          config.SystemdUser,
