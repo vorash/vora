@@ -469,6 +469,21 @@ func TestLongLivedProcessesAreTheOnesThatOutliveARun(t *testing.T) {
 	}
 }
 
+// A bwrap sandbox that can write a sysctl has lost the bind that stops kernel.cad_pid
+// reaching the host, so it must not become a pool member. gVisor's are the Sentry's.
+func TestCaptureRefusesAWritableSysctlOnlyUnderBwrap(t *testing.T) {
+	writable := map[string]string{"kernel/msgmax": "8192\n"}
+	if err := refuseWritableSysctls(bwrapComm, writable); err == nil || !strings.Contains(err.Error(), "kernel/msgmax") {
+		t.Fatalf("bwrap with a writable sysctl: err = %v, want it to name kernel/msgmax", err)
+	}
+	if err := refuseWritableSysctls(bwrapComm, map[string]string{}); err != nil {
+		t.Fatalf("bwrap with none: %v", err)
+	}
+	if err := refuseWritableSysctls("vora-init", writable); err != nil {
+		t.Fatalf("gVisor: %v", err)
+	}
+}
+
 func TestCaptureFailures(t *testing.T) {
 	boom := errors.New("boom")
 	for name, f := range map[string]*fakeSandbox{

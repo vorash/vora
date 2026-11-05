@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	goruntime "runtime"
 	"slices"
@@ -75,11 +76,18 @@ func helperResetter() *resetter {
 		capture:       sandboxreset.Capture,
 		restore:       sandboxreset.Restore,
 		captureKernel: func(ctx context.Context) ([]sandboxreset.Process, map[string]string, error) {
-			pids, err := longLivedPIDs()
+			comm, err := readInitComm()
 			if err != nil {
 				return nil, nil, err
 			}
-			return sandboxreset.CaptureKernel(ctx, kernel, pids)
+			processes, sysctls, err := sandboxreset.CaptureKernel(ctx, kernel, longLivedUnder(comm))
+			if err != nil {
+				return nil, nil, err
+			}
+			if err := refuseWritableSysctls(comm, sysctls); err != nil {
+				return nil, nil, err
+			}
+			return processes, sysctls, nil
 		},
 		checkKernel: func(ctx context.Context, m sandboxreset.Manifest) error {
 			pids, err := longLivedPIDs()
@@ -101,6 +109,18 @@ func longLivedPIDs() ([]int, error) {
 		return nil, err
 	}
 	return longLivedUnder(comm), nil
+}
+
+// refuseWritableSysctls fails a bwrap sandbox's capture if it can write any sysctl. Its
+// /proc/sys is meant to be a read-only bind, and without it kernel.cad_pid writes the
+// host's value on kernel 7.0, so this is a sandbox to stop using and not a state to record.
+// gVisor's sysctls are the Sentry's own.
+func refuseWritableSysctls(initComm string, sysctls map[string]string) error {
+	if initComm != bwrapComm || len(sysctls) == 0 {
+		return nil
+	}
+	names := slices.Sorted(maps.Keys(sysctls))
+	return fmt.Errorf("capture: /proc/sys is not read-only: %d sysctls are writable, first %s", len(names), names[0])
 }
 
 func longLivedUnder(initComm string) []int {

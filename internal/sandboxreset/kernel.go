@@ -61,14 +61,6 @@ var processFiles = []string{"oom_score_adj", "coredump_filter", "autogroup"}
 // sealTimerSlack proves that instead of assuming it.
 const timerSlackFile = "timerslack_ns"
 
-// volatileSysctls change without any workload asking, so comparing them would fail
-// every reset. Only what was seen to move on a real sandbox belongs here.
-var volatileSysctls = map[string]bool{
-	// Every fork in the PID namespace moves it. A later run can read the PID counter
-	// anyway, by forking.
-	"kernel/ns_last_pid": true,
-}
-
 // KernelReader is how Capture's and Reset's kernel checks read a sandbox. It only reads.
 type KernelReader interface {
 	// ThreadIDs lists a process's threads.
@@ -79,8 +71,8 @@ type KernelReader interface {
 	Rlimits(pid int) ([]Rlimit, error)
 	// ProcFile returns the content of /proc/<pid>/<name>.
 	ProcFile(pid int, name string) (string, error)
-	// Sysctls maps every sysctl this process could write, except volatileSysctls, to
-	// its value. Keys are relative to /proc/sys.
+	// Sysctls maps every sysctl this process could write to its value. Keys are relative
+	// to /proc/sys.
 	Sysctls(ctx context.Context) (map[string]string, error)
 }
 
@@ -151,6 +143,12 @@ func CheckKernel(ctx context.Context, r KernelReader, pids []int, m Manifest) er
 		if err := checkProcess(ctx, r, want); err != nil {
 			return fmt.Errorf("%w: PID %d: %w", ErrProcessChanged, want.PID, err)
 		}
+	}
+	// Nothing writable at capture means a read-only mount covers the tree, and making any
+	// of it writable takes a capability nothing in a sandbox has. Under bwrap the walk
+	// was a third of a reset's time, spent on files that cannot have changed.
+	if len(m.Sysctls) == 0 {
+		return nil
 	}
 	got, err := r.Sysctls(ctx)
 	if err != nil {
@@ -367,9 +365,6 @@ func (k liveKernel) Sysctls(ctx context.Context) (map[string]string, error) {
 		rel, err := filepath.Rel(k.sysctlRoot, path)
 		if err != nil {
 			return err
-		}
-		if volatileSysctls[rel] {
-			return nil
 		}
 		switch err := unix.Access(path, unix.W_OK); {
 		case errors.Is(err, unix.EACCES), errors.Is(err, unix.EPERM), errors.Is(err, unix.EROFS):

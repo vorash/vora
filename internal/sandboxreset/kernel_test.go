@@ -440,6 +440,47 @@ func TestSysctlErrorStaysShort(t *testing.T) {
 	}
 }
 
+// Under bwrap nothing is writable, so this is what every manifest there holds. The manifest
+// crosses the host as JSON, and an empty set must not come back as no set at all, which
+// fails the check.
+func TestNothingWritableIsAResultAndNotAGap(t *testing.T) {
+	k := newFakeKernel()
+	k.sysctls = map[string]string{}
+	m := captureFake(t, k)
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Manifest
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckKernel(context.Background(), k, bothPIDs, back); err != nil {
+		t.Fatalf("CheckKernel: %v", err)
+	}
+}
+
+// The walk is skipped only where capture found nothing writable. A sandbox with even one
+// writable sysctl gets compared at every reset, or gVisor's would go unchecked.
+func TestCheckWalksUnlessCaptureFoundNothingWritable(t *testing.T) {
+	boom := errors.New("boom")
+
+	k := newFakeKernel()
+	m := captureFake(t, k)
+	k.sysctlErr = boom
+	if err := CheckKernel(context.Background(), k, bothPIDs, m); !errors.Is(err, ErrSysctlChanged) {
+		t.Fatalf("with sysctls captured: err = %v, want ErrSysctlChanged", err)
+	}
+
+	k = newFakeKernel()
+	k.sysctls = map[string]string{}
+	m = captureFake(t, k)
+	k.sysctlErr = boom
+	if err := CheckKernel(context.Background(), k, bothPIDs, m); err != nil {
+		t.Fatalf("with nothing captured: %v, want no walk", err)
+	}
+}
+
 func writeSysctl(t *testing.T, root, rel, value string, mode os.FileMode) {
 	t.Helper()
 	path := filepath.Join(root, rel)
@@ -478,25 +519,6 @@ func TestSysctlWalkRecordsWhatThisProcessCouldWrite(t *testing.T) {
 		t.Fatalf("Sysctls: %v", err)
 	}
 	want := map[string]string{"kernel/msgmax": "8192\n", "kernel/sem": "1\t2\n", "fs/mqueue/msg_max": "10\n"}
-	if !maps.Equal(got, want) {
-		t.Fatalf("got %q, want %q", got, want)
-	}
-}
-
-// Every fork moves it, so comparing it would fail every reset that ran anything. The name
-// is the whole of the exception: its neighbours are still compared.
-func TestSysctlWalkLeavesOutOnlyWhatMovesByItself(t *testing.T) {
-	skipIfRoot(t)
-	root := t.TempDir()
-	writeSysctl(t, root, "kernel/ns_last_pid", "12\n", 0o666)
-	writeSysctl(t, root, "kernel/pid_max", "4194304\n", 0o644)
-	writeSysctl(t, root, "other/ns_last_pid", "12\n", 0o666)
-
-	got, err := liveKernel{sysctlRoot: root}.Sysctls(context.Background())
-	if err != nil {
-		t.Fatalf("Sysctls: %v", err)
-	}
-	want := map[string]string{"kernel/pid_max": "4194304\n", "other/ns_last_pid": "12\n"}
 	if !maps.Equal(got, want) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
