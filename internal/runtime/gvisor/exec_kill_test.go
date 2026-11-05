@@ -28,6 +28,8 @@ if [ "$sub" = "kill" ]; then
   [ -f "$FAKE_SLEEP_PID" ] && kill "$(cat "$FAKE_SLEEP_PID")" 2>/dev/null
   exit 0
 fi
+# A process that left the command's group: "kill -pid" never reaches it.
+[ -n "$FAKE_HOLDER_SECONDS" ] && { sleep "$FAKE_HOLDER_SECONDS" <&0 & }
 # Like the real runsc, the command outlives this client and keeps its pipes.
 sleep "$FAKE_EXEC_SECONDS" &
 echo $! > "$FAKE_SLEEP_PID"
@@ -119,6 +121,31 @@ func TestExecCancelKillsTheProcessInsideTheSandbox(t *testing.T) {
 			t.Fatal("cancelling the exec never killed its process in the sandbox")
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A workload must not outlive its timeout by moving a process out of the group
+// the kill reaches: that process keeps the pipes, which used to hold the stream
+// open until it exited. The stdin case also exercises cmd.Wait's stdin copy, which
+// a holder of stdin can block when the input exceeds the pipe buffer.
+func TestExecTimeoutIgnoresEscapedPipeHolder(t *testing.T) {
+	for name, stdin := range map[string][]byte{"no stdin": nil, "large stdin": make([]byte, 1<<20)} {
+		t.Run(name, func(t *testing.T) {
+			b, hd, _ := fakeExecBackend(t, "30")
+			t.Setenv("FAKE_HOLDER_SECONDS", "10")
+			stream, err := b.Exec(t.Context(), runtime.Handle(fakeHandle{hd.id}), runtime.ExecRequest{Command: "sleep", Args: []string{"60"}, Stdin: stdin, Timeout: 300 * time.Millisecond})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stream.Close()
+			start := time.Now()
+			if got := lastChunk(t, stream).Exit.Reason; got != runtime.ReasonTimeout {
+				t.Fatalf("reason = %s, want %s", got, runtime.ReasonTimeout)
+			}
+			if elapsed := time.Since(start); elapsed > 5*time.Second {
+				t.Fatalf("exit chunk took %v: the stream waited for the escaped process", elapsed)
+			}
+		})
 	}
 }
 

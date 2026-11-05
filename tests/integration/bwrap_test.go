@@ -213,6 +213,56 @@ func TestBwrapExecDoesNotLoseOutput(t *testing.T) {
 	}
 }
 
+// A workload must not outlive its timeout by moving a process out of the group
+// the kill reaches. The escaped process holds the exec's pipes, so the agent used
+// to read on until it exited, holding its exec lock against the whole sandbox.
+func TestBwrapPipeHolder(t *testing.T) {
+	backend, h := newBwrapSandbox(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	stream, err := backend.Exec(ctx, h, runtime.ExecRequest{
+		ExecutionID: "exe_holder",
+		Command:     "/bin/sh",
+		Args:        []string{"-c", "setsid sleep 50 & echo before; sleep 50"},
+		Cwd:         "/workspace",
+		Timeout:     time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	defer stream.Close()
+
+	var out strings.Builder
+	var exit *runtime.ExecResult
+	for exit == nil {
+		chunk, err := stream.Recv()
+		if err != nil {
+			t.Fatalf("stream ended without an exit chunk: %v", err)
+		}
+		out.Write(chunk.Stdout)
+		exit = chunk.Exit
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("exec with a 1s timeout took %v: it waited for the escaped process", took)
+	}
+	if exit.Reason != runtime.ReasonTimeout {
+		t.Fatalf("reason = %s, want %s", exit.Reason, runtime.ReasonTimeout)
+	}
+	if out.String() != "before\n" {
+		t.Fatalf("stdout = %q: output written before the kill was lost", out.String())
+	}
+
+	start = time.Now()
+	if got := execStdout(t, backend, h, "/bin/sh", []string{"-c", "echo next"}); got != "next\n" {
+		t.Fatalf("next exec stdout = %q", got)
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("next exec took %v: it queued behind the escaped process", took)
+	}
+}
+
 // execStdout runs a command and returns its stdout only.
 func execStdout(t *testing.T, backend *bwrap.Backend, h runtime.Handle, command string, args []string) string {
 	t.Helper()

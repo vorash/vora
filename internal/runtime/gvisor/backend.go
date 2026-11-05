@@ -480,6 +480,9 @@ func (b *Backend) Exec(ctx context.Context, h runtime.Handle, req runtime.ExecRe
 	pidFile := filepath.Join(pidDir, "pid")
 	args := append(b.globalFlags("none"), execArgsWithPID(hd.id, req, pidFile)...)
 	cmd := exec.CommandContext(execCtx, b.runsc, args...)
+	// Bounds the stdin copy in Wait: a process that left the command's group can
+	// keep the read end of the stdin pipe open without ever reading it.
+	cmd.WaitDelay = execPipeGrace
 	if len(req.Stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(req.Stdin)
 	}
@@ -508,6 +511,13 @@ func (b *Backend) Exec(ctx context.Context, h runtime.Handle, req runtime.ExecRe
 		<-execCtx.Done()
 		if !es.finished.Load() {
 			b.killExec(hd.id, pidFile)
+			// A process that left the command's group with setsid survives that
+			// kill and keeps the pipes open. The readers get a bounded time to
+			// drain what the command wrote, so it cannot outlive its timeout.
+			time.AfterFunc(execPipeGrace, func() {
+				_ = stdout.Close()
+				_ = stderr.Close()
+			})
 		}
 		os.RemoveAll(pidDir)
 	}()
@@ -717,6 +727,10 @@ func isMissing(out string) bool {
 	return strings.Contains(o, "not found") || strings.Contains(o, "does not exist") || strings.Contains(o, "no such")
 }
 
+// execPipeGrace is how long an exec's pipes stay open after it was killed or has
+// exited. It only has to cover draining what is already buffered.
+const execPipeGrace = time.Second
+
 // execStream adapts a runsc exec process to runtime.ExecStream.
 type execStream struct {
 	ch     chan runtime.ExecChunk
@@ -761,7 +775,7 @@ func (e *execStream) stream(stdout, stderr io.Reader) {
 	wg.Wait()
 
 	code := 0
-	if err := e.cmd.Wait(); err != nil {
+	if err := e.cmd.Wait(); err != nil && !errors.Is(err, exec.ErrWaitDelay) {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
 			code = ee.ExitCode()
