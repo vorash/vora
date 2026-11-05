@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -187,22 +188,284 @@ func TestResetFailsOnKernelStateBwrap(t *testing.T) {
 	}, []string{"nice", "affinity", "ioprio", "policy", "uclamp"})
 	testProcessAttributes(t, bwrapKernelSandbox, 2, []string{"rlimit"})
 	testProcessAttributes(t, bwrapKernelSandbox, 1, []string{"oom_score_adj", "coredump_filter", "autogroup"})
-	testSysctls(t, bwrapKernelSandbox, map[string]string{
-		"fs/mqueue/msg_default":     "9",
-		"fs/mqueue/msg_max":         "9",
-		"fs/mqueue/msgsize_default": "4096",
-		"fs/mqueue/msgsize_max":     "4096",
-		"fs/mqueue/queues_max":      "100",
-		"kernel/msgmax":             "4096",
-		"kernel/msgmnb":             "8192",
-		"kernel/msgmni":             "16",
-		"kernel/pid_max":            "65536",
-		"kernel/sem":                "10 20 30 40",
-		"kernel/shm_rmid_forced":    "1",
-		"kernel/shmall":             "1024",
-		"kernel/shmmax":             "1048576",
-		"kernel/shmmni":             "16",
+}
+
+// openSysctlsForWriting names what each open did. It stops at the open and never writes:
+// without the read-only bind, kernel/cad_pid would set the host's value.
+const openSysctlsForWriting = `
+import errno, json, os, sys
+got = {}
+for name in json.loads(sys.argv[1]):
+    try:
+        os.close(os.open("/proc/sys/" + name, os.O_WRONLY))
+        got[name] = "opened"
+    except OSError as e:
+        got[name] = errno.errorcode[e.errno]
+print(json.dumps(got))
+`
+
+// These were writable before /proc/sys became a read-only bind: the IPC and PID namespace
+// sysctls a user namespace owns, and kernel/cad_pid, which acts on the host. A manifest with
+// nothing in it is what lets a reset skip the walk, so both have to hold.
+func TestSysctlsAreReadOnlyBwrap(t *testing.T) {
+	s := bwrapKernelSandbox(t)
+	manifest := s.capture(t)
+	if m := decodeManifest(t, manifest); m.Sysctls == nil || len(m.Sysctls) != 0 {
+		t.Errorf("manifest sysctls = %q, want an empty set", m.Sysctls)
+	}
+	names := []string{
+		"fs/mqueue/msg_default", "fs/mqueue/msg_max", "fs/mqueue/msgsize_default", "fs/mqueue/msgsize_max",
+		"fs/mqueue/queues_max", "kernel/cad_pid", "kernel/msgmax", "kernel/msgmnb", "kernel/msgmni",
+		"kernel/ns_last_pid", "kernel/pid_max", "kernel/sem", "kernel/shm_rmid_forced", "kernel/shmall",
+		"kernel/shmmax", "kernel/shmmni",
+	}
+	list, err := json.Marshal(names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]string
+	out := mustExec(t, s.backend, s.h, "/usr/bin/python3", "-c", openSysctlsForWriting, string(list))
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("printed %q: %v", out, err)
+	}
+	for _, name := range names {
+		if got[name] != "EROFS" {
+			t.Errorf("%s: open for writing gave %s, want EROFS", name, got[name])
+		}
+	}
+	s.reset(t, manifest)
+}
+
+// plantUnderBinfmt tries what a run could leave in a writable mount. Only a regular file it
+// can still write would show in the sysctl walk, so the others would pass a reset unseen.
+const plantUnderBinfmt = `
+import errno, json, os
+dir = "/proc/sys/fs/binfmt_misc"
+got = set()
+def attempt(call, *args):
+    try:
+        call(*args)
+        got.add("planted")
+    except OSError as e:
+        got.add(errno.errorcode[e.errno])
+attempt(os.mkdir, dir + "/dir")
+attempt(os.symlink, "anything", dir + "/link")
+attempt(os.open, dir + "/file", os.O_CREAT | os.O_WRONLY, 0o444)
+print(json.dumps(sorted(got)))
+`
+
+// The host's binfmt_misc is hidden with a tmpfs, and a reset does not look under /proc.
+func TestBinfmtMaskKeepsNothingBwrap(t *testing.T) {
+	s := bwrapKernelSandbox(t)
+	manifest := s.capture(t)
+	if got := strings.TrimSpace(mustExec(t, s.backend, s.h, "/usr/bin/python3", "-c", plantUnderBinfmt)); strings.Contains(got, "planted") {
+		t.Fatalf("a run could write under binfmt_misc: %s", got)
+	}
+	s.reset(t, manifest)
+}
+
+// PID 1 is a workload's uid and outlives it, so without a mask a write here clears its
+// Referenced and soft-dirty bits or its schedstats, and a later run reads the difference
+// from smaps_rollup, pagemap or sched. Nothing compares those, so this has to stay refused.
+func TestPID1StatisticsAreOutOfReachBwrap(t *testing.T) {
+	s := bwrapKernelSandbox(t)
+	manifest := s.capture(t)
+	const write = `
+import errno, json, os
+got = set()
+for path in ("/proc/1/clear_refs", "/proc/1/task/1/clear_refs", "/proc/1/sched", "/proc/1/task/1/sched"):
+    try:
+        fd = os.open(path, os.O_WRONLY)
+        try:
+            os.write(fd, b"4")
+        finally:
+            os.close(fd)
+        got.add("wrote")
+    except OSError as e:
+        got.add(errno.errorcode[e.errno])
+print(json.dumps(sorted(got)))
+`
+	if got := strings.TrimSpace(mustExec(t, s.backend, s.h, "/usr/bin/python3", "-c", write)); got != `["EACCES"]` {
+		t.Fatalf("writing PID 1's statistics gave %s, want refusal", got)
+	}
+	s.reset(t, manifest)
+}
+
+// refusedWrite is a write to a long-lived process's file that the kernel has to refuse. The
+// comparison does not look at these because a run cannot change them, and this is what
+// holds that up: the file modes say otherwise.
+type refusedWrite struct {
+	path, value, want string
+}
+
+const tryWrites = `
+import errno, json, os, sys
+got = []
+for path, value in json.loads(sys.argv[1]):
+    try:
+        fd = os.open(path, os.O_WRONLY)
+        try:
+            os.write(fd, value.encode())
+        finally:
+            os.close(fd)
+        got.append("wrote")
+    except OSError as e:
+        got.append(errno.errorcode[e.errno])
+print(json.dumps(got))
+`
+
+func testRefusedWrites(t *testing.T, s ipcSandbox, writes []refusedWrite) {
+	t.Helper()
+	manifest := s.capture(t)
+	pairs := make([][2]string, len(writes))
+	for i, w := range writes {
+		pairs[i] = [2]string{w.path, w.value}
+	}
+	list, err := json.Marshal(pairs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	out := mustExec(t, s.backend, s.h, "/usr/bin/python3", "-c", tryWrites, string(list))
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("printed %q: %v", out, err)
+	}
+	for i, w := range writes {
+		if got[i] != w.want {
+			t.Errorf("%s <- %q: %s, want %s", w.path, w.value, got[i], w.want)
+		}
+	}
+	s.reset(t, manifest)
+}
+
+func TestLongLivedFilesRefuseWritesBwrap(t *testing.T) {
+	writes := []refusedWrite{
+		{"/proc/1/loginuid", "4294967295", "EPERM"},
+		{"/proc/1/uid_map", "0 0 1", "EPERM"},
+		{"/proc/1/gid_map", "0 0 1", "EPERM"},
+		{"/proc/1/projid_map", "0 0 1", "EPERM"},
+		{"/proc/1/timens_offsets", "monotonic 0 0", "EPERM"},
+		{"/proc/1/comm", "zz", "EINVAL"},
+		{"/proc/1/setgroups", "deny", "EACCES"},
+		{"/proc/1/mem", "x", "EACCES"},
+	}
+	for _, pid := range []string{"1", "2"} {
+		for _, name := range []string{"current", "exec", "fscreate", "keycreate", "sockcreate", "smack/current", "apparmor/current", "apparmor/exec"} {
+			writes = append(writes, refusedWrite{"/proc/" + pid + "/attr/" + name, "x", "EPERM"})
+		}
+	}
+	testRefusedWrites(t, bwrapKernelSandbox(t), writes)
+}
+
+func TestLongLivedFilesRefuseWritesGvisor(t *testing.T) {
+	testRefusedWrites(t, gvisorKernelSandbox(t), []refusedWrite{
+		{"/proc/1/setgroups", "deny", "EPERM"},
+		{"/proc/self/setgroups", "deny", "EPERM"},
+		{"/proc/1/uid_map", "0 0 1", "EPERM"},
+		{"/proc/self/uid_map", "0 0 1", "EPERM"},
+		{"/proc/1/gid_map", "0 0 1", "EPERM"},
+		{"/proc/self/gid_map", "0 0 1", "EPERM"},
+		{"/proc/1/task/1/children", "x", "EIO"},
+		{"/proc/1/comm", "zz", "EINVAL"},
+		{"/proc/1/mem", "x", "EACCES"},
+		{"/proc/sys/kernel/pid_max", "65536", "EIO"},
+		{"/proc/sys/kernel/randomize_va_space", "0", "EIO"},
+		{"/proc/sys/kernel/keys/maxkeys", "100", "EPERM"},
+		{"/proc/sys/fs/pipe-max-size", "65536", "EIO"},
 	})
+}
+
+// listWritable names every file under /proc and /sys that opens for writing, and every
+// directory that takes a new entry, leaving out the caller's own process, whose files go
+// with it. It only opens: under /proc a write could reach the host.
+const listWritable = `
+import json, os, re, stat
+me = str(os.getpid())
+found = []
+def visit(root, e):
+    if e.is_symlink():
+        return
+    if root == "/proc" and e.name.isdigit() and (e.name == me or e.name not in ("1", "2")):
+        return
+    if root == "/proc" and e.name in ("self", "thread-self", "net"):
+        return
+    if re.fullmatch(r"/proc/\d+(/task/\d+)?", root) and e.name in ("fd", "fdinfo", "map_files", "ns", "net"):
+        return
+    if e.is_dir(follow_symlinks=False):
+        if os.access(e.path, os.W_OK):
+            found.append(e.path + "/")
+        walk(e.path)
+    elif stat.S_ISREG(e.stat(follow_symlinks=False).st_mode):
+        try:
+            os.close(os.open(e.path, os.O_WRONLY | os.O_NONBLOCK))
+            found.append(e.path)
+        except OSError:
+            pass
+def walk(root):
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return
+    for e in entries:
+        try:
+            visit(root, e)
+        except FileNotFoundError:
+            pass
+walk("/proc")
+walk("/sys")
+print(json.dumps(sorted(found)))
+`
+
+// accountedFor is why each writable path may exist. A new one fails the test until someone
+// finds out what it does, which is how kernel.cad_pid would have been caught. A task's
+// directory repeats its process's files.
+var accountedForBwrap = map[string]string{
+	`/proc/pressure/(cpu|io|memory|irq)`:             "a PSI trigger, which lives and dies with the fd",
+	`/proc/1(/task/1)?/(oom_adj|oom_score_adj)`:      "compared",
+	`/proc/1(/task/1)?/coredump_filter`:              "compared",
+	`/proc/1/autogroup`:                              "compared",
+	`/proc/[12]/timerslack_ns`:                       "refused, and sealTimerSlack proves it",
+	`/proc/[12](/task/[0-9]+)?/attr/.*`:              "refused: only a task's own, TestLongLivedFilesRefuseWritesBwrap",
+	`/proc/1(/task/1)?/(comm|loginuid)`:              "refused, TestLongLivedFilesRefuseWritesBwrap",
+	`/proc/1(/task/1)?/(uid_map|gid_map|projid_map)`: "refused, TestLongLivedFilesRefuseWritesBwrap",
+	`/proc/1/timens_offsets`:                         "refused, TestLongLivedFilesRefuseWritesBwrap",
+}
+
+var accountedForGvisor = map[string]string{
+	`/proc/sys/.*`:        "the Sentry's: each is compared, or a static file that refuses writes",
+	`/proc/sysrq-trigger`: "the Sentry's static file, which does nothing",
+	`/proc/1(/task/[0-9]+)?/(oom_score_adj|coredump_filter)`:           "compared",
+	`/proc/1(/task/[0-9]+)?/(comm|setgroups|uid_map|gid_map|children)`: "refused, TestLongLivedFilesRefuseWritesGvisor",
+}
+
+func testEveryWritablePathIsAccountedFor(t *testing.T, s ipcSandbox, accounted map[string]string) {
+	t.Helper()
+	patterns := make([]*regexp.Regexp, 0, len(accounted))
+	for pattern := range accounted {
+		patterns = append(patterns, regexp.MustCompile("^"+pattern+"$"))
+	}
+	var found []string
+	out := mustExec(t, s.backend, s.h, "/usr/bin/python3", "-c", listWritable)
+	if err := json.Unmarshal([]byte(out), &found); err != nil {
+		t.Fatalf("printed %q: %v", out, err)
+	}
+	if len(found) == 0 {
+		t.Fatal("found nothing writable, not even PID 1's oom_score_adj, so this proved nothing")
+	}
+	t.Logf("%d writable paths: %s", len(found), strings.Join(found, " "))
+	for _, path := range found {
+		if !slices.ContainsFunc(patterns, func(p *regexp.Regexp) bool { return p.MatchString(path) }) {
+			t.Errorf("%s is writable and nothing says what it does", path)
+		}
+	}
+}
+
+func TestEveryWritablePathIsAccountedForBwrap(t *testing.T) {
+	testEveryWritablePathIsAccountedFor(t, bwrapKernelSandbox(t), accountedForBwrap)
+}
+
+func TestEveryWritablePathIsAccountedForGvisor(t *testing.T) {
+	testEveryWritablePathIsAccountedFor(t, gvisorKernelSandbox(t), accountedForGvisor)
 }
 
 func TestResetFailsOnKernelStateGvisor(t *testing.T) {
@@ -315,8 +578,7 @@ func TestTimerSlackIsOutOfReachGvisor(t *testing.T) {
 }
 
 // ordinaryRun forks, starts threads and changes its own nice, limits, policy and affinity,
-// all of which are its own business and go with it. Every fork moves ns_last_pid, so this
-// is also what keeps that sysctl excluded.
+// all of which are its own business and go with it.
 const ordinaryRun = `
 import os, resource, subprocess, threading
 os.nice(5)
@@ -333,7 +595,7 @@ print(len(os.listdir("/proc/%d/task" % (2 if os.path.isdir("/proc/2/task") else 
 
 // One clean run must never lose a member, however many there are. A value that drifts by
 // itself, or that the agent's own runtime moves, fails here before it fails a warm pool in
-// production, and any such value belongs in volatileSysctls with a comment naming why.
+// production.
 // A capture is a second reading of everything by the same code, so comparing them says
 // what moved where a reset would only say that something did. leftover runs at the end of
 // each run, for a backend whose reset kills what it starts.
