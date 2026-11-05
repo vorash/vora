@@ -82,10 +82,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	refuse, err := refuseSandboxPeers(os.Getpid(), readInitComm)
-	if err != nil {
-		logger.Warn("refusing sandbox peers without knowing PID 1's name", "error", err)
-	}
+	refuse := refuseSandboxPeers(os.Getpid())
 	lis, err := listenAgent(*socket)
 	if err != nil {
 		logger.Error("listen", "socket", *socket, "error", err)

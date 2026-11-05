@@ -15,23 +15,13 @@ import (
 // forks through PIDs grows neither the log nor a per-PID table.
 const refusalLogInterval = time.Minute
 
-// refuseSandboxPeers decides whether the agent must refuse connections from inside its
-// own PID namespace. It is a decision for startup: nothing in a sandbox runs yet, so
-// nothing can influence it.
-//
-// An unreadable PID 1 name returns true along with the error. PID 2 is already proof of
-// a PID namespace (see isBwrapAgent), so turning the check off could open a real sandbox
-// to its own workload, while keeping it on can only lock out a host-run agent's client,
-// which fails on its first call.
-func refuseSandboxPeers(pid int, readInitComm func() (string, error)) (bool, error) {
-	if pid != agentPID {
-		return false, nil
-	}
-	comm, err := readInitComm()
-	if err != nil {
-		return true, err
-	}
-	return isBwrapAgent(pid, comm), nil
+// refuseSandboxPeers reports whether the agent must refuse connections from inside its
+// own PID namespace. PID 2 is proof of a PID namespace (see isBwrapAgent), and a real
+// sandbox must never run with this off, so it does not also ask PID 1's name, which
+// would leave the check off under a differently named bwrap. Outside a namespace every
+// client reads nonzero, so an agent run by hand keeps the check off.
+func refuseSandboxPeers(pid int) bool {
+	return pid == agentPID
 }
 
 // hostOnlyListener passes on only connections made from outside the agent's PID

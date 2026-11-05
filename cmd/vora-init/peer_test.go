@@ -239,35 +239,12 @@ func TestRefusalsAreLoggedAtARate(t *testing.T) {
 // a host-run agent's client out. The PID decides first because comm cannot be trusted to
 // be readable outside a sandbox, where it does not matter.
 func TestRefuseSandboxPeersDecision(t *testing.T) {
-	unreadable := errors.New("unreadable")
-	name := func(comm string) func() (string, error) {
-		return func() (string, error) { return comm, nil }
+	if !refuseSandboxPeers(agentPID) {
+		t.Fatal("PID 2 must refuse sandbox peers, whatever PID 1 is called")
 	}
-	cases := []struct {
-		name     string
-		pid      int
-		read     func() (string, error)
-		want     bool
-		wantsErr bool
-	}{
-		{name: "the agent of a bwrap sandbox", pid: agentPID, read: name(bwrapComm), want: true},
-		{name: "PID 2 with an unreadable PID 1 fails closed", pid: agentPID, read: func() (string, error) { return "", unreadable }, want: true, wantsErr: true},
-		{name: "PID 2 of a container", pid: agentPID, read: name("systemd")},
-		{name: "PID 2 under a name that only starts right", pid: agentPID, read: name("bwrap2")},
-		{name: "an agent run by hand on a host", pid: os.Getpid(), read: name("systemd")},
-		{name: "a host agent whose PID 1 is called bwrap", pid: 12345, read: name(bwrapComm)},
-		{name: "a host agent that cannot read PID 1", pid: 12345, read: func() (string, error) { return "", unreadable }},
-		{name: "PID 1 of a sandbox", pid: initPID, read: name(bwrapComm)},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := refuseSandboxPeers(tc.pid, tc.read)
-			if got != tc.want {
-				t.Fatalf("refuse = %v, want %v", got, tc.want)
-			}
-			if (err != nil) != tc.wantsErr {
-				t.Fatalf("err = %v, wants an error: %v", err, tc.wantsErr)
-			}
-		})
+	for _, pid := range []int{initPID, 12345, os.Getpid()} {
+		if refuseSandboxPeers(pid) {
+			t.Fatalf("PID %d refuses its clients, but every client outside a namespace reads nonzero", pid)
+		}
 	}
 }
