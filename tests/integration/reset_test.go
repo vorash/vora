@@ -6,17 +6,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/oklog/ulid/v2"
+	"golang.org/x/sys/unix"
 
 	"github.com/vorash/vora/internal/agentproto"
 	"github.com/vorash/vora/internal/cgroup"
@@ -389,86 +392,322 @@ func buildForgedReset(t *testing.T) []byte {
 	return binary
 }
 
-// A workload has the agent's uid and can reach control.sock, so it can call Reset with a
-// manifest of its own. Whatever that does, the host's manifest still decides: the host's
-// reset either proves the start state or fails.
+// forgedOut is where a background attack's output goes.
+const forgedOut = "/tmp/forged.out"
+
+// startForged starts an attack the way a workload that outlives its exec would, so no
+// call of the host's is holding execMu behind it.
+func (s *resetSandbox) startForged(t *testing.T, args ...string) {
+	t.Helper()
+	mustExec(t, s.backend, s.h, "/bin/sh", append([]string{"-c", `setsid /workspace/forgedreset "$@" >` + forgedOut + ` 2>&1 </dev/null &`, "forge"}, args...)...)
+}
+
+// waitForOutput returns what read returns once it contains want. An attack that never
+// gets there fails the test, so one that broke cannot pass as a refusal.
+func waitForOutput(t *testing.T, read func() string, want string) string {
+	t.Helper()
+	var got string
+	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		got = read()
+		if strings.Contains(got, want) {
+			return got
+		}
+	}
+	t.Fatalf("waited for %q, got %q", want, got)
+	return ""
+}
+
+// waitForged waits on an attack's result file. It reads forgedOut as well, so a timeout
+// shows why an attack that writes elsewhere never got going.
+func (s *resetSandbox) waitForged(t *testing.T, path, want string) string {
+	t.Helper()
+	return waitForOutput(t, func() string {
+		return mustExec(t, s.backend, s.h, "/bin/sh", "-c", `cat "$1" "$2" 2>/dev/null || true`, "read", path, forgedOut)
+	}, want)
+}
+
+// forgedRaw runs a raw attack in the foreground and fails unless the agent closed the
+// connection without a byte of HTTP/2.
+func (s *resetSandbox) forgedRaw(t *testing.T, args ...string) {
+	t.Helper()
+	out := mustExec(t, s.backend, s.h, "/workspace/forgedreset", args...)
+	if !strings.Contains(out, "closed: ") {
+		t.Fatalf("%v = %q, want the connection closed unanswered", args, out)
+	}
+}
+
+// assertHealthy is what a refused attack must leave behind: the host still drives the
+// sandbox through every call, the connection it had from the start included.
+func (s *resetSandbox) assertHealthy(t *testing.T, manifest []byte) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if pid, err := s.client.Ping(ctx); err != nil || pid != 2 {
+		t.Fatalf("host Ping = %d, %v, want the agent at PID 2", pid, err)
+	}
+	if got := mustExec(t, s.backend, s.h, "/bin/echo", "alive"); got != "alive\n" {
+		t.Fatalf("host Exec = %q", got)
+	}
+	s.capture(t)
+	if _, err := s.reset(manifest); err != nil {
+		t.Fatalf("host Reset: %v", err)
+	}
+	if got := processes(t, s.backend, s.h); !slices.Equal(got, []int{1, 2}) {
+		t.Fatalf("processes after the host's reset = %v, want only bwrap and the agent", got)
+	}
+}
+
+// A workload has the agent's uid and can reach control.sock, so only the agent can keep
+// it from calling Exec, Reset and the rest. Each of these attacks must be refused and
+// leave the sandbox healthy, from the host's point of view and in fact.
 func TestForgedResetGainsNothing(t *testing.T) {
 	forger := buildForgedReset(t)
 
-	setup := func(t *testing.T, s *resetSandbox, forged []byte) {
+	// The binary is in place before the capture, as a template's files are.
+	setup := func(t *testing.T) (*resetSandbox, []byte) {
 		t.Helper()
+		s := newResetSandbox(t)
 		if err := os.WriteFile(filepath.Join(s.ws.WorkspaceDir, "forgedreset"), forger, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(s.ws.WorkspaceDir, "forged.json"), forged, 0o644); err != nil {
-			t.Fatal(err)
-		}
+		return s, s.capture(t)
 	}
 
-	// The exec that started the call holds execMu, so this waits and gives up, and the
-	// run has done itself no harm: the kill never happened.
-	t.Run("from a foreground process it only times out", func(t *testing.T) {
-		s := newResetSandbox(t)
-		manifest := s.capture(t)
-		setup(t, s, manifest)
-		out := mustExec(t, s.backend, s.h, "/workspace/forgedreset", "/workspace/forged.json", "500ms")
-		if !strings.Contains(out, "DeadlineExceeded") && !strings.Contains(out, "deadline") {
-			t.Fatalf("forged call = %q, want it to time out behind its own exec", out)
-		}
-		if removed, err := s.reset(manifest); err != nil || removed != 2 {
-			t.Fatalf("host Reset = %d, %v, want the two planted files removed", removed, err)
-		}
-	})
-
-	t.Run("a garbled manifest changes nothing", func(t *testing.T) {
-		s := newResetSandbox(t)
-		manifest := s.capture(t)
-		setup(t, s, []byte("{not json"))
-		mustExec(t, s.backend, s.h, "/bin/sh", "-c", "setsid /workspace/forgedreset /workspace/forged.json 5s >/tmp/forged.out 2>&1 </dev/null &")
-		time.Sleep(time.Second)
-		out := mustExec(t, s.backend, s.h, "/bin/cat", "/tmp/forged.out")
-		if !strings.Contains(out, "parse manifest") {
-			t.Fatalf("forged call = %q, want a parse error", out)
-		}
-		if _, err := s.reset(manifest); err != nil {
-			t.Fatalf("host Reset: %v", err)
-		}
-	})
-
-	// A forged manifest that leaves out a listed file makes Restore delete that file,
-	// which the workload could have done with rm. Either the forger died first and the
-	// file is still there, or the host's reset sees that it is gone. What must never
-	// happen is a successful host reset with the file missing.
-	t.Run("a manifest that drops a listed file cannot pass the host's reset", func(t *testing.T) {
-		s := newResetSandbox(t)
-		manifest := s.capture(t)
-		forged := decodeManifest(t, manifest)
-		for i, l := range forged.Mounts {
-			if l.Path == "/workspace" {
-				forged.Mounts[i].Entries = slices.DeleteFunc(l.Entries, func(e sandboxreset.Entry) bool { return e.Rel == "keep" })
-			}
-		}
-		raw, err := json.Marshal(forged)
-		if err != nil {
+	// An RPC that got through shows in its output and also in what it did: Exec leaves
+	// the marker, Reset removes the planted file and kills this process, Shutdown and
+	// Signal with SIGKILL end the sandbox.
+	t.Run("every RPC is refused", func(t *testing.T) {
+		s, manifest := setup(t)
+		if err := os.WriteFile(filepath.Join(s.ws.WorkspaceDir, "forged.json"), manifest, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		before := snapshot(t, s.backend, s.h, bwrapWritable)
-		setup(t, s, raw)
-		mustExec(t, s.backend, s.h, "/bin/sh", "-c", "setsid /workspace/forgedreset /workspace/forged.json 20s >/dev/null 2>&1 </dev/null &")
-		time.Sleep(time.Second)
-
-		_, err = s.reset(manifest)
-		if err != nil {
-			if !strings.Contains(err.Error(), "listed entry changed") && !strings.Contains(err.Error(), "queued across another reset") {
-				t.Fatalf("host Reset: %v, want a changed listed entry or the forged call in its way", err)
+		mustExec(t, s.backend, s.h, "/bin/sh", "-c", "echo run > /tmp/planted")
+		for _, rpc := range []string{"Ping", "Exec", "Signal", "Capture", "Reset", "Shutdown"} {
+			mustExec(t, s.backend, s.h, "/bin/sh", "-c",
+				"setsid /workspace/forgedreset rpc "+rpc+" /workspace/forged.json /tmp/forged-exec >/tmp/forged."+rpc+" 2>&1 </dev/null &")
+			out := s.waitForged(t, "/tmp/forged."+rpc, rpc+" ")
+			if !strings.Contains(out, rpc+" refused: ") {
+				t.Fatalf("forged %s = %q", rpc, out)
 			}
-			t.Logf("host reset refused the sandbox: %v", err)
-			return
 		}
-		if after := snapshot(t, s.backend, s.h, bwrapWritable); after != before {
-			t.Fatalf("host reset passed on a changed sandbox\nbefore:\n%s\nafter:\n%s", before, after)
+		if out := mustExec(t, s.backend, s.h, "/bin/sh", "-c", "ls /tmp/forged-exec 2>&1; cat /tmp/planted"); !strings.Contains(out, "No such file") || !strings.Contains(out, "run") {
+			t.Fatalf("forged calls left %q, want no marker and the planted file intact", out)
+		}
+		s.assertHealthy(t, manifest)
+	})
+
+	t.Run("a raw call on the socket gets no reply", func(t *testing.T) {
+		s, manifest := setup(t)
+		s.forgedRaw(t, "raw", "/vora/control.sock")
+		s.assertHealthy(t, manifest)
+	})
+
+	// What the agent reads is the task that connected, however the bytes arrive. Both
+	// kinds of socket a relay could offer are tried, since abstract ones have no path to
+	// protect.
+	for _, relay := range []string{"/tmp/relay.sock", "@vora-relay"} {
+		t.Run("a relay is still a peer inside the sandbox: "+relay, func(t *testing.T) {
+			s, manifest := setup(t)
+			s.startForged(t, "relay", relay)
+			s.waitForged(t, forgedOut, "ready")
+			s.forgedRaw(t, "raw", relay)
+			s.assertHealthy(t, manifest)
+		})
+	}
+
+	// SO_PEERCRED reads 0 for a task the namespace cannot see, so a kernel that read a
+	// dead task the same way would let anyone in. The call sits in the socket and the
+	// connection stays open, so an agent that took it would run the Shutdown.
+	t.Run("a peer that is gone before the accept is refused", func(t *testing.T) {
+		s, manifest := setup(t)
+		s.startForged(t, "orphan", "/tmp/orphan.out")
+		out := s.waitForged(t, "/tmp/orphan.out", "closed: ")
+		if !strings.Contains(out, "connector gone: true") {
+			t.Fatalf("orphan = %q: the connector was still there, so this proved nothing", out)
+		}
+		s.assertHealthy(t, manifest)
+	})
+
+	// The sandbox has no capability to make a PID namespace, and if it could, the agent's
+	// namespace is an ancestor of the new one and sees the process.
+	t.Run("a nested PID namespace does not read as the host", func(t *testing.T) {
+		s, manifest := setup(t)
+		out := mustExec(t, s.backend, s.h, "/workspace/forgedreset", "nested")
+		t.Logf("nested: %s", out)
+		if !strings.Contains(out, "namespace denied: ") && !strings.Contains(out, "closed: ") {
+			t.Fatalf("nested = %q", out)
+		}
+		s.assertHealthy(t, manifest)
+	})
+
+	t.Run("a flood costs the agent nothing and the host keeps working", func(t *testing.T) {
+		s, manifest := setup(t)
+		// The socket count covers every Unix socket in the sandbox's network namespace,
+		// so a refused connection the agent kept would show in it.
+		const held = `grep Threads /proc/2/status; grep -c . /proc/net/unix`
+		before := mustExec(t, s.backend, s.h, "/bin/sh", "-c", held)
+		t.Logf("before the flood: %q, %s, idle Ping: %s", before, agentRSS(t, s), describeLatency(s.pingLatency(t, 200)))
+
+		s.startForged(t, "flood", "8", "5s")
+		var pings, execs, dials []time.Duration
+		// While it lasts, every call the runner makes must work: on the connection it
+		// has, as a new exec, and as a new connection. The bounds are the runner's own:
+		// 2s for a keepalive Ping and 15s for an agent to become ready.
+		deadline := time.Now().Add(4 * time.Second)
+		for time.Now().Before(deadline) {
+			pings = append(pings, s.pingLatency(t, 20)...)
+			start := time.Now()
+			if got := mustExec(t, s.backend, s.h, "/bin/echo", "alive"); got != "alive\n" {
+				t.Fatalf("host Exec during the flood = %q", got)
+			}
+			execs = append(execs, time.Since(start))
+			start = time.Now()
+			fresh, err := agentproto.Dial(s.ws.ControlSocket)
+			if err != nil {
+				t.Fatalf("new host connection during the flood: %v", err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			err = fresh.WaitReady(ctx, 15*time.Second)
+			cancel()
+			_ = fresh.Close()
+			if err != nil {
+				t.Fatalf("new host connection during the flood: %v", err)
+			}
+			dials = append(dials, time.Since(start))
+		}
+		t.Logf("during the flood: Ping %s; Exec %s; new connection %s", describeLatency(pings), describeLatency(execs), describeLatency(dials))
+		if slowest := slices.Max(pings); slowest > 2*time.Second {
+			t.Fatalf("slowest host Ping during the flood took %v", slowest)
+		}
+
+		out := s.waitForged(t, forgedOut, "flood done")
+		t.Logf("%s", out)
+		if strings.Contains(out, "connected 0 ") {
+			t.Fatalf("flood = %q: nothing connected, so this proved nothing", out)
+		}
+		// Polled because closed sockets leave the list a moment after the close.
+		waitForOutput(t, func() string { return mustExec(t, s.backend, s.h, "/bin/sh", "-c", held) }, before)
+		t.Logf("after the flood: %s", agentRSS(t, s))
+		s.assertHealthy(t, manifest)
+	})
+
+	// The runner's connection outlives the path, so a replacement does nothing until it
+	// has to dial again. Here it has to: the workload's listener gets the connection, and
+	// the dialer must drop it before gRPC sends a byte, or the workload could forge exec
+	// results and a clean reset.
+	t.Run("the runner does not talk to a replaced socket", func(t *testing.T) {
+		s, _ := setup(t)
+		s.startForged(t, "replace", "/workspace/replaced.out")
+		s.waitForged(t, "/workspace/replaced.out", "ready")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := s.client.Ping(ctx); err != nil {
+			t.Fatalf("host Ping on its existing connection: %v", err)
+		}
+		if got := mustExec(t, s.backend, s.h, "/bin/echo", "alive"); got != "alive\n" {
+			t.Fatalf("host Exec on its existing connection = %q", got)
+		}
+
+		dropAgentConnections(t)
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+			pingCtx, cancelPing := context.WithTimeout(context.Background(), time.Second)
+			_, err := s.client.Ping(pingCtx)
+			cancelPing()
+			if err == nil {
+				t.Fatal("host Ping succeeded through a replaced socket")
+			}
+		}
+		execCtx, cancelExec := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancelExec()
+		if stream, err := s.backend.Exec(execCtx, s.h, runtime.ExecRequest{ExecutionID: "exe_reset", Command: "/bin/echo", Args: []string{"forged"}}); err == nil {
+			_, err = stream.Recv()
+			_ = stream.Close()
+			if err == nil {
+				t.Fatal("the backend's Exec got a reply through a replaced socket")
+			}
+		}
+
+		// The agent is out of reach by now, so this reads from the host's side.
+		got := waitForOutput(t, func() string {
+			got, _ := os.ReadFile(filepath.Join(s.ws.WorkspaceDir, "replaced.out"))
+			return string(got)
+		}, "connection sent")
+		if strings.Contains(strings.ReplaceAll(got, "connection sent 0 bytes", ""), "connection sent") {
+			t.Fatalf("the runner sent bytes to a replaced socket:\n%s", got)
 		}
 	})
+
+	t.Run("a reset fails on a replaced socket", func(t *testing.T) {
+		s, manifest := setup(t)
+		s.startForged(t, "replace", "/tmp/replaced.out")
+		s.waitForged(t, "/tmp/replaced.out", "ready")
+		_, err := s.reset(manifest)
+		if err == nil {
+			t.Fatal("Reset succeeded with the control socket replaced")
+		}
+		if !strings.Contains(err.Error(), "listed entry changed") || !strings.Contains(err.Error(), "control.sock") {
+			t.Fatalf("err = %v, want it to name control.sock", err)
+		}
+	})
+}
+
+// pingLatency times n Pings on the host's existing connection.
+func (s *resetSandbox) pingLatency(t *testing.T, n int) []time.Duration {
+	t.Helper()
+	took := make([]time.Duration, 0, n)
+	for range n {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		start := time.Now()
+		_, err := s.client.Ping(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("host Ping: %v", err)
+		}
+		took = append(took, time.Since(start))
+	}
+	return took
+}
+
+func describeLatency(took []time.Duration) string {
+	sorted := slices.Sorted(slices.Values(took))
+	return fmt.Sprintf("n=%d median=%v p99=%v max=%v", len(sorted), sorted[len(sorted)/2], sorted[len(sorted)*99/100], sorted[len(sorted)-1])
+}
+
+func agentRSS(t *testing.T, s *resetSandbox) string {
+	t.Helper()
+	return strings.TrimSpace(mustExec(t, s.backend, s.h, "/bin/grep", "VmRSS", "/proc/2/status"))
+}
+
+// dropAgentConnections cuts every connection this process has to an agent, which makes
+// gRPC dial again as it would after any transport failure. The peer's name is the path
+// the agent bound inside its sandbox.
+func dropAgentConnections(t *testing.T) {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dropped := 0
+	for _, e := range entries {
+		fd, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		peer, err := unix.Getpeername(fd)
+		if err != nil {
+			continue
+		}
+		if name, ok := peer.(*unix.SockaddrUnix); ok && name.Name == "/vora/control.sock" {
+			if err := unix.Shutdown(fd, unix.SHUT_RDWR); err != nil {
+				t.Fatal(err)
+			}
+			dropped++
+		}
+	}
+	if dropped == 0 {
+		t.Fatal("no connection to an agent to drop")
+	}
 }
 
 // The helper modes are for gVisor, but CI can only reach them under bwrap, where they

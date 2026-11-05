@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -13,9 +14,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vorash/vora/internal/cgroup"
+	"github.com/vorash/vora/internal/config"
+	"github.com/vorash/vora/internal/egress"
 	"github.com/vorash/vora/internal/network"
 	"github.com/vorash/vora/internal/runtime"
+	"github.com/vorash/vora/internal/runtime/bwrap"
 	"github.com/vorash/vora/internal/ulid"
+	"github.com/vorash/vora/internal/workspace"
 )
 
 // TestNetworkRestrictedDNAT proves the enforcement primitive: in a prepared
@@ -315,4 +321,75 @@ func waitForTCP(t *testing.T, addr string) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("listener %s not ready", addr)
+}
+
+// The agent decides who may call it from what SO_PEERCRED reads, and a sandbox with a
+// network starts down another path, through nsenter and setpriv. On that path too the
+// runner must read as the host, which is what getting through Start proves, and the
+// workload must not.
+func TestNetworkModesRefuseSandboxPeers(t *testing.T) {
+	requireNetnsTools(t)
+	forger := buildForgedReset(t)
+	t.Setenv("VORA_INIT_BINARY", buildBinary(t, "vora-init"))
+	subtree, err := cgroup.NewSubtree()
+	if err != nil {
+		t.Skipf("cgroup subtree unavailable: %v", err)
+	}
+	rootfs := imageRootfs(t, "base")
+
+	stateDir, err := os.MkdirTemp("", "vora-it-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
+	cfg := config.Config{StateDir: stateDir, SystemdMode: config.SystemdUser, EgressMaxConnections: 32, EgressIdleTimeout: time.Minute}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	backend, err := bwrap.New(cfg, nil, logger)
+	if err != nil {
+		t.Fatalf("bwrap backend: %v", err)
+	}
+	backend.EnableNetns(subtree, network.NewManager(stateDir, network.ManagerConfig{}, logger), func(egress.Event) error { return nil })
+	wsManager := workspace.NewManager(cfg.SandboxesDir())
+
+	for _, mode := range []runtime.NetworkMode{runtime.NetworkRestricted, runtime.NetworkFull, runtime.NetworkPrivate} {
+		t.Run(string(mode), func(t *testing.T) {
+			id := ulid.NewSandbox()
+			ws := wsManager.Paths(id)
+			ws.RootfsDir = rootfs
+			if _, err := wsManager.Create(ws); err != nil {
+				t.Fatalf("workspace: %v", err)
+			}
+			t.Cleanup(func() { _ = wsManager.Destroy(id) })
+			if err := os.WriteFile(filepath.Join(ws.WorkspaceDir, "forgedreset"), forger, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			h, err := backend.Create(ctx, runtime.SandboxSpec{
+				ID:        id,
+				TenantID:  "tenant-a",
+				Image:     "base",
+				Resources: runtime.ResourceLimits{CPUMillis: 1000, MemoryBytes: 256 << 20, Pids: 64},
+				Network:   runtime.NetworkPolicy{Mode: mode},
+				TTL:       time.Minute,
+				Workspace: ws,
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			t.Cleanup(func() { _ = backend.Destroy(context.Background(), h) })
+			if err := backend.Start(ctx, h); err != nil {
+				t.Fatalf("Start: the runner could not reach its agent: %v", err)
+			}
+
+			out := mustExec(t, backend, h, "/workspace/forgedreset", "raw", "/vora/control.sock")
+			if !strings.Contains(out, "closed: ") {
+				t.Fatalf("a raw call from the workload = %q, want the connection closed unanswered", out)
+			}
+			if got := mustExec(t, backend, h, "/bin/echo", "alive"); got != "alive\n" {
+				t.Fatalf("host Exec after the attack = %q", got)
+			}
+		})
+	}
 }

@@ -371,79 +371,8 @@ func TestResetAndCaptureHoldExecMu(t *testing.T) {
 	a.execMu.Unlock()
 }
 
-// startBlockedReset returns once a reset holds execMu inside Restore. Releasing it lets
-// the reset finish.
-func startBlockedReset(t *testing.T, f *fakeSandbox, a *agent) (release func()) {
-	t.Helper()
-	inRestore := make(chan struct{})
-	proceed := make(chan struct{})
-	finished := make(chan struct{})
-	f.restoreBlock = func(context.Context) error {
-		close(inRestore)
-		<-proceed
-		return nil
-	}
-	go func() {
-		defer close(finished)
-		if _, err := a.Reset(context.Background(), []byte(goodManifest)); err != nil {
-			t.Errorf("Reset: %v", err)
-		}
-	}()
-	<-inRestore
-	return func() {
-		close(proceed)
-		<-finished
-	}
-}
-
-// queuedLongEnough is how long a test gives a goroutine to reach the lock it blocks on.
-const queuedLongEnough = 100 * time.Millisecond
-
-// A workload can call Exec over the control socket and die with the call waiting for
-// execMu. If it started once the reset released the lock, it would run in the next run
-// with nothing to have proved it gone, which is the leak a reset exists to stop.
-func TestExecQueuedAcrossAResetIsRefused(t *testing.T) {
-	f := &fakeSandbox{}
-	a := f.agent()
-	release := startBlockedReset(t, f, a)
-
-	marker := filepath.Join(t.TempDir(), "started")
-	result := make(chan error, 1)
-	go func() {
-		res := &execResult{}
-		result <- a.Exec(context.Background(), &v1.ExecRequest{
-			Command: "/bin/sh",
-			Args:    []string{"-c", ": > " + marker},
-			Cwd:     t.TempDir(),
-		}, res.send)
-	}()
-	time.Sleep(queuedLongEnough)
-	release()
-
-	if err := <-result; err == nil || !strings.Contains(err.Error(), "queued across a reset") {
-		t.Fatalf("err = %v, want a refusal", err)
-	}
-	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("the command ran after the reset: stat %v", err)
-	}
-}
-
-// The host only execs after its reset has returned, so the refusal above must not catch
-// the next run's first exec.
-func TestExecAfterAResetRuns(t *testing.T) {
-	f := &fakeSandbox{}
-	a := f.agent()
-	if _, err := a.Reset(context.Background(), []byte(goodManifest)); err != nil {
-		t.Fatalf("Reset: %v", err)
-	}
-	res, _ := runAgentExec(t, context.Background(), a, &v1.ExecRequest{Args: []string{"-c", "echo next"}})
-	if res.stdout.String() != "next\n" {
-		t.Fatalf("stdout = %q", res.stdout.String())
-	}
-}
-
-// A caller that died while queued, with no reset between, has nobody to report to, and
-// its command would only give the host's kill more to do.
+// A caller that went away while queued has nobody to report to, and its command would
+// only give the host's kill more to do.
 func TestExecFromACancelledCallerDoesNotStart(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "started")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -455,59 +384,6 @@ func TestExecFromACancelledCallerDoesNotStart(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the command ran: stat %v", err)
-	}
-}
-
-// The same queue with a reset in it: run after the host's reset, it would kill the next
-// run, or remove files from it.
-func TestResetQueuedAcrossAResetIsRefused(t *testing.T) {
-	f := &fakeSandbox{}
-	a := f.agent()
-	release := startBlockedReset(t, f, a)
-
-	result := make(chan error, 1)
-	go func() {
-		_, err := a.Reset(context.Background(), []byte(goodManifest))
-		result <- err
-	}()
-	time.Sleep(queuedLongEnough)
-	f.restoreBlock = nil
-	release()
-
-	if err := <-result; err == nil || !strings.Contains(err.Error(), "queued across another reset") {
-		t.Fatalf("err = %v, want a refusal", err)
-	}
-	if got := len(f.restored); got != 1 {
-		t.Fatalf("restore ran %d times, want only the first reset's", got)
-	}
-	if got := a.resets.Load(); got != 1 {
-		t.Fatalf("resets = %d: a refused call must not refuse the calls behind it", got)
-	}
-}
-
-// A call that never ran has done nothing, so it must not refuse the calls behind it.
-func TestACancelledResetDoesNotCountAsAReset(t *testing.T) {
-	a := (&fakeSandbox{}).agent()
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := a.Reset(cancelled, []byte(goodManifest)); err == nil {
-		t.Fatal("Reset from a cancelled caller succeeded")
-	}
-	if got := a.resets.Load(); got != 0 {
-		t.Fatalf("a call that never ran moved resets to %d", got)
-	}
-}
-
-// A failed reset has already killed and possibly removed, so a call queued behind it
-// must see that one happened.
-func TestAFailedResetStillCountsAsAReset(t *testing.T) {
-	f := &fakeSandbox{restoreErr: errors.New("boom")}
-	a := f.agent()
-	if _, err := a.Reset(context.Background(), []byte(goodManifest)); err == nil {
-		t.Fatal("Reset succeeded")
-	}
-	if got := a.resets.Load(); got != 1 {
-		t.Fatalf("resets = %d, want 1", got)
 	}
 }
 

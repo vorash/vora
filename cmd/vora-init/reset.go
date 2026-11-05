@@ -78,24 +78,34 @@ func helperResetter() *resetter {
 // it would kill every process the user owns, so it decides from the real PID and
 // takes nothing a caller could stub, and no test may call it.
 func killOtherProcesses() error {
-	comm, err := os.ReadFile("/proc/1/comm")
+	comm, err := readInitComm()
 	if err != nil {
-		return fmt.Errorf("read PID 1's name: %w", err)
+		return err
 	}
-	return guardedKill(os.Getpid(), strings.TrimSpace(string(comm)), syscall.Kill)
+	return guardedKill(os.Getpid(), comm, syscall.Kill)
 }
 
-// guardedKill runs kill(-1, SIGKILL) only as PID 2 under a PID 1 named bwrap.
-//
-// PID 2 of the initial PID namespace is always kthreadd, so a user process that sees
-// itself as PID 2 is in a PID namespace of its own, and kill(-1) cannot leave one. It
-// spares PID 1 and the caller. The name rules out being PID 2 of some other container.
-func guardedKill(pid int, initComm string, kill func(int, syscall.Signal) error) error {
-	if pid != agentPID {
-		return fmt.Errorf("refusing to kill every process: running as PID %d, not PID %d", pid, agentPID)
+// isBwrapAgent reports whether this is the agent of a bwrap sandbox: PID 2 under a PID 1
+// named bwrap. PID 2 of the initial PID namespace is always kthreadd, so a user process
+// that sees itself as PID 2 is in a PID namespace of its own. The name rules out being
+// PID 2 of some other container.
+func isBwrapAgent(pid int, initComm string) bool {
+	return pid == agentPID && initComm == bwrapComm
+}
+
+func readInitComm() (string, error) {
+	comm, err := os.ReadFile("/proc/1/comm")
+	if err != nil {
+		return "", fmt.Errorf("read PID 1's name: %w", err)
 	}
-	if initComm != bwrapComm {
-		return fmt.Errorf("refusing to kill every process: PID 1 is %q, not %q", initComm, bwrapComm)
+	return strings.TrimSuffix(string(comm), "\n"), nil
+}
+
+// guardedKill runs kill(-1, SIGKILL) only in a bwrap agent, whose kill(-1) cannot leave
+// its PID namespace and spares PID 1 and the caller.
+func guardedKill(pid int, initComm string, kill func(int, syscall.Signal) error) error {
+	if !isBwrapAgent(pid, initComm) {
+		return fmt.Errorf("refusing to kill every process: running as PID %d under a PID 1 named %q, not PID %d under %q", pid, initComm, agentPID, bwrapComm)
 	}
 	// ESRCH means nothing but this process and PID 1 was left to signal.
 	if err := kill(-1, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
@@ -224,8 +234,7 @@ func (a *agent) lockExec(ctx context.Context) error {
 	return nil
 }
 
-// Capture implements agentproto.Handler. It stores nothing, so calling it from
-// inside the sandbox only hands the caller a listing it could have made itself.
+// Capture implements agentproto.Handler.
 func (a *agent) Capture(ctx context.Context) ([]byte, error) {
 	a.touch()
 	ctx, cancel := context.WithTimeout(ctx, a.resetter.timeout)
@@ -238,23 +247,15 @@ func (a *agent) Capture(ctx context.Context) ([]byte, error) {
 }
 
 // Reset implements agentproto.Handler. The manifest comes with the call and is not
-// kept, so a call from inside the sandbox cannot change what a later reset compares
-// against, and validation ties it to the live mount table, so it can only remove what
-// the caller could remove itself.
+// kept: the host holds the only copy.
 func (a *agent) Reset(ctx context.Context, manifest []byte) (int, error) {
 	a.touch()
-	arrived := a.resets.Load()
 	ctx, cancel := context.WithTimeout(ctx, a.resetter.timeout)
 	defer cancel()
 	if err := a.lockExec(ctx); err != nil {
 		return 0, fmt.Errorf("reset: %w", err)
 	}
 	defer a.execMu.Unlock()
-	// Running now would kill the next run, or remove files from it.
-	if a.resets.Load() != arrived {
-		return 0, errors.New("reset: was queued across another reset")
-	}
-	defer a.resets.Add(1)
 	return a.resetter.reset(ctx, manifest)
 }
 
