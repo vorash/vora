@@ -14,9 +14,9 @@ import (
 )
 
 // Restore removes everything m does not list, writes each listed directory's times
-// back, and then proves the result on a fresh walk. It returns the number of objects removed. A nil error means every
-// writable mount matches m exactly. Any other outcome means the sandbox was not
-// proven clean and may be partly restored.
+// back, and then proves the result on a fresh walk. It returns the number of objects
+// removed. A nil error means every writable mount matches m exactly. Any other
+// outcome means the sandbox was not proven clean and may be partly restored.
 //
 // mountinfo must be the live table. The caller must have stopped every other
 // process in the sandbox first, or the proof says nothing about the next moment.

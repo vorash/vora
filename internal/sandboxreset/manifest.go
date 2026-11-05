@@ -71,9 +71,11 @@ const (
 )
 
 // Entry identifies one file system object. Two equal entries mean that a later
-// run reads the same type, permissions, owner, device, link target, content and
-// extended attributes from the same inode. Timestamps are not part of it, because removing a planted
-// file changes its directory's.
+// run reads the same type, permissions, owner, device, link target, content,
+// extended attributes and timestamps from the same inode. The exceptions are a
+// device node's change time, and an access time, which a read moves. They are not
+// compared. Restore writes a directory's times back rather than compare them all,
+// because removing a planted file moves them.
 type Entry struct {
 	Rel    string    `json:"rel"`
 	Type   EntryType `json:"type"`
