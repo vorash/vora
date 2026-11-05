@@ -343,7 +343,7 @@ func run() error {
 	}
 	defer func() {
 		if tcpServer != nil {
-			tcpServer.GracefulStop()
+			stopServer(tcpServer, logger)
 		}
 	}()
 
@@ -521,18 +521,7 @@ func run() error {
 	// pool starts no member during it. A run in flight still checks in as usual.
 	server.ClosePools()
 
-	stopped := make(chan struct{})
-	go func() {
-		grpcServer.GracefulStop()
-		close(stopped)
-	}()
-	select {
-	case <-stopped:
-		logger.Info("runner stopped cleanly")
-	case <-time.After(10 * time.Second):
-		logger.Warn("graceful shutdown timed out, forcing stop")
-		grpcServer.Stop()
-	}
+	stopServer(grpcServer, logger)
 	for _, name := range registry.Names() {
 		if b, ok := registry.Get(name); ok {
 			if c, ok := b.(io.Closer); ok {
@@ -545,6 +534,24 @@ func run() error {
 		logger.Warn("failed to remove socket", "error", err)
 	}
 	return nil
+}
+
+// stopServer waits ten seconds for in-flight RPCs, then forces the stop. A graceful
+// stop alone can wait for ever: a client that stopped reading keeps its stream, and
+// so its connection, open even after the handler has returned.
+func stopServer(srv *grpc.Server, logger *slog.Logger) {
+	stopped := make(chan struct{})
+	go func() {
+		srv.GracefulStop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		logger.Info("runner stopped cleanly")
+	case <-time.After(10 * time.Second):
+		logger.Warn("graceful shutdown timed out, forcing stop")
+		srv.Stop()
+	}
 }
 
 // registerBackends registers the isolation backends cfg.Backends selects. It

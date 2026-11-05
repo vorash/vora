@@ -280,7 +280,7 @@ func (s *Server) LoadPools() error {
 // admitPersisted decides whether a record can load on this boot. The caller holds
 // createMu. On refusal it returns the tenant-safe reason and the detail for the log.
 func (s *Server) admitPersisted(rec poolRecord, limits pool.Limits) (pool.Spec, string, error) {
-	if limits.HasBackend != nil && !limits.HasBackend(rec.Spec.Template.Backend) {
+	if !limits.HasBackend(rec.Spec.Template.Backend) {
 		return pool.Spec{}, notLoadedBackendMissing, fmt.Errorf("no backend %q", rec.Spec.Template.Backend)
 	}
 	spec, err := pool.Parse(rec.Spec, limits)

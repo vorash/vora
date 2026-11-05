@@ -171,11 +171,15 @@ func TestAppendDoesNotWaitForAFlush(t *testing.T) {
 	s.events.append(numberedEvent(0))
 	<-a.began
 	go s.events.flush()
+	// TryLock, as a flush that holds the lock must fail this rather than block it
+	// until the flush gives up.
 	waitFor(t, func() bool {
-		s.events.mu.Lock()
+		if !s.events.mu.TryLock() {
+			return false
+		}
 		defer s.events.mu.Unlock()
 		return s.events.closed
-	}, "the flush to begin")
+	}, "the flush to begin with the queue's lock free")
 	done := make(chan bool)
 	go func() { done <- s.events.enqueue(numberedEvent(1)) }()
 	select {

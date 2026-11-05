@@ -337,10 +337,12 @@ func TestConcurrentForksStopAtTheCap(t *testing.T) {
 }
 
 // A fork whose restore fails was never reported to anyone, so it has to give its
-// capacity slot back itself.
+// capacity slot and disk quota back itself, and it leaves the same tombstone as a
+// fork that failed to start, so the audit trail can say what happened to it.
 func TestForkWithACorruptArchiveGivesItsSlotBack(t *testing.T) {
 	h := newWarmHarness(t)
 	snap := h.snapshot()
+	before, _ := h.s.store.List()
 	if err := os.WriteFile(h.s.snapshots.DataPath(snap), []byte("not an archive"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -351,9 +353,12 @@ func TestForkWithACorruptArchiveGivesItsSlotBack(t *testing.T) {
 		t.Fatalf("committed after the failed fork = %d, %d; want 0", g, ft)
 	}
 	recs, _ := h.s.store.List()
+	if len(recs) != len(before)+1 {
+		t.Fatalf("%d records, want the fork's tombstone on top of %d", len(recs), len(before))
+	}
 	for _, rec := range recs {
-		if rec.State.Active() {
-			t.Fatalf("record %s is left %s", rec.ID, rec.State)
+		if rec.State != sandbox.StateDestroyed {
+			t.Fatalf("record %s is left %s, want DESTROYED", rec.ID, rec.State)
 		}
 	}
 }
