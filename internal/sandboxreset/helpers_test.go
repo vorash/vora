@@ -339,7 +339,8 @@ func inChild(t *testing.T, body func()) {
 		parts[i] = "^" + regexp.QuoteMeta(p) + "$"
 	}
 	cmd := exec.Command(os.Args[0], "-test.v", "-test.run="+strings.Join(parts, "/"))
-	cmd.Env = append(os.Environ(), childTestEnv+"="+t.Name(), childBaseEnv+"="+t.TempDir())
+	// The race detector otherwise makes every child sit out a second as it exits.
+	cmd.Env = append(os.Environ(), childTestEnv+"="+t.Name(), childBaseEnv+"="+t.TempDir(), "GORACE=atexit_sleep_ms=0")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("child failed: %v\n%s", err, out)
