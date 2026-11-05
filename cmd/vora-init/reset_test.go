@@ -36,6 +36,10 @@ type fakeSandbox struct {
 	mountinfos   []string
 	opened       int
 	restoreBlock func(context.Context) error
+
+	captureKernelErr error
+	checkKernelErr   error
+	checked          []sandboxreset.Manifest
 }
 
 const fakeSelf = 57
@@ -95,6 +99,18 @@ func (f *fakeSandbox) resetter() *resetter {
 			}
 			return f.removed, f.restoreErr
 		},
+		captureKernel: func(context.Context) ([]sandboxreset.Process, map[string]string, error) {
+			f.record("captureKernel")
+			if f.captureKernelErr != nil {
+				return nil, nil, f.captureKernelErr
+			}
+			return []sandboxreset.Process{{PID: initPID}}, map[string]string{"kernel/msgmax": "8192\n"}, nil
+		},
+		checkKernel: func(_ context.Context, m sandboxreset.Manifest) error {
+			f.record("checkKernel")
+			f.checked = append(f.checked, m)
+			return f.checkKernelErr
+		},
 	}
 }
 
@@ -108,8 +124,9 @@ const goodManifest = `{"table":[],"mounts":[{"path":"/workspace","entries":[]}]}
 
 // Restore removes files on the promise that nothing can write behind it, so it must
 // come after the kill and after the proof, and the proof must see the host's mount
-// table fresh.
-func TestResetKillsThenProvesThenRestores(t *testing.T) {
+// table fresh. The kernel check also needs nothing left that could move a value while
+// it reads, and has to look at the manifest the host sent.
+func TestResetKillsThenProvesThenChecksThenRestores(t *testing.T) {
 	f := &fakeSandbox{removed: 3}
 	removed, err := f.agent().Reset(context.Background(), []byte(goodManifest))
 	if err != nil {
@@ -118,9 +135,12 @@ func TestResetKillsThenProvesThenRestores(t *testing.T) {
 	if removed != 3 {
 		t.Fatalf("removed = %d, want 3", removed)
 	}
-	want := []string{"kill", "reap", "list", "mountinfo", "restore"}
+	want := []string{"kill", "reap", "list", "checkKernel", "mountinfo", "restore"}
 	if got := f.calls; !slices.Equal(got, want) {
 		t.Fatalf("calls = %v, want %v", got, want)
+	}
+	if len(f.checked) != 1 || f.checked[0].Mounts[0].Path != "/workspace" {
+		t.Fatalf("checked %+v: not the manifest the host sent", f.checked)
 	}
 	if len(f.restored) != 1 || f.restored[0].Mounts[0].Path != "/workspace" {
 		t.Fatalf("restored %+v: not the manifest the host sent", f.restored)
@@ -183,14 +203,21 @@ func TestResetFailures(t *testing.T) {
 			sandbox:   fakeSandbox{mountinfoErr: boom},
 			manifest:  goodManifest,
 			wantErr:   "boom",
-			wantCalls: []string{"kill", "reap", "list", "mountinfo"},
+			wantCalls: []string{"kill", "reap", "list", "checkKernel", "mountinfo"},
+		},
+		{
+			name:      "the kernel check fails",
+			sandbox:   fakeSandbox{checkKernelErr: boom},
+			manifest:  goodManifest,
+			wantErr:   "boom",
+			wantCalls: []string{"kill", "reap", "list", "checkKernel"},
 		},
 		{
 			name:      "restore fails",
 			sandbox:   fakeSandbox{restoreErr: boom, removed: 7},
 			manifest:  goodManifest,
 			wantErr:   "boom",
-			wantCalls: []string{"kill", "reap", "list", "mountinfo", "restore"},
+			wantCalls: []string{"kill", "reap", "list", "checkKernel", "mountinfo", "restore"},
 		},
 	}
 	for _, tc := range cases {
@@ -250,7 +277,7 @@ func TestProofWaitsForKilledProcessesToGo(t *testing.T) {
 	if _, err := f.agent().Reset(context.Background(), []byte(goodManifest)); err != nil {
 		t.Fatalf("Reset: %v", err)
 	}
-	want := []string{"kill", "reap", "list", "reap", "list", "reap", "list", "mountinfo", "restore"}
+	want := []string{"kill", "reap", "list", "reap", "list", "reap", "list", "checkKernel", "mountinfo", "restore"}
 	if got := f.calls; !slices.Equal(got, want) {
 		t.Fatalf("calls = %v, want %v", got, want)
 	}
@@ -422,16 +449,47 @@ func TestCaptureReturnsTheManifestItListed(t *testing.T) {
 	if len(m.Mounts) != 1 || m.Mounts[0].Path != "/tmp" {
 		t.Fatalf("manifest = %+v", m)
 	}
-	if want := []string{"mountinfo", "capture"}; !slices.Equal(f.calls, want) {
+	if len(m.Processes) != 1 || m.Sysctls["kernel/msgmax"] != "8192\n" {
+		t.Fatalf("manifest = %+v: the host would have nothing to compare the kernel against", m)
+	}
+	if want := []string{"mountinfo", "capture", "captureKernel"}; !slices.Equal(f.calls, want) {
 		t.Fatalf("calls = %v, want %v", f.calls, want)
+	}
+}
+
+// Under bwrap the agent outlives every run and every exec inherits from it. Under gVisor
+// nothing but PID 1 does: holding a helper to the last helper's values would fail every
+// reset, and letting a bwrap reset skip the agent would miss the state that matters most.
+func TestLongLivedProcessesAreTheOnesThatOutliveARun(t *testing.T) {
+	if got := longLivedUnder(bwrapComm); !slices.Equal(got, []int{initPID, agentPID}) {
+		t.Errorf("under bwrap = %v", got)
+	}
+	if got := longLivedUnder("vora-init"); !slices.Equal(got, []int{initPID}) {
+		t.Errorf("under gVisor = %v", got)
+	}
+}
+
+// A bwrap sandbox that can write a sysctl has lost the bind that stops kernel.cad_pid
+// reaching the host, so it must not become a pool member. gVisor's are the Sentry's.
+func TestCaptureRefusesAWritableSysctlOnlyUnderBwrap(t *testing.T) {
+	writable := map[string]string{"kernel/msgmax": "8192\n"}
+	if err := refuseWritableSysctls(bwrapComm, writable); err == nil || !strings.Contains(err.Error(), "kernel/msgmax") {
+		t.Fatalf("bwrap with a writable sysctl: err = %v, want it to name kernel/msgmax", err)
+	}
+	if err := refuseWritableSysctls(bwrapComm, map[string]string{}); err != nil {
+		t.Fatalf("bwrap with none: %v", err)
+	}
+	if err := refuseWritableSysctls("vora-init", writable); err != nil {
+		t.Fatalf("gVisor: %v", err)
 	}
 }
 
 func TestCaptureFailures(t *testing.T) {
 	boom := errors.New("boom")
 	for name, f := range map[string]*fakeSandbox{
-		"mount table": {mountinfoErr: boom},
-		"listing":     {captureErr: boom},
+		"mount table":  {mountinfoErr: boom},
+		"listing":      {captureErr: boom},
+		"kernel state": {captureKernelErr: boom},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if raw, err := f.agent().Capture(context.Background()); !errors.Is(err, boom) || raw != nil {
@@ -582,7 +640,7 @@ func TestResetModeRestoresAndReports(t *testing.T) {
 	if !strings.HasSuffix(stdout.String(), "}\n") {
 		t.Fatalf("report %q is not one line", stdout.String())
 	}
-	if want := []string{"reap", "list", "mountinfo", "restore"}; !slices.Equal(f.calls, want) {
+	if want := []string{"reap", "list", "checkKernel", "mountinfo", "restore"}; !slices.Equal(f.calls, want) {
 		t.Fatalf("calls = %v, want %v", f.calls, want)
 	}
 	if len(f.restored) != 1 || f.restored[0].Mounts[0].Path != "/workspace" {
