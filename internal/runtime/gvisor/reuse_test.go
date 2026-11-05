@@ -330,17 +330,43 @@ func TestKillPassesStayBounded(t *testing.T) {
 		t.Fatalf("giving up on a survivor took %v", took)
 	}
 
-	f.restart("[1,7]")
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
-	defer cancel()
-	start = time.Now()
-	_, err := r.Reset(ctx)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Reset = %v, want the deadline", err)
+}
+
+// The longest sleep is as long as the pool's whole grace, so it has to end with the context.
+// The seventh kill is followed by that sleep.
+func TestKillBackoffEndsWithTheContext(t *testing.T) {
+	const allowed = 100 * time.Millisecond
+	f := newFakeReuse(t, "[1]")
+	r := f.prepared()
+	best := time.Hour
+	for range 4 {
+		f.restart("[1,7]")
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			_, err := r.Reset(ctx)
+			done <- err
+		}()
+		deadline := time.Now().Add(10 * time.Second)
+		for strings.Count(f.read("calls"), "kill 7") < 7 {
+			if time.Now().After(deadline) {
+				t.Fatalf("seven kills never came: %v", f.calls())
+			}
+			time.Sleep(time.Millisecond)
+		}
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+		start := time.Now()
+		err := <-done
+		best = min(best, time.Since(start))
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Reset = %v, want the cancel", err)
+		}
+		if best <= allowed {
+			return
+		}
 	}
-	if took := time.Since(start); took > time.Second {
-		t.Fatalf("the backoff held a 150 ms deadline for %v", took)
-	}
+	t.Fatalf("the backoff held a cancelled reset for %v at best", best)
 }
 
 func TestResetFailuresAreUnproven(t *testing.T) {
