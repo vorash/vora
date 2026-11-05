@@ -58,12 +58,6 @@ func main() {
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	// Open any /proc/self file the agent keeps for writing above this line; see
-	// setNonDumpable.
-	if err := setNonDumpable(); err != nil {
-		logger.Error("set non-dumpable", "error", err)
-		os.Exit(1)
-	}
 	// Syscall filtering for the Bubblewrap sandbox. It is installed before the
 	// agent serves and before any workload starts, so every process inherits
 	// it. A failure is fatal: a sandbox must not run unfiltered by accident
@@ -73,6 +67,13 @@ func main() {
 		os.Exit(1)
 	}
 	a := newAgent(*socket, *grace, logger)
+	// After newAgent, which opens /proc/self/oom_score_adj: that open fails once
+	// this has run, and every exec would then leave the agent as the OOM victim.
+	// Before listening, so no workload can run while the agent is still dumpable.
+	if err := setNonDumpable(); err != nil {
+		logger.Error("set non-dumpable", "error", err)
+		os.Exit(1)
+	}
 
 	lis, err := listenAgent(*socket)
 	if err != nil {
