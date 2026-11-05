@@ -53,14 +53,8 @@ func main() {
 		pause()
 		return
 	}
-	// Helpers skip everything the agent sets up below. No workload exists when the
-	// host runs them, they start no process that could inherit a filter, and they
-	// are gone before the pids limit could matter.
-	if len(os.Args) > 1 && os.Args[1] == "capture" {
-		os.Exit(runCaptureMode(context.Background(), helperResetter(), os.Stdout, os.Stderr))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "reset" {
-		os.Exit(runResetMode(context.Background(), helperResetter(), os.Stdin, os.Stdout, os.Stderr))
+	if len(os.Args) > 1 && (os.Args[1] == "capture" || os.Args[1] == "reset") {
+		os.Exit(runHelper(os.Args[1]))
 	}
 
 	fixThreads()

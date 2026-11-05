@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	goruntime "runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -261,6 +262,22 @@ func (a *agent) Reset(ctx context.Context, manifest []byte) (int, error) {
 // on stdout, so a report that does not parse and a nonzero exit say the same thing.
 type resetReport struct {
 	Removed int `json:"removed"`
+}
+
+// runHelper runs a helper mode. It installs no seccomp filter because it starts no
+// process that could inherit one, and it needs no spare threads because no workload
+// exists to use up the pids limit. Under gVisor it is root with no filter, so it stays
+// non-dumpable in case the host's kill missed something. One P keeps its thread count
+// from scaling with the host's cores, since those threads count against the limit too.
+func runHelper(mode string) int {
+	goruntime.GOMAXPROCS(1)
+	if err := setNonDumpable(); err != nil {
+		return helperExit(err, os.Stderr)
+	}
+	if mode == "capture" {
+		return runCaptureMode(context.Background(), helperResetter(), os.Stdout, os.Stderr)
+	}
+	return runResetMode(context.Background(), helperResetter(), os.Stdin, os.Stdout, os.Stderr)
 }
 
 // runCaptureMode is `vora-init capture`: the manifest on stdout, exit 0, or a message

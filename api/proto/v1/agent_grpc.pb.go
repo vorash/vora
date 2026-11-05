@@ -42,8 +42,9 @@ type AgentServiceClient interface {
 	// Capture lists the sandbox's writable mounts. The runner calls it once, before
 	// the first workload, and keeps the manifest. The agent stores nothing.
 	Capture(ctx context.Context, in *CaptureRequest, opts ...grpc.CallOption) (*CaptureResponse, error)
-	// Reset restores the sandbox to manifest and proves it. Any error means the
-	// sandbox is not proven clean, and the runner must destroy it.
+	// Reset restores the sandbox's processes and writable mounts to manifest and proves
+	// them. It does not cover IPC namespaces, which are for seccomp to close. Any error
+	// means the sandbox is not proven clean, and the runner must destroy it.
 	Reset(ctx context.Context, in *ResetRequest, opts ...grpc.CallOption) (*ResetResponse, error)
 }
 
@@ -139,8 +140,9 @@ type AgentServiceServer interface {
 	// Capture lists the sandbox's writable mounts. The runner calls it once, before
 	// the first workload, and keeps the manifest. The agent stores nothing.
 	Capture(context.Context, *CaptureRequest) (*CaptureResponse, error)
-	// Reset restores the sandbox to manifest and proves it. Any error means the
-	// sandbox is not proven clean, and the runner must destroy it.
+	// Reset restores the sandbox's processes and writable mounts to manifest and proves
+	// them. It does not cover IPC namespaces, which are for seccomp to close. Any error
+	// means the sandbox is not proven clean, and the runner must destroy it.
 	Reset(context.Context, *ResetRequest) (*ResetResponse, error)
 	mustEmbedUnimplementedAgentServiceServer()
 }

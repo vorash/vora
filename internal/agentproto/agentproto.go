@@ -45,8 +45,8 @@ type Handler interface {
 	Shutdown(ctx context.Context) error
 	// Capture returns the manifest of the sandbox's writable mounts.
 	Capture(ctx context.Context) ([]byte, error)
-	// Reset restores the sandbox to manifest and returns how many entries it
-	// removed. A nil error means the sandbox is proven clean.
+	// Reset restores the sandbox's processes and writable mounts to manifest and
+	// returns how many entries it removed. A nil error means those are proven clean.
 	Reset(ctx context.Context, manifest []byte) (int, error)
 }
 
