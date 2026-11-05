@@ -189,30 +189,29 @@ func (m gvisorMember) sentryPID(t *testing.T) int {
 	return state.PID
 }
 
-func gvisorLeakBackend(o gvisorMemberOpts) leakBackend {
-	o.seed = seedKeepFile
-	return leakBackend{
-		newMember: func(t *testing.T) (leakMember, error) {
-			m, err := newGvisorMember(t, o)
-			return m.leakMember, err
-		},
-		scratch: []string{"/tmp", "/dev", "/dev/shm"},
-		binds:   []string{"/workspace", "/root"},
-	}
+// leakSandbox adapts a member to the leak matrix.
+func (m gvisorMember) leakSandbox() leakSandbox {
+	return m.sandbox([]string{"/tmp", "/dev", "/dev/shm", "/workspace", "/root"}, []int{1})
 }
 
 func TestLeakMatrixGvisor(t *testing.T) {
 	requireGvisor(t)
-	t.Run("none", func(t *testing.T) { testLeakMatrix(t, gvisorLeakBackend(gvisorMemberOpts{})) })
-	t.Run("restricted", func(t *testing.T) { testLeakMatrix(t, gvisorLeakBackend(gvisorMemberOpts{restricted: true})) })
+	for name, o := range map[string]gvisorMemberOpts{"none": {seed: seedKeepFile}, "restricted": {seed: seedKeepFile, restricted: true}} {
+		t.Run(name, func(t *testing.T) {
+			testLeakMatrix(t, mustGvisorMember(t, o).leakSandbox())
+			testLeakFailedResetNeverReturns(t, func(t *testing.T) (leakMember, error) {
+				m, err := newGvisorMember(t, o)
+				return m.leakMember, err
+			})
+		})
+	}
 }
 
 // A sandbox that does not deny IPC cannot be proven clean of it, but Reset's own path must
 // not depend on the filter either way.
 func TestGvisorResetWithoutDenyIPC(t *testing.T) {
 	requireGvisor(t)
-	b := gvisorLeakBackend(gvisorMemberOpts{noDenyIPC: true})
-	leakL1ScratchFiles(t, b, b.member(t))
+	leakL1ScratchFiles(t, mustGvisorMember(t, gvisorMemberOpts{noDenyIPC: true}).leakSandbox())
 }
 
 // The denial has to hold through the helper path, and the helper has to work under it.
