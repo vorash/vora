@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // fakeCgroup is a directory with the files the freezer path reads and writes.
@@ -117,10 +119,12 @@ func TestKillOthersProvesTheProcessSet(t *testing.T) {
 	}
 }
 
-// sleeper starts a process this test owns and can check on.
+// sleeper starts a process this test owns and can check on. It leads its own
+// process group, so that a kill gone wrong can only reach the sleeper.
 func sleeper(t *testing.T) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command("sleep", "60")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +176,11 @@ func TestKillOutsideSignalsOnlyMembers(t *testing.T) {
 		t.Fatalf("killOutside = %d, %v, want nothing signalled", killed, err)
 	}
 	time.Sleep(50 * time.Millisecond)
-	if err := syscall.Kill(stranger.Process.Pid, 0); err != nil {
-		t.Fatalf("stranger is gone (%v): a process outside the cgroup was killed", err)
+	// A killed child stays a zombie until this test reaps it, and a signal 0 still
+	// succeeds on a zombie. Only wait can tell a killed stranger from a live one.
+	var status unix.WaitStatus
+	pid, err := unix.Wait4(stranger.Process.Pid, &status, unix.WNOHANG, nil)
+	if err != nil || pid != 0 {
+		t.Fatalf("wait4 = %d, %v, status %v: a process outside the cgroup was killed", pid, err, status)
 	}
 }
