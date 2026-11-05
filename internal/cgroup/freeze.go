@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -22,8 +21,9 @@ const (
 	freezeTimeout = 2 * time.Second
 	// settleTimeout bounds how long killed processes may take to leave cgroup.procs.
 	settleTimeout = 5 * time.Second
-	// pollSlice is the longest a wait goes without checking its context.
-	pollSlice = 100 * time.Millisecond
+	// firstDelay and maxDelay pace a poll on a cgroup file.
+	firstDelay = 200 * time.Microsecond
+	maxDelay   = 5 * time.Millisecond
 )
 
 // Procs lists the processes in the cgroup at dir, sorted. Threads are not listed.
@@ -65,39 +65,27 @@ func Freeze(ctx context.Context, dir string) error {
 	if err := writeCgroupFile(dir, "cgroup.freeze", "1"); err != nil {
 		return fmt.Errorf("cgroup: freeze: %w", notFound(dir, err))
 	}
-	events, err := os.Open(filepath.Join(dir, "cgroup.events"))
-	if err != nil {
-		return fmt.Errorf("cgroup: freeze: %w", notFound(dir, err))
-	}
-	defer func() { _ = events.Close() }()
 	ctx, cancel := context.WithTimeout(ctx, freezeTimeout)
 	defer cancel()
+	delay := firstDelay
 	for {
-		// A read arms the next poll: kernfs reports a change only against the
-		// file's state at its last read.
-		frozen, err := readFrozen(events)
+		frozen, err := readFrozen(dir)
 		if err != nil {
 			return fmt.Errorf("cgroup: freeze: %w", err)
 		}
 		if frozen {
 			return nil
 		}
-		if err := ctx.Err(); err != nil {
+		if err := pause(ctx, &delay); err != nil {
 			return fmt.Errorf("cgroup: not frozen: %w", err)
-		}
-		if err := pollChange(events, pollSlice); err != nil {
-			return fmt.Errorf("cgroup: freeze: %w", err)
 		}
 	}
 }
 
-func readFrozen(events *os.File) (bool, error) {
-	if _, err := events.Seek(0, io.SeekStart); err != nil {
-		return false, err
-	}
-	data, err := io.ReadAll(events)
+func readFrozen(dir string) (bool, error) {
+	data, err := os.ReadFile(filepath.Join(dir, "cgroup.events"))
 	if err != nil {
-		return false, err
+		return false, notFound(dir, err)
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		if fields := strings.Fields(line); len(fields) == 2 && fields[0] == "frozen" {
@@ -107,22 +95,14 @@ func readFrozen(events *os.File) (bool, error) {
 	return false, errors.New("cgroup.events has no frozen line")
 }
 
-// pollChange waits until the kernel notifies a change to a cgroup file or the
-// slice passes. A regular file, as a test uses, is always ready without ever
-// reporting a change, so that case re-reads at a walking pace instead.
-func pollChange(f *os.File, slice time.Duration) error {
-	fds := []unix.PollFd{{Fd: int32(f.Fd()), Events: unix.POLLPRI}}
-	for {
-		_, err := unix.Poll(fds, int(slice/time.Millisecond))
-		if errors.Is(err, unix.EINTR) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if fds[0].Revents&unix.POLLPRI == 0 {
-			time.Sleep(time.Millisecond)
-		}
+// pause waits out one step of a poll on a cgroup file, doubling delay up to
+// maxDelay. It fails once ctx ends.
+func pause(ctx context.Context, delay *time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(*delay):
+		*delay = min(*delay*2, maxDelay)
 		return nil
 	}
 }
@@ -234,7 +214,7 @@ func waitProcs(ctx context.Context, dir string, keep []int) error {
 	ctx, cancel := context.WithTimeout(ctx, settleTimeout)
 	defer cancel()
 	want := slices.Sorted(slices.Values(keep))
-	delay := 200 * time.Microsecond
+	delay := firstDelay
 	for {
 		pids, err := Procs(dir)
 		if err != nil {
@@ -249,11 +229,8 @@ func waitProcs(ctx context.Context, dir string, keep []int) error {
 				return fmt.Errorf("cgroup: process %d is gone: cgroup holds %v, want %v", pid, pids, want)
 			}
 		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("cgroup: processes still present: %v, want %v: %w", pids, want, ctx.Err())
-		case <-time.After(delay):
-			delay = min(delay*2, 5*time.Millisecond)
+		if err := pause(ctx, &delay); err != nil {
+			return fmt.Errorf("cgroup: processes still present: %v, want %v: %w", pids, want, err)
 		}
 	}
 }
