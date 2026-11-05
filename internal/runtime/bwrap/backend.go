@@ -47,6 +47,7 @@ type Backend struct {
 	// EnableNetns.
 	subtree    cgroup.Subtree
 	networks   *network.Manager
+	setprivBin string
 	egressSink func(egress.Event) error
 
 	// life ends with Close, and every keepalive with it.
@@ -92,17 +93,19 @@ func New(cfg config.Config, cgroups cgroup.Manager, logger *slog.Logger) (*Backe
 		return nil, err
 	}
 	bwrapBin, _ := exec.LookPath("bwrap")
+	setprivBin, _ := exec.LookPath("setpriv")
 	life, endLife := context.WithCancel(context.Background())
 	return &Backend{
-		cfg:       cfg,
-		cgroups:   cgroups,
-		logger:    logger,
-		initPath:  initPath,
-		bwrapBin:  bwrapBin,
-		life:      life,
-		endLife:   endLife,
-		keepalive: keepaliveInterval,
-		handles:   make(map[string]*handle),
+		cfg:        cfg,
+		cgroups:    cgroups,
+		logger:     logger,
+		initPath:   initPath,
+		bwrapBin:   bwrapBin,
+		setprivBin: setprivBin,
+		life:       life,
+		endLife:    endLife,
+		keepalive:  keepaliveInterval,
+		handles:    make(map[string]*handle),
 	}, nil
 }
 
@@ -145,7 +148,7 @@ func (b *Backend) Capabilities() runtime.Capabilities {
 // netnsReady reports whether the runner can launch sandboxes in a prepared
 // network namespace (needed by every mode except NetworkNone).
 func (b *Backend) netnsReady() bool {
-	return b.subtree != nil && b.networks != nil && b.bwrapBin != ""
+	return b.subtree != nil && b.networks != nil && b.bwrapBin != "" && b.setprivBin != ""
 }
 
 // Create validates the spec and reserves a handle.
@@ -375,8 +378,7 @@ func (b *Backend) startInNetns(ctx context.Context, hd *handle, creds []egress.C
 		b.cleanupRestricted(ctx, hd)
 		return err
 	}
-	nsArgs := nsenterBwrapArgs(netns.NetnsPID, b.bwrapBin, argv[1:])
-	cmd := exec.CommandContext(sandboxCtx, "nsenter", nsArgs...)
+	cmd := b.netnsCommand(sandboxCtx, netns.NetnsPID, argv[1:])
 	closer, err := group.ApplyTo(cmd)
 	if err != nil {
 		b.cleanupRestricted(ctx, hd)
@@ -478,6 +480,9 @@ func waitReadyCmd(ctx context.Context, done <-chan error, client *agentproto.Cli
 
 // startUnit launches the sandbox as a transient systemd unit (NetworkNone).
 func (b *Backend) startUnit(ctx context.Context, hd *handle) error {
+	if b.bwrapBin == "" {
+		return errors.New("bwrap: bwrap not found on PATH")
+	}
 	ws := hd.spec.Workspace
 	if err := os.MkdirAll(ws.IPCDir, 0o700); err != nil {
 		return fmt.Errorf("bwrap: ipc dir: %w", err)
@@ -504,7 +509,7 @@ func (b *Backend) startUnit(ctx context.Context, hd *handle) error {
 	unit, err := b.cgroups.Start(ctx, cgroup.StartRequest{
 		Name:   cgroup.UnitName(hd.id),
 		Limits: hd.spec.Resources,
-		Argv:   argv,
+		Argv:   unitArgv(b.bwrapBin, argv[1:]),
 	})
 	if err != nil {
 		return fmt.Errorf("bwrap: start unit: %w", err)
@@ -850,13 +855,39 @@ func envSlice(env map[string]string) []string {
 	return out
 }
 
+// unitArgv is the command line of a sandbox's transient unit. Every process in
+// a unit starts with the service manager's environment, and bwrap stays the
+// sandbox's PID 1, where a workload of the same uid can read /proc/1/environ
+// (vorash/vora#107). systemd cannot empty it: UnsetEnvironment= takes a list of
+// names, so anything added to the manager later would get through, and
+// PassEnvironment= has no effect on a user manager. --clearenv would only clean
+// bwrap's child. bwrap needs no variable: it is given by absolute path and reads
+// HOME only without --chdir. vora-init and the workload get theirs from bwrap's
+// --setenv.
+func unitArgv(bwrapBin string, bwrapArgs []string) []string {
+	return append([]string{"env", "-i", bwrapBin}, bwrapArgs...)
+}
+
+// netnsCommand launches bwrap in a prepared network namespace. The runner's
+// environment holds its secrets, such as VORA_AUDIT_DSN and VORA_API_JOIN_TOKEN,
+// and bwrap stays the sandbox's PID 1, where a workload of the same uid can read
+// /proc/1/environ (vorash/vora#126). So nothing in this chain inherits it, and
+// none of its programs needs a variable (see unitArgv and nsenterBwrapArgs). Env
+// must stay empty and non-nil: nil means inherit.
+func (b *Backend) netnsCommand(ctx context.Context, netnsPID int, bwrapArgs []string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "nsenter", nsenterBwrapArgs(netnsPID, b.setprivBin, b.bwrapBin, bwrapArgs)...)
+	cmd.Env = []string{}
+	return cmd
+}
+
 // nsenterBwrapArgs builds the `nsenter` argv that launches bwrap inside a
 // sandbox's network namespace. nsenter needs the runner's ambient capabilities
 // (system install: CAP_SYS_ADMIN, CAP_NET_ADMIN) to join the namespace, but
 // bwrap aborts when it holds capabilities without being setuid, and a sandbox
 // launcher has no business keeping them anyway. setpriv clears the ambient and
-// inheritable sets between the two, so bwrap runs with none.
-func nsenterBwrapArgs(netnsPID int, bwrapBin string, bwrapArgs []string) []string {
-	args := []string{"-t", strconv.Itoa(netnsPID), "-n", "setpriv", "--ambient-caps=-all", "--inh-caps=-all", "--", bwrapBin}
+// inheritable sets between the two, so bwrap runs with none. Both are absolute
+// paths because nsenter runs with no PATH to search.
+func nsenterBwrapArgs(netnsPID int, setprivBin, bwrapBin string, bwrapArgs []string) []string {
+	args := []string{"-t", strconv.Itoa(netnsPID), "-n", setprivBin, "--ambient-caps=-all", "--inh-caps=-all", "--", bwrapBin}
 	return append(args, bwrapArgs...)
 }
