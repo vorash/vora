@@ -30,6 +30,7 @@ UNSUPPORTED = 77
 libc = ctypes.CDLL(None, use_errno=True)
 SYS_IOPRIO_SET, SYS_IOPRIO_GET, SYS_SCHED_SETATTR, SYS_SCHED_GETATTR = json.loads(sys.argv[1])
 SCHED_ATTR = "IIQiIQQQII"
+SCHED_IDLE = 5
 
 
 def syscall(nr, *args):
@@ -63,13 +64,12 @@ def ioprio(tid):
 
 
 def policy(tid):
-    try:
-        os.sched_setscheduler(tid, os.SCHED_IDLE, os.sched_param(0))
-    except OSError as e:
-        if e.errno == errno.ENOSYS:
-            sys.exit(UNSUPPORTED)
-        raise
-    assert os.sched_getscheduler(tid) == os.SCHED_IDLE
+    # Not os.sched_setscheduler: musl's is a stub that returns ENOSYS on any kernel.
+    attr = struct.pack(SCHED_ATTR, 56, SCHED_IDLE, 0, 0, 0, 0, 0, 0, 0, 0)
+    syscall(SYS_SCHED_SETATTR, ctypes.c_long(tid), ctypes.c_char_p(attr), ctypes.c_long(0))
+    buf = ctypes.create_string_buffer(56)
+    syscall(SYS_SCHED_GETATTR, ctypes.c_long(tid), buf, ctypes.c_long(56), ctypes.c_long(0))
+    assert struct.unpack(SCHED_ATTR, buf.raw)[1] == SCHED_IDLE
 
 
 def uclamp(tid):
@@ -590,10 +590,14 @@ func TestTimerSlackIsOutOfReachGvisor(t *testing.T) {
 // ordinaryRun forks, starts threads and changes its own nice, limits, policy and affinity,
 // all of which are its own business and go with it.
 const ordinaryRun = `
-import os, resource, subprocess, threading
+import errno, os, resource, subprocess, threading
 os.nice(5)
 resource.setrlimit(resource.RLIMIT_NOFILE, (100, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))
-os.sched_setscheduler(0, os.SCHED_BATCH, os.sched_param(0))
+try:
+    os.sched_setscheduler(0, os.SCHED_BATCH, os.sched_param(0))
+except OSError as e:
+    if e.errno != errno.ENOSYS:  # musl's is a stub
+        raise
 os.sched_setaffinity(0, set(sorted(os.sched_getaffinity(0))[:1]))
 def work():
     subprocess.run(["/bin/sh", "-c", "for i in 1 2 3 4 5; do /bin/true; done"], check=True)
