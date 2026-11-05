@@ -39,12 +39,16 @@ type AgentServiceClient interface {
 	Exec(ctx context.Context, in *ExecRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ExecChunk], error)
 	Signal(ctx context.Context, in *SignalRequest, opts ...grpc.CallOption) (*SignalResponse, error)
 	Shutdown(ctx context.Context, in *ShutdownRequest, opts ...grpc.CallOption) (*ShutdownResponse, error)
-	// Capture lists the sandbox's writable mounts. The runner calls it once, before
+	// Capture lists the sandbox's writable mounts and records the attributes of its
+	// long-lived processes and its writable sysctls. The runner calls it once, before
 	// the first workload, and keeps the manifest. The agent stores nothing.
 	Capture(ctx context.Context, in *CaptureRequest, opts ...grpc.CallOption) (*CaptureResponse, error)
-	// Reset restores the sandbox's processes and writable mounts to manifest and proves
-	// them. It does not cover IPC namespaces, which are for seccomp to close. Any error
-	// means the sandbox is not proven clean, and the runner must destroy it.
+	// Reset kills every other process, proves that the long-lived processes' attributes
+	// and the writable sysctls are as captured, then restores the writable mounts and
+	// proves them. It repairs no attribute or sysctl: a changed one fails the reset. It
+	// does not cover IPC namespaces' contents, which are for seccomp to close, or the PID
+	// counter, which is accepted. Any error means the sandbox is not proven clean, and the
+	// runner must destroy it.
 	Reset(ctx context.Context, in *ResetRequest, opts ...grpc.CallOption) (*ResetResponse, error)
 }
 
@@ -137,12 +141,16 @@ type AgentServiceServer interface {
 	Exec(*ExecRequest, grpc.ServerStreamingServer[ExecChunk]) error
 	Signal(context.Context, *SignalRequest) (*SignalResponse, error)
 	Shutdown(context.Context, *ShutdownRequest) (*ShutdownResponse, error)
-	// Capture lists the sandbox's writable mounts. The runner calls it once, before
+	// Capture lists the sandbox's writable mounts and records the attributes of its
+	// long-lived processes and its writable sysctls. The runner calls it once, before
 	// the first workload, and keeps the manifest. The agent stores nothing.
 	Capture(context.Context, *CaptureRequest) (*CaptureResponse, error)
-	// Reset restores the sandbox's processes and writable mounts to manifest and proves
-	// them. It does not cover IPC namespaces, which are for seccomp to close. Any error
-	// means the sandbox is not proven clean, and the runner must destroy it.
+	// Reset kills every other process, proves that the long-lived processes' attributes
+	// and the writable sysctls are as captured, then restores the writable mounts and
+	// proves them. It repairs no attribute or sysctl: a changed one fails the reset. It
+	// does not cover IPC namespaces' contents, which are for seccomp to close, or the PID
+	// counter, which is accepted. Any error means the sandbox is not proven clean, and the
+	// runner must destroy it.
 	Reset(context.Context, *ResetRequest) (*ResetResponse, error)
 	mustEmbedUnimplementedAgentServiceServer()
 }

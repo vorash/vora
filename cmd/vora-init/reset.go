@@ -50,6 +50,8 @@ type resetter struct {
 	openMountinfo func() (io.ReadCloser, error)
 	capture       func(context.Context, io.Reader) (sandboxreset.Manifest, error)
 	restore       func(context.Context, sandboxreset.Manifest, io.Reader) (int, error)
+	captureKernel func(context.Context) ([]sandboxreset.Process, map[string]string, error)
+	checkKernel   func(context.Context, sandboxreset.Manifest) error
 }
 
 // agentResetter is the resetter of the bwrap agent, which kills what is left of a
@@ -62,6 +64,7 @@ func agentResetter() *resetter {
 
 // helperResetter is the resetter of `vora-init capture` and `vora-init reset`.
 func helperResetter() *resetter {
+	kernel := sandboxreset.LiveKernel()
 	return &resetter{
 		timeout:       resetTimeout,
 		settle:        settleTimeout,
@@ -71,7 +74,40 @@ func helperResetter() *resetter {
 		openMountinfo: func() (io.ReadCloser, error) { return os.Open("/proc/self/mountinfo") },
 		capture:       sandboxreset.Capture,
 		restore:       sandboxreset.Restore,
+		captureKernel: func(ctx context.Context) ([]sandboxreset.Process, map[string]string, error) {
+			pids, err := longLivedPIDs()
+			if err != nil {
+				return nil, nil, err
+			}
+			return sandboxreset.CaptureKernel(ctx, kernel, pids)
+		},
+		checkKernel: func(ctx context.Context, m sandboxreset.Manifest) error {
+			pids, err := longLivedPIDs()
+			if err != nil {
+				return err
+			}
+			return sandboxreset.CheckKernel(ctx, kernel, pids, m)
+		},
 	}
+}
+
+// longLivedPIDs lists the processes that outlive every run. The agent only exists under
+// bwrap: under gVisor each helper is a new process, which inherits nothing from the last.
+// The answer does not depend on who asks, so the host keeps one kind of manifest. A
+// workload cannot rename PID 1, because only a thread's own group may write its comm.
+func longLivedPIDs() ([]int, error) {
+	comm, err := readInitComm()
+	if err != nil {
+		return nil, err
+	}
+	return longLivedUnder(comm), nil
+}
+
+func longLivedUnder(initComm string) []int {
+	if initComm == bwrapComm {
+		return []int{initPID, agentPID}
+	}
+	return []int{initPID}
 }
 
 // killOtherProcesses is the only kill(-1) in this program. Outside a PID namespace
@@ -125,11 +161,17 @@ func (r *resetter) captureManifest(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if m.Processes, m.Sysctls, err = r.captureKernel(ctx); err != nil {
+		return nil, err
+	}
 	return json.Marshal(m)
 }
 
-// reset kills what is left of the run, proves that nothing is, and only then lets
-// Restore remove files. It returns how many entries Restore removed.
+// reset kills what is left of the run and proves that nothing is. Only then does it
+// check the kernel state nothing could be moving any more, and let Restore remove files.
+// The check comes first because a sandbox that fails it is destroyed anyway, and because
+// Restore would run under whatever limits the run left on this process. It returns how
+// many entries Restore removed.
 func (r *resetter) reset(ctx context.Context, rawManifest []byte) (int, error) {
 	var m sandboxreset.Manifest
 	if err := json.Unmarshal(rawManifest, &m); err != nil {
@@ -141,6 +183,9 @@ func (r *resetter) reset(ctx context.Context, rawManifest []byte) (int, error) {
 		}
 	}
 	if err := r.proveOnlyInitAndSelf(ctx); err != nil {
+		return 0, fmt.Errorf("reset: %w", err)
+	}
+	if err := r.checkKernel(ctx, m); err != nil {
 		return 0, fmt.Errorf("reset: %w", err)
 	}
 	mountinfo, err := r.openMountinfo()

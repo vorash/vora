@@ -9,6 +9,11 @@
 // sandbox it cannot prove clean. The one thing it writes is a listed directory's
 // times. Removing a planted file moves them, so without this every run that plants
 // a file would fail, and a timestamp holds no state a workload could rely on.
+//
+// A run can also leave state in the kernel without touching a file: the attributes of
+// the processes that outlive it, and the sysctls of the sandbox's namespaces. CaptureKernel
+// records them and CheckKernel compares them, and neither puts anything back. A workload
+// has no use for changing them, so a run that did only costs itself a sandbox.
 package sandboxreset
 
 import (
@@ -32,6 +37,12 @@ var (
 	// ErrUnlistedMount means a walk reached a directory on another device that
 	// the mount table does not list.
 	ErrUnlistedMount = errors.New("sandboxreset: unlisted mount boundary")
+	// ErrProcessChanged means a long-lived process's attributes differ from what the
+	// manifest holds, or could not be read.
+	ErrProcessChanged = errors.New("sandboxreset: process attribute changed")
+	// ErrSysctlChanged means the writable sysctls differ from what the manifest holds,
+	// or could not be read.
+	ErrSysctlChanged = errors.New("sandboxreset: sysctl changed")
 )
 
 // Manifest is what one sandbox looked like at capture time. It travels as JSON
@@ -43,6 +54,11 @@ type Manifest struct {
 	Table []Mount `json:"table"`
 	// Mounts has one listing per writable mount, sorted by Path.
 	Mounts []MountListing `json:"mounts"`
+	// Processes holds the long-lived processes, in the order CaptureKernel was given.
+	Processes []Process `json:"processes"`
+	// Sysctls maps each sysctl the sandbox could write to its value. Keys are relative
+	// to /proc/sys.
+	Sysctls map[string]string `json:"sysctls"`
 }
 
 // MountListing is one writable mount and everything under it, up to the next
