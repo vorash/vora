@@ -178,9 +178,10 @@ func TestExecThatFinishesIsNotKilled(t *testing.T) {
 	}
 }
 
-// An exec into a stopped sandbox used to read as the program exiting 128, which a caller
-// counts as the program's own result (#120). The rows next to it must keep their reason: a
-// program may exit 128, and a command that is missing is the caller's mistake.
+// An exec into a stopped sandbox, or one whose sandbox died under it, used to read as the
+// program exiting 128, which a caller counts as the program's own result (#120). The rows
+// next to it must keep their reason: a program may exit 128 in a live sandbox, and a command
+// that is missing is the caller's mistake.
 func TestExecReasonWhenRunscExits128(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -190,7 +191,7 @@ func TestExecReasonWhenRunscExits128(t *testing.T) {
 	}{
 		{name: "sandbox stopped", refuse: "1", state: "stopped", want: runtime.ReasonRuntimeFailure},
 		{name: "missing command in a running sandbox", refuse: "1", state: "running", want: runtime.ReasonExited},
-		{name: "program exits 128 in a stopped sandbox", exit: "128", state: "stopped", want: runtime.ReasonExited},
+		{name: "sandbox dies after the command started", exit: "128", state: "stopped", want: runtime.ReasonRuntimeFailure},
 		{name: "program exits 128", exit: "128", state: "running", want: runtime.ReasonExited},
 		{name: "program exits 3", exit: "3", state: "stopped", want: runtime.ReasonExited},
 	} {

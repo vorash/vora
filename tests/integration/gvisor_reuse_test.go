@@ -523,12 +523,16 @@ func TestGvisorDeadSandbox(t *testing.T) {
 	const oom = `b = bytearray(1 << 30); [b.__setitem__(i, 1) for i in range(0, len(b), 4096)]`
 	kill := func(t *testing.T, m gvisorMember) {
 		t.Helper()
-		_, _, code := execSandbox(t, m.backend, m.h, runtime.ExecRequest{Command: "/usr/bin/python3", Args: []string{"-c", oom}})
-		if code == 0 {
+		got := lastExecExit(t, m, "/usr/bin/python3", "-c", oom)
+		if got.ExitCode == 0 {
 			t.Fatal("the program finished, so this test proves nothing")
 		}
 		if got := m.cgroupFile(t, "memory.events"); !strings.Contains(got, "oom_kill 1") {
 			t.Fatalf("memory.events %q, want one OOM kill", got)
+		}
+		// The exec the sandbox died under says so too, not only the next one.
+		if got.Reason != runtime.ReasonRuntimeFailure {
+			t.Errorf("the exec that took the sandbox down: %+v, want %s", got, runtime.ReasonRuntimeFailure)
 		}
 	}
 
@@ -560,6 +564,15 @@ func TestGvisorDeadSandbox(t *testing.T) {
 		got := lastExecExit(t, m, "/bin/echo", "hi")
 		if got.Reason != runtime.ReasonRuntimeFailure {
 			t.Errorf("exec in a dead sandbox: %+v, want %s", got, runtime.ReasonRuntimeFailure)
+		}
+	})
+	t.Run("Sentry killed mid-exec", func(t *testing.T) {
+		m := mustGvisorMember(t, gvisorMemberOpts{})
+		pid := m.sentryPID(t)
+		time.AfterFunc(300*time.Millisecond, func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+		got := lastExecExit(t, m, "/bin/sleep", "60")
+		if got.ExitCode != 128 || got.Reason != runtime.ReasonRuntimeFailure {
+			t.Errorf("an exec whose Sentry died: %+v, want 128 and %s", got, runtime.ReasonRuntimeFailure)
 		}
 	})
 	// The control: a program may really exit 128.

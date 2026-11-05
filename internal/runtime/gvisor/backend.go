@@ -805,7 +805,7 @@ func (e *execStream) stream(stdout, stderr io.Reader) {
 	reason := runtime.ReasonExited
 	if errors.Is(e.ctx.Err(), context.DeadlineExceeded) {
 		reason = runtime.ReasonTimeout
-	} else if e.refusedByDeadSandbox(code) {
+	} else if e.sandboxStopped(code) {
 		reason = runtime.ReasonRuntimeFailure
 	}
 	select {
@@ -815,19 +815,13 @@ func (e *execStream) stream(stdout, stderr io.Reader) {
 	close(e.ch)
 }
 
-// refusedByDeadSandbox tells a sandbox that has stopped from a program's own exit. runsc
-// exits 128 when it cannot run a command, and a program can exit 128 too, but it has then
-// reported a PID. A missing command also exits 128 with no PID, and that one is the
-// caller's mistake, so the sandbox's state decides. pidFile only goes away once the
-// context ends.
-func (e *execStream) refusedByDeadSandbox(code int) bool {
-	if code != runscExitFailure || e.ctx.Err() != nil {
-		return false
-	}
-	if _, err := os.Stat(e.pidFile); !errors.Is(err, os.ErrNotExist) {
-		return false
-	}
-	return e.stopped()
+// sandboxStopped tells a sandbox that died from a program's own exit. runsc exits 128 when
+// it cannot run a command or loses the sandbox while waiting for one, and a program can
+// exit 128 too. A missing command also exits 128, and that one is the caller's mistake, so
+// the sandbox's state decides. A workload cannot forge that answer: `runsc state` looks at
+// the Sentry's host process, which guest code cannot signal.
+func (e *execStream) sandboxStopped(code int) bool {
+	return code == runscExitFailure && e.ctx.Err() == nil && e.stopped()
 }
 
 // stopped reports whether runsc says the sandbox is no longer running. A runsc that fails
