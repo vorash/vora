@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -38,6 +39,8 @@ func startAgentProcess(t *testing.T, gomaxprocs int) (*exec.Cmd, *agentproto.Cli
 	socket := filepath.Join(t.TempDir(), "control.sock")
 	cmd := exec.Command(os.Args[0], "-socket", socket, "-grace", "1m")
 	cmd.Env = []string{runAgentEnv + "=1", "GOMAXPROCS=" + strconv.Itoa(gomaxprocs)}
+	var agentErr bytes.Buffer
+	cmd.Stderr = &agentErr
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start agent: %v", err)
 	}
@@ -51,7 +54,9 @@ func startAgentProcess(t *testing.T, gomaxprocs int) (*exec.Cmd, *agentproto.Cli
 	}
 	t.Cleanup(func() { _ = client.Close() })
 	if err := client.WaitReady(context.Background(), 10*time.Second); err != nil {
-		t.Fatalf("agent not ready: %v", err)
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("agent not ready: %v\nagent stderr:\n%s", err, agentErr.String())
 	}
 	return cmd, client
 }

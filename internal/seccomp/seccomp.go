@@ -109,6 +109,10 @@ func Install() error {
 	}
 	filter := Filter()
 	prog := unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]}
+	// no_new_privs is per thread until TSYNC spreads it, and seccomp refuses a thread
+	// without it, so both calls must run on the same one.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return fmt.Errorf("seccomp: set no_new_privs: %w", err)
 	}

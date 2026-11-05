@@ -403,15 +403,11 @@ func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.Exe
 		return &v1.ExecChunk{Payload: &v1.ExecChunk_Stderr{Stderr: b}}
 	})
 
-	// Kill the process group if the client goes away.
-	waitCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	go func() {
-		<-waitCtx.Done()
-		if ctx.Err() != nil {
-			killGroup()
-		}
-	}()
+	// Kill the process group if the client goes away. gRPC also cancels ctx once this
+	// handler returns, so the kill must be disarmed before then, or it takes out whatever
+	// a finished exec left running in its group.
+	stopWatchingClient := context.AfterFunc(ctx, killGroup)
+	defer stopWatchingClient()
 
 	// Drain stdout and stderr before reaping: cmd.Wait closes the read ends of
 	// the pipes StdoutPipe/StderrPipe handed out, so whatever the readers have
