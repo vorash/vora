@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -118,6 +119,19 @@ func TestBwrapExitsWithoutRunner(t *testing.T) {
 	}
 }
 
+// stateTempDir returns a short-lived state directory for a sandbox. Not
+// t.TempDir: it embeds the test's name, and the control socket under the state
+// directory must fit in a Unix socket path's 108 bytes.
+func stateTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "vora-it-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 // newBwrapSandbox starts a bwrap sandbox on the cached base image and returns
 // the backend and its handle, tearing the sandbox down at the end of the test.
 func newBwrapSandbox(t *testing.T) (*bwrap.Backend, runtime.Handle) {
@@ -156,14 +170,7 @@ func startBwrapSandbox(t *testing.T, spec runtime.SandboxSpec) (*bwrap.Backend, 
 	}
 	rootfs := imageRootfs(t, "base")
 
-	// Not t.TempDir: it embeds the test's name, and the control socket under it must
-	// fit in a Unix socket path's 108 bytes.
-	stateDir, err := os.MkdirTemp("", "vora-it-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(stateDir) })
-	cfg := config.Config{StateDir: stateDir, SystemdMode: config.SystemdUser}
+	cfg := config.Config{StateDir: stateTempDir(t), SystemdMode: config.SystemdUser}
 	wsManager := workspace.NewManager(cfg.SandboxesDir())
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	backend, err := bwrap.New(cfg, cgroups, logger)
@@ -478,30 +485,32 @@ func TestBwrapOOMExecSurvives(t *testing.T) {
 }
 
 // manySmallHogs starts processes that each hold an eighth of vora-init's RSS
-// until together they ask for twice the limit, then kills its own process
-// group. Every hog is smaller than the agent, so without the workload's raised
-// oom_score_adj the kernel would pick vora-init and end the sandbox. $1 is the
-// limit in KiB.
+// until together they ask for the limit plus one more agent's worth, holds them
+// there for five seconds, then kills its own process group. Every hog is
+// smaller than the agent, so without the workload's raised oom_score_adj the
+// kernel would pick vora-init and end the sandbox. $1 is the limit in KiB.
+//
+// Every hog past the limit spins in reclaim, on its own core, until the kernel
+// has killed one, which takes about two seconds each when the sandbox's CPU
+// quota is exhausted. Asking for twice the limit, holding for 30 seconds and
+// forking once per /proc entry put this past a minute on a 16-core host, so the
+// overshoot is small, the hold short, and only builtins run once the hogs are up.
 const manySmallHogs = `
 init=
 for d in /proc/[0-9]*; do
-	[ "$(cat "$d/comm" 2>/dev/null)" = vora-init ] && init=${d#/proc/} && break
-done
-rss=$(awk '/^VmRSS:/ {print $2}' "/proc/$init/status")
+	read c < "$d/comm" && [ "$c" = vora-init ] && init=${d#/proc/} && break
+done 2>/dev/null
+rss() { while read k v _; do [ "$k" = VmRSS: ] && echo "$v"; done < "/proc/$init/status"; }
+rss=$(rss)
 kib=$((rss / 8))
-n=$((2 * $1 / kib))
+n=$(( ($1 - rss) / kib + 8 ))
 echo "vora-init pid $init rss $rss KiB; starting $n hogs of $kib KiB"
 i=0
 while [ "$i" -lt "$n" ]; do
 	dd if=/dev/zero bs="${kib}k" count=1 2>/dev/null &
 	i=$((i + 1))
-done | sleep 30 >/dev/null &
-sleep 5
-alive=0
-for d in /proc/[0-9]*; do
-	[ "$(cat "$d/comm" 2>/dev/null)" = dd ] && alive=$((alive + 1))
-done
-echo "$alive of $n hogs alive; vora-init rss now $(awk '/^VmRSS:/ {print $2}' "/proc/$init/status") KiB"
+done | sleep 5 >/dev/null
+echo "hogs released; vora-init rss now $(rss) KiB"
 kill -KILL 0
 `
 
@@ -511,7 +520,7 @@ kill -KILL 0
 func TestBwrapOOMManySmall(t *testing.T) {
 	const limit = 64 << 20
 	backend, h := newBwrapSandboxWith(t, nil, runtime.ResourceLimits{CPUMillis: 1000, MemoryBytes: limit, Pids: 512})
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
 	m, err := backend.Meter(ctx, h)
@@ -528,12 +537,14 @@ func TestBwrapOOMManySmall(t *testing.T) {
 		t.Fatalf("Exec: %v", err)
 	}
 	var (
-		out  strings.Builder
-		exit *runtime.ExecResult
+		out     strings.Builder
+		exit    *runtime.ExecResult
+		recvErr error
 	)
 	for exit == nil {
 		chunk, err := stream.Recv()
 		if err != nil {
+			recvErr = err
 			break
 		}
 		out.Write(chunk.Stdout)
@@ -544,13 +555,101 @@ func TestBwrapOOMManySmall(t *testing.T) {
 	u, err := m.Stop(ctx)
 	t.Logf("hogs: exit %+v, usage %+v (meter error %v), output %q", exit, u, err, out.String())
 	if exit == nil {
-		t.Fatalf("hog exec ended without an exit chunk: the OOM took the sandbox down, not just a hog")
+		// A stream can end on this test's own deadline as well as on the agent's
+		// death, and only the second breaks the promise under test.
+		if err := execEcho(backend, h, 2*time.Minute); err != nil {
+			t.Fatalf("hog exec stream ended without an exit chunk (%v) and the sandbox no longer answers (%v): the OOM took the agent down", recvErr, err)
+		}
+		t.Fatalf("hog exec stream ended without an exit chunk (%v) but the sandbox still answers execs: the hogs outran this test's deadline", recvErr)
 	}
 	if u.OOMKills < 1 {
 		t.Fatalf("usage oom_kills = %d, want >= 1: the hogs never reached the limit, so this proved nothing", u.OOMKills)
 	}
 	if got := strings.TrimSpace(run(t, backend, h, "/bin/echo", []string{"ok"})); got != "ok" {
 		t.Fatalf("exec after the OOM = %q, want ok", got)
+	}
+}
+
+// leakedHogs leaves processes behind that hold the sandbox at its memory limit
+// for a minute after the exec that started them has returned, the way a
+// workload that leaked would: 36 of a thirty-second of the limit each, so a few
+// more than fit. $1 is the limit in KiB.
+const leakedHogs = `
+setsid sh -c '
+i=0
+while [ "$i" -lt 36 ]; do
+	dd if=/dev/zero bs=$(( $1 / 32 ))k count=1 2>/dev/null &
+	i=$((i + 1))
+done | sleep 60 >/dev/null
+' sh "$1" >/dev/null 2>&1 </dev/null &
+echo started
+`
+
+// An exec started while leaked workload processes hold the sandbox at its
+// memory limit must not get the agent OOM-killed. The fork stalls in reclaim
+// until the kernel has killed a hog, and the kernel picks that victim by
+// oom_score_adj and size: the agent, at its baseline score, must not be it.
+func TestBwrapOOMExecUnderPressure(t *testing.T) {
+	const limit = 64 << 20
+	backend, h := newBwrapSandboxWith(t, nil, runtime.ResourceLimits{CPUMillis: 1000, MemoryBytes: limit, Pids: 512})
+
+	if got := strings.TrimSpace(run(t, backend, h, "/bin/sh", []string{"-c", leakedHogs, "sh", strconv.Itoa(limit >> 10)})); got != "started" {
+		t.Fatalf("leak exec = %q, want started", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for {
+		st, err := backend.Stats(ctx, h)
+		if err != nil {
+			t.Fatalf("Stats: %v", err)
+		}
+		if st.OOMKills >= 1 {
+			t.Logf("pressure: %+v", st)
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("the hogs never reached the limit: stats %+v", st)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// The kernel can keep a sandbox at its limit unscheduled for a minute or
+	// more, so a deadline here is a starved agent, not a dead one. Only a
+	// stream the agent dropped proves it died.
+	if err := execEcho(backend, h, 4*time.Minute); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("exec under memory pressure: %v: the agent is starved or dead", err)
+		}
+		t.Fatalf("exec under memory pressure: %v: the agent died with the hogs", err)
+	}
+}
+
+// execEcho runs echo in the sandbox on a deadline of its own and reports whether
+// the exec ran to its exit chunk.
+func execEcho(backend *bwrap.Backend, h runtime.Handle, deadline time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+	stream, err := backend.Exec(ctx, h, runtime.ExecRequest{
+		ExecutionID: "exe_echo",
+		Command:     "/bin/echo",
+		Args:        []string{"ok"},
+		Cwd:         "/workspace",
+	})
+	if err != nil {
+		return err
+	}
+	defer stream.Close()
+	for {
+		chunk, err := stream.Recv()
+		if err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("no exit chunk within %s: %w", deadline, ctx.Err())
+			}
+			return fmt.Errorf("stream ended without an exit chunk: %w", err)
+		}
+		if chunk.Exit != nil {
+			return nil
+		}
 	}
 }
 
@@ -568,7 +667,7 @@ func newBwrapRunner(t *testing.T) v1.RunnerServiceClient {
 	rootfs := imageRootfs(t, "base")
 	realImages := filepath.Dir(filepath.Dir(filepath.Dir(rootfs))) // .../images
 
-	stateDir := t.TempDir()
+	stateDir := stateTempDir(t)
 	if err := os.Symlink(realImages, filepath.Join(stateDir, "images")); err != nil {
 		t.Fatalf("symlink images: %v", err)
 	}

@@ -39,7 +39,7 @@ func newExecClient(t *testing.T) v1.RunnerServiceClient {
 	rootfs := imageRootfs(t, "base")
 	realImages := filepath.Dir(filepath.Dir(filepath.Dir(rootfs))) // .../images
 
-	stateDir := t.TempDir()
+	stateDir := stateTempDir(t)
 	if err := os.Symlink(realImages, filepath.Join(stateDir, "images")); err != nil {
 		t.Fatalf("symlink images: %v", err)
 	}

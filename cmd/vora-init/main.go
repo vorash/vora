@@ -75,8 +75,6 @@ func main() {
 	}
 	a := newAgent(*socket, *grace, logger)
 	a.resetter = agentResetter()
-	// After newAgent, which opens /proc/self/oom_score_adj: that open fails once
-	// this has run, and every exec would then leave the agent as the OOM victim.
 	// Before listening, so no workload can run while the agent is still dumpable.
 	if err := setNonDumpable(); err != nil {
 		logger.Error("set non-dumpable", "error", err)
@@ -128,9 +126,8 @@ func main() {
 // would carry over to the next one. The flag is per address space, so it covers
 // every thread, and execve clears it, so workloads do not inherit it.
 //
-// It also hands this process's /proc/self files to root: opening
-// /proc/self/oom_score_adj for writing fails from here on. A file opened before
-// this call stays writable.
+// It also hands this process's /proc/self files to root, so the agent cannot
+// write its own oom_score_adj from here on; it only writes its workloads'.
 func setNonDumpable() error {
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
 		return fmt.Errorf("set non-dumpable: %w", err)
@@ -186,7 +183,6 @@ func pause() {
 type agent struct {
 	socket   string
 	grace    time.Duration
-	oom      *oomScore
 	logger   *slog.Logger
 	lastSeen atomic.Int64
 	// activeStreams counts open gRPC streams: a long silent exec is proof the
@@ -217,12 +213,6 @@ func newAgent(socket string, grace time.Duration, logger *slog.Logger) *agent {
 		done:   make(chan struct{}),
 	}
 	a.lastSeen.Store(time.Now().UnixNano())
-	oom, err := openOOMScore()
-	if err != nil {
-		// Only costs the choice of OOM victim; the sandbox can still run execs.
-		logger.Warn("exec oom score unavailable", "error", err)
-	}
-	a.oom = oom
 	return a
 }
 
@@ -242,25 +232,37 @@ func (a *agent) streamInterceptor(srv any, ss grpc.ServerStream, _ *grpc.StreamS
 
 // watchdog exits the sandbox if the runner stops contacting the agent, which
 // preserves die-with-parent semantics when the runner dies unexpectedly.
+//
+// It counts the ticks it was awake for without a touch, not wall time. A
+// sandbox at its memory limit can leave the agent unscheduled for longer than
+// the grace while the runner keeps pinging: the kernel reclaim spins the
+// cgroup's CPU quota away and the pings time out unseen. On a clock the agent
+// would wake up, read a long silence, and end a sandbox whose runner is right
+// there. A stall delivers one tick, so the silence it counts is only what the
+// agent saw.
 func (a *agent) watchdog() {
 	interval := a.grace / 4
 	if interval < time.Second {
 		interval = time.Second
 	}
+	limit := int(a.grace / interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	seen := a.lastSeen.Load()
+	idle := 0
 	for {
 		select {
 		case <-a.done:
 			return
 		case <-ticker.C:
-			if a.activeStreams.Load() > 0 {
-				a.touch()
+			if now := a.lastSeen.Load(); now != seen || a.activeStreams.Load() > 0 {
+				seen = now
+				idle = 0
 				continue
 			}
-			last := time.Unix(0, a.lastSeen.Load())
-			if time.Since(last) > a.grace {
-				a.logger.Warn("runner detached, exiting", "idle_for", time.Since(last).String())
+			idle++
+			if idle >= limit {
+				a.logger.Warn("runner detached, exiting", "idle_ticks", idle, "interval", interval.String())
 				a.triggerShutdown()
 				return
 			}
@@ -345,7 +347,7 @@ func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.Exe
 		return send(c)
 	}
 
-	err, scoreErr := a.oom.startWorkload(cmd)
+	err, scoreErr := startWorkload(cmd)
 	if scoreErr != nil {
 		a.logger.Warn("exec oom score", "error", scoreErr)
 	}
