@@ -201,6 +201,10 @@ type runOpts struct {
 	group       *cgroup.Group
 	netnsPID    int
 	networkMode string
+	// ociSeccomp makes runsc apply the bundle's seccomp section, which it otherwise
+	// ignores. Only `runsc create` reads it. The filter then covers every later
+	// `runsc exec` in the sandbox without the flag.
+	ociSeccomp bool
 }
 
 func (b *Backend) runInOpts(ctx context.Context, o runOpts, args ...string) (string, error) {
@@ -212,6 +216,9 @@ func (b *Backend) runInOpts(ctx context.Context, o runOpts, args ...string) (str
 	defer f.Close()
 
 	flags := b.globalFlags(o.networkMode)
+	if o.ociSeccomp {
+		flags = append(flags, "--oci-seccomp")
+	}
 	var cmd *exec.Cmd
 	if o.netnsPID > 0 {
 		argv := append([]string{"-t", strconv.Itoa(o.netnsPID), "-n", b.runsc}, flags...)
@@ -400,7 +407,9 @@ func (b *Backend) start(ctx context.Context, hd *handle, opts runOpts, resolvCon
 		return err
 	}
 	opts.group = group
-	if out, err := b.runInOpts(ctx, opts, "create", "--bundle", hd.bundleDir, "--", hd.id); err != nil {
+	createOpts := opts
+	createOpts.ociSeccomp = hd.spec.DenyIPC
+	if out, err := b.runInOpts(ctx, createOpts, "create", "--bundle", hd.bundleDir, "--", hd.id); err != nil {
 		_ = group.Destroy()
 		hd.group = nil
 		return fmt.Errorf("gvisor: create: %w: %s", err, out)

@@ -61,6 +61,7 @@ func main() {
 
 	socket := flag.String("socket", "/run/vora/control.sock", "control socket path inside the sandbox")
 	grace := flag.Duration("grace", 20*time.Second, "exit if the runner has not contacted us for this long")
+	denyIPC := flag.Bool("deny-ipc", false, "also deny the IPC a reset cannot clean, for a sandbox that will be reset")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -68,7 +69,7 @@ func main() {
 	// agent serves and before any workload starts, so every process inherits
 	// it. A failure is fatal: a sandbox must not run unfiltered by accident
 	// (issue #23).
-	if err := seccomp.Install(); err != nil {
+	if err := seccomp.Install(*denyIPC); err != nil {
 		logger.Error("install seccomp filter", "error", err)
 		os.Exit(1)
 	}

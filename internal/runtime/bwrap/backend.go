@@ -373,6 +373,7 @@ func (b *Backend) startInNetns(ctx context.Context, hd *handle, creds []egress.C
 		Env:          sbEnv,
 		ShareNet:     true,
 		ResolvConf:   resolvConf,
+		DenyIPC:      hd.spec.DenyIPC,
 	})
 	if err != nil {
 		b.cleanupRestricted(ctx, hd)
@@ -498,6 +499,7 @@ func (b *Backend) startUnit(ctx context.Context, hd *handle) error {
 		HomeDir:      ws.HomeDir,
 		IPCDir:       ws.IPCDir,
 		Env:          hd.spec.Env,
+		DenyIPC:      hd.spec.DenyIPC,
 	})
 	if err != nil {
 		return err
