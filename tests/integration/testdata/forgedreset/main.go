@@ -220,10 +220,17 @@ func relay(socket string) error {
 // the agent so nothing accepts, connects, leaves a Shutdown in the socket, and exits. The
 // `hold` process it starts keeps the connection open, waits for this process to be
 // reaped, and only then lets the agent run.
-func orphan(resultFile string) error {
+func orphan(resultFile string) (err error) {
 	if err := syscall.Kill(agentPID, syscall.SIGSTOP); err != nil {
 		return fmt.Errorf("stop the agent: %w", err)
 	}
+	// From here on the holder resumes the agent. Until it is running, a failure has to,
+	// or the test hangs on a stopped agent instead of reading why this failed.
+	defer func() {
+		if err != nil {
+			_ = syscall.Kill(agentPID, syscall.SIGCONT)
+		}
+	}()
 	conn, err := net.Dial("unix", controlSocket)
 	if err != nil {
 		return err

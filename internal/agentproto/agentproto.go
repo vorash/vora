@@ -135,13 +135,28 @@ func PeerCred(conn *net.UnixConn) (*unix.Ucred, error) {
 type Client struct {
 	conn *grpc.ClientConn
 	stub v1.AgentServiceClient
+
+	// mu guards the identity the first connection established, which every
+	// later connection must match.
+	mu       sync.Mutex
+	original os.FileInfo
+	trusted  *unix.Ucred
+}
+
+// Peer returns the credentials of the agent the client first connected to,
+// with its PID as this process sees it, or false before any connection.
+func (c *Client) Peer() (unix.Ucred, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.trusted == nil {
+		return unix.Ucred{}, false
+	}
+	return *c.trusted, true
 }
 
 // Dial connects to the agent socket. It does not wait for readiness.
 func Dial(socket string) (*Client, error) {
-	var mu sync.Mutex
-	var original os.FileInfo
-	var trusted *unix.Ucred
+	c := &Client{}
 	dial := func(ctx context.Context, _ string) (net.Conn, error) {
 		before, err := os.Lstat(socket)
 		if err != nil {
@@ -166,11 +181,11 @@ func Dial(socket string) (*Client, error) {
 		if err != nil {
 			return fail(err)
 		}
-		mu.Lock()
-		defer mu.Unlock()
-		if original == nil {
-			original, trusted = before, peer
-		} else if !os.SameFile(original, before) || trusted.Pid != peer.Pid || trusted.Uid != peer.Uid || trusted.Gid != peer.Gid {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.original == nil {
+			c.original, c.trusted = before, peer
+		} else if !os.SameFile(c.original, before) || c.trusted.Pid != peer.Pid || c.trusted.Uid != peer.Uid || c.trusted.Gid != peer.Gid {
 			return fail(fmt.Errorf("agentproto: control socket identity changed"))
 		}
 		return connection, nil
@@ -193,7 +208,8 @@ func Dial(socket string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("agentproto: dial %s: %w", socket, err)
 	}
-	return &Client{conn: conn, stub: v1.NewAgentServiceClient(conn)}, nil
+	c.conn, c.stub = conn, v1.NewAgentServiceClient(conn)
+	return c, nil
 }
 
 // Close closes the underlying connection.

@@ -240,10 +240,7 @@ func (g *Group) ApplyTo(cmd *exec.Cmd) (func(), error) {
 
 // Stats reads resource usage from this cgroup.
 func (g *Group) Stats() (*runtime.Stats, error) {
-	old := cgroupRoot
-	cgroupRoot = g.root
-	defer func() { cgroupRoot = old }()
-	return readStats(g.rel)
+	return readStatsDir(g.Path())
 }
 
 // Kill terminates every process in the cgroup (cgroup v2).
