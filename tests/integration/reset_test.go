@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/oklog/ulid/v2"
 	"io"
 	"log/slog"
 	"os"
@@ -15,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/oklog/ulid/v2"
 
 	"github.com/vorash/vora/internal/agentproto"
 	"github.com/vorash/vora/internal/cgroup"
@@ -525,7 +528,7 @@ func TestGvisorHelperCaptureAndReset(t *testing.T) {
 		t.Skipf("gvisor backend unavailable: %v", err)
 	}
 
-	id := "sbx_gv_reset_" + strings.ReplaceAll(time.Now().UTC().Format("150405.000000000"), ".", "")
+	id := "sbx_" + ulid.Make().String()
 	ws := workspace.NewManager(cfg.SandboxesDir())
 	wsp := ws.Paths(id)
 	wsp.RootfsDir = rootfs
