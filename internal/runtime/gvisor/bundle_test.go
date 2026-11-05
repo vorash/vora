@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -76,11 +77,15 @@ func TestWriteBundleUsesVoraInit(t *testing.T) {
 	}
 
 	// The ipc directory is bound at /vora, which is how the init binary
-	// reaches the sandbox without the image shipping it.
+	// reaches the sandbox without the image shipping it. It must be read-only:
+	// a workload that could write there could replace the init of a reused sandbox.
 	var bound bool
 	for _, m := range s.Mounts {
 		if m.Destination == "/vora" && m.Source == paths.IPCDir {
 			bound = true
+			if !slices.Contains(m.Options, "ro") || slices.Contains(m.Options, "rw") {
+				t.Errorf("/vora options = %v, want read-only", m.Options)
+			}
 		}
 	}
 	if !bound {
