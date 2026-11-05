@@ -37,6 +37,10 @@ const (
 	RunnerService_ListSnapshots_FullMethodName    = "/vora.v1.RunnerService/ListSnapshots"
 	RunnerService_DeleteSnapshot_FullMethodName   = "/vora.v1.RunnerService/DeleteSnapshot"
 	RunnerService_ForkSnapshot_FullMethodName     = "/vora.v1.RunnerService/ForkSnapshot"
+	RunnerService_CreatePool_FullMethodName       = "/vora.v1.RunnerService/CreatePool"
+	RunnerService_GetPool_FullMethodName          = "/vora.v1.RunnerService/GetPool"
+	RunnerService_DeletePool_FullMethodName       = "/vora.v1.RunnerService/DeletePool"
+	RunnerService_RunInPool_FullMethodName        = "/vora.v1.RunnerService/RunInPool"
 )
 
 // RunnerServiceClient is the client API for RunnerService service.
@@ -64,6 +68,12 @@ type RunnerServiceClient interface {
 	ListSnapshots(ctx context.Context, in *ListSnapshotsRequest, opts ...grpc.CallOption) (*ListSnapshotsResponse, error)
 	DeleteSnapshot(ctx context.Context, in *DeleteSnapshotRequest, opts ...grpc.CallOption) (*DeleteSnapshotResponse, error)
 	ForkSnapshot(ctx context.Context, in *ForkSnapshotRequest, opts ...grpc.CallOption) (*ForkSnapshotResponse, error)
+	// Pools. A pool's members are ordinary sandboxes with a pool_id; every
+	// sandbox RPC that would act on one refuses it with FAILED_PRECONDITION.
+	CreatePool(ctx context.Context, in *CreatePoolRequest, opts ...grpc.CallOption) (*Pool, error)
+	GetPool(ctx context.Context, in *GetPoolRequest, opts ...grpc.CallOption) (*Pool, error)
+	DeletePool(ctx context.Context, in *DeletePoolRequest, opts ...grpc.CallOption) (*DeletePoolResponse, error)
+	RunInPool(ctx context.Context, in *RunInPoolRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RunChunk], error)
 }
 
 type runnerServiceClient struct {
@@ -263,6 +273,55 @@ func (c *runnerServiceClient) ForkSnapshot(ctx context.Context, in *ForkSnapshot
 	return out, nil
 }
 
+func (c *runnerServiceClient) CreatePool(ctx context.Context, in *CreatePoolRequest, opts ...grpc.CallOption) (*Pool, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Pool)
+	err := c.cc.Invoke(ctx, RunnerService_CreatePool_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) GetPool(ctx context.Context, in *GetPoolRequest, opts ...grpc.CallOption) (*Pool, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Pool)
+	err := c.cc.Invoke(ctx, RunnerService_GetPool_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) DeletePool(ctx context.Context, in *DeletePoolRequest, opts ...grpc.CallOption) (*DeletePoolResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeletePoolResponse)
+	err := c.cc.Invoke(ctx, RunnerService_DeletePool_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *runnerServiceClient) RunInPool(ctx context.Context, in *RunInPoolRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RunChunk], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &RunnerService_ServiceDesc.Streams[1], RunnerService_RunInPool_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[RunInPoolRequest, RunChunk]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RunnerService_RunInPoolClient = grpc.ServerStreamingClient[RunChunk]
+
 // RunnerServiceServer is the server API for RunnerService service.
 // All implementations must embed UnimplementedRunnerServiceServer
 // for forward compatibility.
@@ -288,6 +347,12 @@ type RunnerServiceServer interface {
 	ListSnapshots(context.Context, *ListSnapshotsRequest) (*ListSnapshotsResponse, error)
 	DeleteSnapshot(context.Context, *DeleteSnapshotRequest) (*DeleteSnapshotResponse, error)
 	ForkSnapshot(context.Context, *ForkSnapshotRequest) (*ForkSnapshotResponse, error)
+	// Pools. A pool's members are ordinary sandboxes with a pool_id; every
+	// sandbox RPC that would act on one refuses it with FAILED_PRECONDITION.
+	CreatePool(context.Context, *CreatePoolRequest) (*Pool, error)
+	GetPool(context.Context, *GetPoolRequest) (*Pool, error)
+	DeletePool(context.Context, *DeletePoolRequest) (*DeletePoolResponse, error)
+	RunInPool(*RunInPoolRequest, grpc.ServerStreamingServer[RunChunk]) error
 	mustEmbedUnimplementedRunnerServiceServer()
 }
 
@@ -351,6 +416,18 @@ func (UnimplementedRunnerServiceServer) DeleteSnapshot(context.Context, *DeleteS
 }
 func (UnimplementedRunnerServiceServer) ForkSnapshot(context.Context, *ForkSnapshotRequest) (*ForkSnapshotResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ForkSnapshot not implemented")
+}
+func (UnimplementedRunnerServiceServer) CreatePool(context.Context, *CreatePoolRequest) (*Pool, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreatePool not implemented")
+}
+func (UnimplementedRunnerServiceServer) GetPool(context.Context, *GetPoolRequest) (*Pool, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetPool not implemented")
+}
+func (UnimplementedRunnerServiceServer) DeletePool(context.Context, *DeletePoolRequest) (*DeletePoolResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeletePool not implemented")
+}
+func (UnimplementedRunnerServiceServer) RunInPool(*RunInPoolRequest, grpc.ServerStreamingServer[RunChunk]) error {
+	return status.Error(codes.Unimplemented, "method RunInPool not implemented")
 }
 func (UnimplementedRunnerServiceServer) mustEmbedUnimplementedRunnerServiceServer() {}
 func (UnimplementedRunnerServiceServer) testEmbeddedByValue()                       {}
@@ -690,6 +767,71 @@ func _RunnerService_ForkSnapshot_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunnerService_CreatePool_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreatePoolRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).CreatePool(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_CreatePool_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).CreatePool(ctx, req.(*CreatePoolRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_GetPool_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetPoolRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).GetPool(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_GetPool_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).GetPool(ctx, req.(*GetPoolRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_DeletePool_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeletePoolRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunnerServiceServer).DeletePool(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunnerService_DeletePool_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunnerServiceServer).DeletePool(ctx, req.(*DeletePoolRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RunnerService_RunInPool_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(RunInPoolRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(RunnerServiceServer).RunInPool(m, &grpc.GenericServerStream[RunInPoolRequest, RunChunk]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type RunnerService_RunInPoolServer = grpc.ServerStreamingServer[RunChunk]
+
 // RunnerService_ServiceDesc is the grpc.ServiceDesc for RunnerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -765,11 +907,28 @@ var RunnerService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "ForkSnapshot",
 			Handler:    _RunnerService_ForkSnapshot_Handler,
 		},
+		{
+			MethodName: "CreatePool",
+			Handler:    _RunnerService_CreatePool_Handler,
+		},
+		{
+			MethodName: "GetPool",
+			Handler:    _RunnerService_GetPool_Handler,
+		},
+		{
+			MethodName: "DeletePool",
+			Handler:    _RunnerService_DeletePool_Handler,
+		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "ExecSandbox",
 			Handler:       _RunnerService_ExecSandbox_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "RunInPool",
+			Handler:       _RunnerService_RunInPool_Handler,
 			ServerStreams: true,
 		},
 	},

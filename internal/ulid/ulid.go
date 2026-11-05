@@ -19,6 +19,7 @@ const (
 	PrefixAPIKey   = "key"
 	PrefixSecret   = "sec"
 	PrefixSnapshot = "snap"
+	PrefixPool     = "pool"
 )
 
 // entropy is monotonic so that identifiers created within the same millisecond
@@ -62,6 +63,9 @@ func NewSecretID() string { return New(PrefixSecret) }
 // NewSnapshot returns a new snapshot identifier.
 func NewSnapshot() string { return New(PrefixSnapshot) }
 
+// NewPool returns a new pool identifier.
+func NewPool() string { return New(PrefixPool) }
+
 // ValidPrefix reports whether id is a canonical ULID with the expected prefix.
 func ValidPrefix(id, expected string) bool {
 	if !strings.HasPrefix(id, expected+"_") || !Valid(id) {
@@ -79,7 +83,7 @@ func Valid(id string) bool {
 		return false
 	}
 	switch prefix {
-	case PrefixSandbox, PrefixRunner, PrefixExec, PrefixAgent, PrefixAPIKey, PrefixSecret, PrefixSnapshot:
+	case PrefixSandbox, PrefixRunner, PrefixExec, PrefixAgent, PrefixAPIKey, PrefixSecret, PrefixSnapshot, PrefixPool:
 	default:
 		return false
 	}

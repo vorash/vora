@@ -89,6 +89,9 @@ func TestBrokerSecretsAreNeverPersisted(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(io.MultiWriter(&logs), nil))
 	s := NewServer(cfg, store, registry, "run_test", logger)
+	if err := s.LoadPools(); err != nil {
+		t.Fatal(err)
+	}
 
 	const secret = "ghp_secret_that_must_not_be_persisted"
 	ctx := context.Background()
@@ -153,6 +156,9 @@ func TestBrokerStartWithoutCredentialsFailsClosed(t *testing.T) {
 	}
 	s := NewServer(cfg, sandbox.NewStore(cfg.SandboxesDir()), registry, "run_test",
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := s.LoadPools(); err != nil {
+		t.Fatal(err)
+	}
 
 	ctx := context.Background()
 	if _, err := s.CreateSandbox(ctx, &v1.CreateSandboxRequest{

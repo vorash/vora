@@ -51,11 +51,27 @@ var (
 	ErrNotReusable   = errors.New("pool: backend cannot reset sandboxes")
 )
 
-// minPids is the smallest pids limit a member can run with. An idle bwrap
-// sandbox holds a steady 10 or 11 tasks, so 12 is the first limit that always
-// leaves one for the workload. This floor was measured for bwrap exec (design
-// build log, v0.10.6). Steps 10 and 11 must re-measure it with reset running.
-const minPids = 12
+// A member's pids limit has a floor that depends on what the limit counts.
+//
+// Under bwrap it counts Vora's own tasks and the workload's. An idle sandbox holds a
+// steady 10 or 11, so 12 is the first limit that always leaves one for the workload. An
+// exec and a reset ran 100 of 100 there. A workload that leaves a process behind needs 13.
+//
+// Under gVisor it counts the Sentry's host threads, which grow with use, not guest tasks.
+// Reaching it kills the whole sandbox. Limits up to 26 cannot start, 28 to 36 died under
+// ordinary work, and 48, 64 and 128 each passed 60 cycles on a 16-core host. Thread growth
+// has no measured plateau, so 64 keeps a margin above the lowest that passed.
+const (
+	minPidsBwrap  = 12
+	minPidsGvisor = 64
+)
+
+func minPids(backend string) int64 {
+	if backend == "gvisor" {
+		return minPidsGvisor
+	}
+	return minPidsBwrap
+}
 
 const (
 	defaultSize          = 8
@@ -91,27 +107,32 @@ const (
 	defaultMaxPoolSize          = 64
 )
 
+// The tenant and name make up a pool's metric label, so both are bounded. Series
+// stay bounded too: each pool reserves at least one of the runner's sandbox slots,
+// and the runner deletes a pool's series with it.
 var namePattern = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
+
+const maxTenantBytes = 128
 
 // RawSpec is a pool definition as the wire delivers it, before validation.
 // Zero means "default" for every field but Size, where 0 is a cold pool, so
 // Size and MaxSize are pointers.
 type RawSpec struct {
-	ID       ID
-	Name     string
-	TenantID string
-	AgentID  string
+	ID       ID     `json:"id"`
+	Name     string `json:"name"`
+	TenantID string `json:"tenant_id"`
+	AgentID  string `json:"agent_id,omitempty"`
 	// Template is every member's sandbox spec. Its ID, TenantID, AgentID and
 	// TTL must be empty: the pool owns identity and lifetime.
-	Template      runtime.SandboxSpec
-	Size          *int
-	MaxSize       *int
-	MaxRuns       int
-	MaxAge        time.Duration
-	MaxRun        time.Duration
-	BorrowTimeout time.Duration
-	IdleExpiry    time.Duration
-	Reuse         Reuse
+	Template      runtime.SandboxSpec `json:"template"`
+	Size          *int                `json:"size,omitempty"`
+	MaxSize       *int                `json:"max_size,omitempty"`
+	MaxRuns       int                 `json:"max_runs,omitempty"`
+	MaxAge        time.Duration       `json:"max_age_ns,omitempty"`
+	MaxRun        time.Duration       `json:"max_run_ns,omitempty"`
+	BorrowTimeout time.Duration       `json:"borrow_timeout_ns,omitempty"`
+	IdleExpiry    time.Duration       `json:"idle_expiry_ns,omitempty"`
+	Reuse         Reuse               `json:"reuse,omitempty"`
 }
 
 // Limits are the runner-wide rules a spec is checked against, so a pool that
@@ -218,8 +239,8 @@ func Parse(raw RawSpec, limits Limits) (Spec, error) {
 		return Spec{}, fmt.Errorf("%w: id is required", ErrInvalidSpec)
 	case !namePattern.MatchString(raw.Name):
 		return Spec{}, fmt.Errorf("%w: name must match %s", ErrInvalidSpec, namePattern)
-	case raw.TenantID == "":
-		return Spec{}, fmt.Errorf("%w: tenant is required", ErrInvalidSpec)
+	case raw.TenantID == "" || len(raw.TenantID) > maxTenantBytes:
+		return Spec{}, fmt.Errorf("%w: tenant is required, at most %d bytes", ErrInvalidSpec, maxTenantBytes)
 	case s.size < 0 || s.maxSize < 1 || s.size > s.maxSize:
 		return Spec{}, fmt.Errorf("%w: need 0 <= size <= max_size and max_size >= 1", ErrInvalidSpec)
 	case s.maxSize > limits.MaxSize:
@@ -275,8 +296,8 @@ func checkTemplate(t runtime.SandboxSpec, limits Limits) error {
 		return fmt.Errorf("%w: this runner has no backend %q", ErrInvalidSpec, t.Backend)
 	case t.Network.Mode != runtime.NetworkNone:
 		return fmt.Errorf("%w: pools support network mode %q only", ErrInvalidSpec, runtime.NetworkNone)
-	case r.Pids < minPids:
-		return fmt.Errorf("%w: pids must be >= %d (the agent's own tasks)", ErrInvalidSpec, minPids)
+	case r.Pids < minPids(t.Backend):
+		return fmt.Errorf("%w: pids must be >= %d on backend %q", ErrInvalidSpec, minPids(t.Backend), t.Backend)
 	case r.MemoryBytes > limits.MaxMemoryBytes || r.CPUMillis > limits.MaxCPUMillis || r.Pids > limits.MaxPids || r.DiskBytes > limits.MaxDiskBytes:
 		return fmt.Errorf("%w: template resources exceed the runner's limits", ErrInvalidSpec)
 	}
@@ -292,15 +313,18 @@ func checkTemplate(t runtime.SandboxSpec, limits Limits) error {
 // it.
 func (s Spec) Raw() RawSpec { return s.raw }
 
-func (s Spec) ID() ID                { return s.raw.ID }
-func (s Spec) Name() string          { return s.raw.Name }
-func (s Spec) TenantID() string      { return s.raw.TenantID }
-func (s Spec) AgentID() string       { return s.raw.AgentID }
-func (s Spec) Size() int             { return s.size }
-func (s Spec) MaxSize() int          { return s.maxSize }
-func (s Spec) MaxRuns() int          { return s.maxRuns }
-func (s Spec) MaxRun() time.Duration { return s.maxRun }
-func (s Spec) Reuse() Reuse          { return s.reuse }
+func (s Spec) ID() ID                       { return s.raw.ID }
+func (s Spec) Name() string                 { return s.raw.Name }
+func (s Spec) TenantID() string             { return s.raw.TenantID }
+func (s Spec) AgentID() string              { return s.raw.AgentID }
+func (s Spec) Size() int                    { return s.size }
+func (s Spec) MaxSize() int                 { return s.maxSize }
+func (s Spec) MaxRuns() int                 { return s.maxRuns }
+func (s Spec) MaxAge() time.Duration        { return s.maxAge }
+func (s Spec) MaxRun() time.Duration        { return s.maxRun }
+func (s Spec) BorrowTimeout() time.Duration { return s.borrowTimeout }
+func (s Spec) IdleExpiry() time.Duration    { return s.idleExpiry }
+func (s Spec) Reuse() Reuse                 { return s.reuse }
 
 // MemberTTL is the TTL stamped on every member's record. The pool lends no
 // member past max_age and retires it at check-in, and the runner's fn holds a

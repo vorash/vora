@@ -10,6 +10,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	dto "github.com/prometheus/client_model/go"
 
 	"github.com/vorash/vora/internal/version"
 )
@@ -35,7 +36,90 @@ type Metrics struct {
 	DiskQuotaEnforced     prometheus.Gauge
 	RunnerCapacity        prometheus.Gauge
 	RunnerSandboxes       prometheus.Gauge
+
+	// Pool metrics observed per run. The pool label is "<tenant>/<name>", and
+	// DeletePoolSeries removes a pool's series when it is deleted; start is warm
+	// or cold.
+	PoolRunsTotal     *prometheus.CounterVec
+	PoolRunDuration   *prometheus.HistogramVec
+	PoolStartup       *prometheus.HistogramVec
+	PoolResetDuration *prometheus.HistogramVec
+	// PoolEventsDroppedTotal counts audit events lost because the queue in front
+	// of the audit store was full.
+	PoolEventsDroppedTotal prometheus.Counter
 }
+
+// PoolSample is one pool's state at scrape time, for the metrics that derive
+// from the pool's own books rather than from a run.
+type PoolSample struct {
+	Pool string
+	// NotLoaded is set, and nothing else is, for a pool whose definition is kept
+	// but which this boot refused to load. It names the reason.
+	NotLoaded   string
+	States      map[string]int    // starting, idle, busy, resetting, retiring
+	Retired     map[string]uint64 // by cause
+	Exhausted   uint64
+	StartFailed uint64
+}
+
+var (
+	poolSandboxesDesc   = prometheus.NewDesc("vora_pool_sandboxes", "Pool members by state.", []string{"pool", "state"}, nil)
+	poolRetiredDesc     = prometheus.NewDesc("vora_pool_retired_total", "Pool members destroyed, by cause.", []string{"pool", "cause"}, nil)
+	poolExhaustedDesc   = prometheus.NewDesc("vora_pool_exhausted_total", "Pool runs refused because no member was free within the borrow timeout.", []string{"pool"}, nil)
+	poolStartFailedDesc = prometheus.NewDesc("vora_pool_start_failed_total", "Pool member starts that failed.", []string{"pool"}, nil)
+	poolNotLoadedDesc   = prometheus.NewDesc("vora_pool_not_loaded", "Pools whose definition is kept but which this boot refused to load.", []string{"pool", "reason"}, nil)
+)
+
+// poolCollector reads every pool's books at scrape time, so the gauges and
+// counters below never drift from what the pool reports.
+type poolCollector struct{ source func() []PoolSample }
+
+func (c poolCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- poolSandboxesDesc
+	ch <- poolRetiredDesc
+	ch <- poolExhaustedDesc
+	ch <- poolStartFailedDesc
+	ch <- poolNotLoadedDesc
+}
+
+func (c poolCollector) Collect(ch chan<- prometheus.Metric) {
+	for _, p := range c.source() {
+		if p.NotLoaded != "" {
+			ch <- prometheus.MustNewConstMetric(poolNotLoadedDesc, prometheus.GaugeValue, 1, p.Pool, p.NotLoaded)
+			continue
+		}
+		for state, n := range p.States {
+			ch <- prometheus.MustNewConstMetric(poolSandboxesDesc, prometheus.GaugeValue, float64(n), p.Pool, state)
+		}
+		for cause, n := range p.Retired {
+			ch <- prometheus.MustNewConstMetric(poolRetiredDesc, prometheus.CounterValue, float64(n), p.Pool, cause)
+		}
+		ch <- prometheus.MustNewConstMetric(poolExhaustedDesc, prometheus.CounterValue, float64(p.Exhausted), p.Pool)
+		ch <- prometheus.MustNewConstMetric(poolStartFailedDesc, prometheus.CounterValue, float64(p.StartFailed), p.Pool)
+	}
+}
+
+// RegisterPoolSource exports the pool state metrics from source. Call it once
+// per Metrics.
+func (m *Metrics) RegisterPoolSource(source func() []PoolSample) {
+	if m == nil {
+		return
+	}
+	m.registry.MustRegister(poolCollector{source: source})
+}
+
+// DeletePoolSeries removes a deleted pool's per-run series. The collector's series
+// go on their own, as they exist only while a pool does.
+func (m *Metrics) DeletePoolSeries(pool string) {
+	labels := prometheus.Labels{"pool": pool}
+	m.PoolRunsTotal.DeletePartialMatch(labels)
+	m.PoolRunDuration.DeletePartialMatch(labels)
+	m.PoolStartup.DeletePartialMatch(labels)
+	m.PoolResetDuration.DeletePartialMatch(labels)
+}
+
+// Gather is the registry's Gather, for tests that read the exported values.
+func (m *Metrics) Gather() ([]*dto.MetricFamily, error) { return m.registry.Gather() }
 
 // New creates and registers the metric set.
 func New() *Metrics {
@@ -110,6 +194,29 @@ func New() *Metrics {
 		Name: "vora_runner_sandboxes",
 		Help: "Number of sandboxes managed by this runner.",
 	})
+	m.PoolRunsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vora_pool_runs_total",
+		Help: "Pool runs that reached a sandbox, by start (warm, cold) and exit reason.",
+	}, []string{"pool", "start", "reason"})
+	m.PoolRunDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "vora_pool_run_duration_seconds",
+		Help:    "Pool run duration from exec start to exit, excluding the reset.",
+		Buckets: []float64{0.01, 0.05, 0.1, 0.5, 1, 5, 30, 300},
+	}, []string{"pool", "start"})
+	m.PoolStartup = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "vora_pool_startup_seconds",
+		Help:    "What a pool run waited before its program ran: borrow wait, plus the cold start when cold.",
+		Buckets: []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5},
+	}, []string{"pool", "start"})
+	m.PoolResetDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "vora_pool_reset_duration_seconds",
+		Help:    "Pool member reset duration by result (ok, failed).",
+		Buckets: []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10},
+	}, []string{"pool", "result"})
+	m.PoolEventsDroppedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "vora_pool_events_dropped_total",
+		Help: "Pool audit events dropped because the queue in front of a stalled audit store was full.",
+	})
 
 	reg.MustRegister(
 		m.BuildInfo, m.SandboxCreateTotal, m.SandboxCreateDuration, m.SandboxRunning,
@@ -117,6 +224,8 @@ func New() *Metrics {
 		m.PolicyDeniedTotal, m.NetworkDeniedTotal, m.NetworkDecisionsTotal,
 		m.AuditWriteFailedTotal, m.DiskQuotaUnenforced, m.DiskQuotaEnforced,
 		m.RunnerCapacity, m.RunnerSandboxes,
+		m.PoolRunsTotal, m.PoolRunDuration, m.PoolStartup, m.PoolResetDuration,
+		m.PoolEventsDroppedTotal,
 	)
 	return m
 }

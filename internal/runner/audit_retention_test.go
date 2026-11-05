@@ -202,7 +202,7 @@ func TestExecRecordWriteFailureIsMetered(t *testing.T) {
 	s := testServer(t, runtime.NewRegistry())
 	s.SetAudit(failingExecAudit{Store: s.audit})
 
-	s.recordExec("sbx_x", runtime.ExecRequest{ExecutionID: "exe_x", Command: "true"}, time.Now(), 0, 0, 0, runtime.ReasonExited, runtime.Usage{}, "")
+	s.recordExec("sbx_x", runtime.ExecRequest{ExecutionID: "exe_x", Command: "true"}, time.Now(), 0, 0, 0, runtime.ReasonExited, runtime.Usage{}, "", execOptions{})
 
 	var m dto.Metric
 	if err := s.metrics.AuditWriteFailedTotal.Write(&m); err != nil {

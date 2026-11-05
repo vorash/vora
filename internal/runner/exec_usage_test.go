@@ -38,7 +38,7 @@ func execOnce(t *testing.T, backend *fakeExecBackend) (*v1.ExecExit, *v1.Sandbox
 		rec = execs.GetExecs()[0]
 		return nil
 	}
-	if err := s.runExec(context.Background(), id, b, h, runtime.ExecRequest{Command: "true"}, "", send); err != nil {
+	if _, err := s.runExec(context.Background(), id, b, h, runtime.ExecRequest{Command: "true"}, "", execOptions{}, send); err != nil {
 		t.Fatalf("runExec: %v", err)
 	}
 	if exit == nil {
@@ -125,7 +125,7 @@ func TestExecMeterStopsWhenSendFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	gone := errors.New("client gone")
-	err = s.runExec(context.Background(), id, b, h, runtime.ExecRequest{Command: "true"}, "", func(*v1.ExecChunk) error { return gone })
+	_, err = s.runExec(context.Background(), id, b, h, runtime.ExecRequest{Command: "true"}, "", execOptions{}, func(*v1.ExecChunk) error { return gone })
 	if !errors.Is(err, gone) {
 		t.Fatalf("runExec = %v, want the send error", err)
 	}

@@ -58,7 +58,11 @@ func testServer(t *testing.T, reg *runtime.Registry) *Server {
 	cfg := config.Config{StateDir: t.TempDir()}
 	store := sandbox.NewStore(cfg.SandboxesDir())
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewServer(cfg, store, reg, "run_test", logger)
+	s := NewServer(cfg, store, reg, "run_test", logger)
+	if err := s.LoadPools(); err != nil {
+		t.Fatal(err)
+	}
+	return s
 }
 
 func TestSelectBackendExplicit(t *testing.T) {

@@ -84,6 +84,9 @@ type Config struct {
 	EgressIdleTimeout time.Duration
 	// EgressBrokerPort is the gateway port the credential broker listens on.
 	EgressBrokerPort string
+	// PoolUnsafeReuse is VORA_POOL_UNSAFE_REUSE=allow: this runner may host a
+	// pool that returns members to service without a reset. Default deny.
+	PoolUnsafeReuse bool
 }
 
 // Image mode values for Config.ImagesMode.
@@ -110,6 +113,9 @@ func (c Config) SandboxesDir() string { return filepath.Join(c.StateDir, "sandbo
 
 // SnapshotsDir is the snapshot store root.
 func (c Config) SnapshotsDir() string { return filepath.Join(c.StateDir, "snapshots") }
+
+// PoolsDir holds one record per declared pool.
+func (c Config) PoolsDir() string { return filepath.Join(c.StateDir, "pools") }
 
 // Default returns the configuration for the current user, with environment
 // overrides:
@@ -279,6 +285,14 @@ func Default() (Config, error) {
 			return Config{}, fmt.Errorf("invalid VORA_EGRESS_BROKER_PORT %q (want a port number)", v)
 		}
 		c.EgressBrokerPort = v
+	}
+
+	switch v := os.Getenv("VORA_POOL_UNSAFE_REUSE"); v {
+	case "", "deny":
+	case "allow":
+		c.PoolUnsafeReuse = true
+	default:
+		return Config{}, fmt.Errorf("invalid VORA_POOL_UNSAFE_REUSE %q (want %q or %q)", v, "allow", "deny")
 	}
 
 	if c.DefaultTTL <= 0 {
