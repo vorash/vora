@@ -484,12 +484,16 @@ func (a poolSandboxes) Destroy(ctx context.Context, sandboxID string) error {
 	return a.s.destroy(ctx, sandboxID, "")
 }
 
+// Event records a pool event on the member's trail. Reason repeats kind and
+// detail, because the Postgres audit store has no columns for them until
+// step 17 and would otherwise store an empty row per reset.
 func (a poolSandboxes) Event(sandboxID, kind, detail string) {
 	a.s.events.append(sandbox.Event{
 		SandboxID: sandboxID,
 		Actor:     a.actor,
 		From:      sandbox.StateRunning,
 		To:        sandbox.StateRunning,
+		Reason:    kind + ": " + detail,
 		Kind:      kind,
 		Detail:    detail,
 		RunnerID:  a.s.runnerID,

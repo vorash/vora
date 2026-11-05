@@ -117,6 +117,32 @@ func TestExecThatDoesNotStartIsRetriedBeforeTheClientSeesAnything(t *testing.T) 
 	}
 }
 
+// A member destroyed behind the pool's back (the disk-quota enforcer still
+// acts on records directly) has no handle. The run must not reach the client
+// on it: the pool retires it and retries on another member.
+func TestMemberDestroyedOutsideThePoolIsRetiredOnBorrow(t *testing.T) {
+	h := newWarmHarness(t)
+	p := h.create(poolSpec(1, 2))
+	h.waitIdle(p.GetId(), 1)
+	recs, _ := h.s.store.List()
+	victim := recs[0].ID
+	if err := h.s.destroy(context.Background(), victim, ""); err != nil {
+		t.Fatal(err)
+	}
+	frames, err := h.run(h.ctx(), p.GetId(), 5)
+	if err != nil {
+		t.Fatalf("RunInPool: %v", err)
+	}
+	run := frames[0].GetRun()
+	if got := kinds(frames); got[0] != "run" || run.GetSandboxId() == victim || run.GetWarm() {
+		t.Fatalf("frames = %v, run = %v; want a run frame on a cold member other than the destroyed %s", got, run, victim)
+	}
+	waitFor(t, func() bool {
+		st := h.get(p.GetId()).GetStats()
+		return st.GetIdle() == 1 && st.GetDestroyedTotal() == 1
+	}, "the pool to replace the destroyed member")
+}
+
 func TestFailedResetRetiresTheMember(t *testing.T) {
 	h := newWarmHarness(t)
 	h.backend.set(func(b *poolBackend) {
