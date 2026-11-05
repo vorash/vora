@@ -365,10 +365,12 @@ func (s *Server) RunInPool(req *v1.RunInPoolRequest, stream grpc.ServerStreaming
 	}
 	keyID := req.GetActor().GetKeyId()
 
+	sender := &runSender{stream: stream}
 	var (
 		placement pool.Placement
 		reason    runtime.ExitReason
 		execStart time.Time
+		started   bool
 	)
 	done, err := e.pool.Run(stream.Context(), func(ctx context.Context, pl pool.Placement) error {
 		placement = pl
@@ -376,17 +378,19 @@ func (s *Server) RunInPool(req *v1.RunInPoolRequest, stream grpc.ServerStreaming
 		if err != nil {
 			return fmt.Errorf("%w: %w", pool.ErrNotStarted, err)
 		}
-		started := false
+		hard, cancel := context.WithTimeout(context.Background(), execReq.Timeout+s.execGrace)
+		defer cancel()
+		sender.hard = hard
 		execStart = time.Now()
 		reason, err = s.runExec(ctx, pl.SandboxID, backend, h, execReq, keyID, execOptions{
-			poolID:       string(e.spec.ID()),
-			sandboxRun:   pl.SandboxRun,
-			hardDeadline: execReq.Timeout + s.execGrace,
+			poolID:     string(e.spec.ID()),
+			sandboxRun: pl.SandboxRun,
+			hard:       hard.Done(),
 			beforeFirst: func(executionID string) error {
 				started = true
-				return stream.Send(runFrameToProto(e.spec.ID(), pl, executionID))
+				return sender.send(runFrameToProto(e.spec.ID(), pl, executionID))
 			},
-		}, func(c *v1.ExecChunk) error { return stream.Send(execToRunChunk(c)) })
+		}, func(c *v1.ExecChunk) error { return sender.send(execToRunChunk(c)) })
 		if err != nil && !started {
 			return fmt.Errorf("%w: %w", pool.ErrNotStarted, err)
 		}
@@ -398,7 +402,56 @@ func (s *Server) RunInPool(req *v1.RunInPoolRequest, stream grpc.ServerStreaming
 	if err != nil {
 		return poolStatus(err)
 	}
-	return stream.Send(runDoneToProto(done))
+	return sender.send(runDoneToProto(done))
+}
+
+// errClientStalled ends a run whose client stopped reading.
+var errClientStalled = status.Error(codes.DeadlineExceeded, "client stopped reading the run's output")
+
+// sendGrace is how long a frame may wait for the client once the run's hard
+// deadline has passed: the run is over, and only its trailing frames are left.
+const sendGrace = time.Second
+
+// runSender sends a run's frames without letting a client that stopped reading
+// hold the member. stream.Send blocks on flow control for as long as the client
+// stays connected, so each send runs on its own goroutine and the handler waits
+// only until the hard deadline. A stalled Send returns when the handler does,
+// since gRPC ends the stream then. One goroutine at a time calls send, and a
+// frame goes out only after the one before it returned, so Sends never overlap.
+type runSender struct {
+	stream grpc.ServerStreamingServer[v1.RunChunk]
+	// hard is the current attempt's deadline.
+	hard context.Context
+	// pending is the Send still in flight, if any.
+	pending chan error
+}
+
+func (r *runSender) send(c *v1.RunChunk) error {
+	limit := r.hard
+	if limit == nil || limit.Err() != nil {
+		grace, cancel := context.WithTimeout(context.Background(), sendGrace)
+		defer cancel()
+		limit = grace
+	}
+	if err := r.wait(limit); err != nil {
+		return err
+	}
+	r.pending = make(chan error, 1)
+	go func(done chan<- error) { done <- r.stream.Send(c) }(r.pending)
+	return r.wait(limit)
+}
+
+func (r *runSender) wait(limit context.Context) error {
+	if r.pending == nil {
+		return nil
+	}
+	select {
+	case err := <-r.pending:
+		r.pending = nil
+		return err
+	case <-limit.Done():
+		return errClientStalled
+	}
 }
 
 // observeRun records one run that reached a member.

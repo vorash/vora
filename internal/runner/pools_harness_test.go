@@ -510,3 +510,24 @@ func waitFor(t testing.TB, cond func() bool, format string, args ...any) {
 	}
 	t.Fatalf("timed out waiting for "+format, args...)
 }
+
+// plainSpec is an ordinary sandbox on the fake backend.
+func plainSpec(tenant string) *v1.SandboxSpec {
+	return &v1.SandboxSpec{Image: "img", Backend: "fake", TenantId: tenant,
+		Resources: &v1.ResourceLimits{CpuMillis: 100, MemoryBytes: 1 << 20, Pids: 4},
+		Network:   &v1.NetworkPolicy{Mode: v1.NetworkMode_NETWORK_NONE}}
+}
+
+// startPlain creates and starts an ordinary sandbox and returns its id.
+func (h *poolHarness) startPlain() string {
+	h.t.Helper()
+	created, err := h.client.CreateSandbox(h.ctx(), &v1.CreateSandboxRequest{Spec: plainSpec(h.tenant)})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	id := created.GetSandbox().GetId()
+	if _, err := h.client.StartSandbox(h.ctx(), &v1.StartSandboxRequest{SandboxId: id}); err != nil {
+		h.t.Fatal(err)
+	}
+	return id
+}

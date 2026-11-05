@@ -752,11 +752,12 @@ type execOptions struct {
 	// run boundaries inside a reused sandbox.
 	poolID     string
 	sandboxRun int
-	// hardDeadline, when set, bounds the exec on top of the backend's own
-	// timeout. An exec still open past it is closed with a synthesized
-	// TIMEOUT_EXCEEDED exit, whatever the backend is doing: a process holding
-	// the exec's stdout cannot hold a pool member.
-	hardDeadline time.Duration
+	// hard, when set, closes at the run's hard deadline, on top of the backend's
+	// own timeout. An exec still open past it is closed with a synthesized
+	// TIMEOUT_EXCEEDED exit, whatever the backend is doing: a process holding the
+	// exec's stdout cannot hold a pool member. A send that hard interrupted
+	// returns errClientStalled, and ends the run the same way.
+	hard <-chan struct{}
 	// beforeFirst runs once, after the backend accepted the command and before
 	// anything is forwarded, with the minted execution id. The pool sends its
 	// run frame here. If runExec fails and beforeFirst never ran, the exec did
@@ -781,12 +782,6 @@ func (s *Server) runExec(ctx context.Context, sandboxID string, backend runtime.
 		attribute.String("sandbox.id", sandboxID),
 		attribute.String("vora.exec.command", execReq.Command))
 	defer span.End()
-	var hard <-chan time.Time
-	if opts.hardDeadline > 0 {
-		timer := time.NewTimer(opts.hardDeadline)
-		defer timer.Stop()
-		hard = timer.C
-	}
 	stopMeter := s.meterExec(execCtx, sandboxID, execReq.ExecutionID, backend, h)
 	// Closes the window on paths that never read it, such as a failed send.
 	defer stopMeter()
@@ -795,6 +790,14 @@ func (s *Server) runExec(ctx context.Context, sandboxID string, backend runtime.
 		s.recordExec(sandboxID, execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure, stopMeter(), keyID, opts)
 		s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure)).Inc()
 		return runtime.ReasonRuntimeFailure
+	}
+	// timedOut ends a run past opts.hard. The member's reset kills whatever still
+	// holds the exec; here the run just ends.
+	timedOut := func() (runtime.ExitReason, error) {
+		usage := stopMeter()
+		s.recordExec(sandboxID, execReq, started, stdoutBytes, stderrBytes, timedOutExitCode, runtime.ReasonTimeout, usage, keyID, opts)
+		s.metrics.ExecTotal.WithLabelValues("ok").Inc()
+		return runtime.ReasonTimeout, send(execExitToProto(timedOutExitCode, runtime.ReasonTimeout, usage, execReq.ExecutionID))
 	}
 	es, err := backend.Exec(execCtx, h, execReq)
 	if err != nil {
@@ -809,53 +812,39 @@ func (s *Server) runExec(ctx context.Context, sandboxID string, backend runtime.
 
 	recv, stop := recvAsync(es)
 	defer close(stop)
-	var recorded bool
 	for {
 		var r received
 		select {
 		case r = <-recv:
-		case <-hard:
-			// The backend did not end the exec by its own timeout. The member's
-			// reset kills whatever holds it; here the run just ends.
-			usage := stopMeter()
-			s.recordExec(sandboxID, execReq, started, stdoutBytes, stderrBytes, timedOutExitCode, runtime.ReasonTimeout, usage, keyID, opts)
-			s.metrics.ExecTotal.WithLabelValues("ok").Inc()
-			return runtime.ReasonTimeout, send(execExitToProto(timedOutExitCode, runtime.ReasonTimeout, usage, execReq.ExecutionID))
+		case <-opts.hard:
+			return timedOut()
 		}
 		chunk, err := r.chunk, r.err
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			if !recorded {
-				failed()
-			}
+			failed()
 			return runtime.ReasonRuntimeFailure, status.Errorf(codes.Internal, "exec stream: %v", err)
 		}
 		stdoutBytes += int64(len(chunk.Stdout))
 		stderrBytes += int64(len(chunk.Stderr))
-		out := execChunkToProto(chunk)
-		var reason runtime.ExitReason
-		if chunk.Exit != nil && !recorded {
+		if chunk.Exit != nil {
 			// Persist before observing: the client may destroy the sandbox the
 			// moment it sees the exit chunk (the API closes its response right
 			// after forwarding it), so the record must be on disk first. The exit
 			// chunk is final, so the byte totals are complete here.
 			usage := stopMeter()
-			reason = usage.Reason(chunk.Exit.Reason, chunk.Exit.ExitCode)
+			reason := usage.Reason(chunk.Exit.Reason, chunk.Exit.ExitCode)
 			s.recordExec(sandboxID, execReq, started, stdoutBytes, stderrBytes, chunk.Exit.ExitCode, reason, usage, keyID, opts)
 			s.metrics.ExecTotal.WithLabelValues("ok").Inc()
-			recorded = true
-			out = execExitToProto(chunk.Exit.ExitCode, reason, usage, execReq.ExecutionID)
+			return reason, send(execExitToProto(chunk.Exit.ExitCode, reason, usage, execReq.ExecutionID))
 		}
-		if err := send(out); err != nil {
-			if !recorded {
-				return failed(), err
+		if err := send(execChunkToProto(chunk)); err != nil {
+			if errors.Is(err, errClientStalled) {
+				return timedOut()
 			}
-			return reason, err
-		}
-		if recorded {
-			return reason, nil
+			return failed(), err
 		}
 	}
 
