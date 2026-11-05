@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -138,6 +139,16 @@ func TestVoraInitPauseMode(t *testing.T) {
 	case err := <-exited:
 		t.Fatalf("pause exited early: %v", err)
 	case <-time.After(700 * time.Millisecond):
+	}
+
+	// Pause outlives every run in a gVisor sandbox, so a same-uid workload must
+	// not be able to read or rewrite it. CI cannot run gVisor, so this checks the
+	// flag on the host, where a process with CAP_SYS_PTRACE could read it anyway.
+	if os.Getuid() != 0 {
+		environ := "/proc/" + strconv.Itoa(cmd.Process.Pid) + "/environ"
+		if _, err := os.ReadFile(environ); !errors.Is(err, os.ErrPermission) {
+			t.Errorf("read %s: %v, want a permission error: pause is still dumpable", environ, err)
+		}
 	}
 
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
