@@ -336,7 +336,8 @@ func TestProcSysIsReadOnly(t *testing.T) {
 		out, errOut, code := f.exec(h, "python3", "-c", `
 import errno, os, stat
 checked, writable = 0, []
-for d, _, names in os.walk("/proc/sys"):
+for d, subdirs, names in os.walk("/proc/sys"):
+    writable += [os.path.join(d, s) for s in subdirs if os.access(os.path.join(d, s), os.W_OK)]
     for name in names:
         path = os.path.join(d, name)
         if not stat.S_ISREG(os.lstat(path).st_mode):

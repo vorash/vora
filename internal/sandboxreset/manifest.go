@@ -34,6 +34,9 @@ var (
 	// ErrMountsChanged means the live mount table is not the captured one, so
 	// the listings no longer describe every writable mount.
 	ErrMountsChanged = errors.New("sandboxreset: mount table changed")
+	// ErrUncoveredMount means a writable mount sits under /proc or /sys, where a reset
+	// does not list or restore anything, so it would keep what a run left in it.
+	ErrUncoveredMount = errors.New("sandboxreset: writable mount a reset does not cover")
 	// ErrUnlistedMount means a walk reached a directory on another device that
 	// the mount table does not list.
 	ErrUnlistedMount = errors.New("sandboxreset: unlisted mount boundary")

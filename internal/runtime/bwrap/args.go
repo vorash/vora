@@ -43,6 +43,8 @@ type BuildOptions struct {
 
 const binfmtMisc = "/proc/sys/fs/binfmt_misc"
 
+var pid1Masked = []string{"/proc/1/clear_refs", "/proc/1/task/1/clear_refs", "/proc/1/sched", "/proc/1/task/1/sched"}
+
 // Args builds the bubblewrap argv for a sandbox. It is pure so it can be
 // unit-tested without a running sandbox.
 //
@@ -110,8 +112,15 @@ func Args(opts BuildOptions) ([]string, error) {
 	)
 	// The bind above carries the host's binfmt_misc mount with it, which would show what
 	// the host has registered. The target must already exist: /proc/sys is read-only now.
+	// Writable, this tmpfs would keep what a run left in it, since a reset leaves /proc alone.
 	if info, err := os.Stat(binfmtMisc); err == nil && info.IsDir() {
-		argv = append(argv, "--tmpfs", binfmtMisc)
+		argv = append(argv, "--tmpfs", binfmtMisc, "--remount-ro", binfmtMisc)
+	}
+	// PID 1 is the same uid as a workload and outlives every run, and a write to these
+	// resets its page and scheduler statistics for a later run to read. No program needs
+	// PID 1's, and a mask costs a reset nothing where comparing them would read its memory.
+	for _, target := range pid1Masked {
+		argv = append(argv, "--ro-bind", "/dev/null", target)
 	}
 	argv = append(argv,
 		"--dev", "/dev",
