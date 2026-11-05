@@ -9,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -275,6 +276,53 @@ func TestCaptureStopsWhenTheContextIsCancelled(t *testing.T) {
 	if _, err := Capture(ctx, strings.NewReader(s.info())); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
+}
+
+// A terminal only reaches this open if one is swapped in after the lstat. A
+// session leader with no terminal would then take it as its controlling terminal,
+// and the agent would get its signals.
+func TestHashingASwappedInTerminalDoesNotMakeItTheControllingTerminal(t *testing.T) {
+	inChild(t, func() {
+		if _, err := unix.Setsid(); err != nil {
+			t.Fatal(err)
+		}
+		master, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			t.Skipf("no pty to test with: %v", err)
+		}
+		defer func() { _ = unix.Close(master) }()
+		if err := unix.IoctlSetPointerInt(master, unix.TIOCSPTLCK, 0); err != nil {
+			t.Fatal(err)
+		}
+		n, err := unix.IoctlGetInt(master, unix.TIOCGPTN)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pts, err := unix.Open("/dev/pts", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = unix.Close(pts) }()
+
+		s := newSandbox(t)
+		s.write("mnt/file", "x")
+		var regular unix.Stat_t
+		if err := unix.Lstat(s.path("mnt/file"), &regular); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := hashFileAt(pts, strconv.Itoa(n), &regular); err == nil {
+			t.Fatal("hashed a terminal as if it were the file the lstat saw")
+		}
+
+		fd, err := unix.Open("/dev/tty", unix.O_RDONLY|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
+		if err == nil {
+			_ = unix.Close(fd)
+			t.Fatal("the session gained a controlling terminal")
+		}
+		if !errors.Is(err, unix.ENXIO) {
+			t.Fatalf("open /dev/tty: %v, want ENXIO for a session with no terminal", err)
+		}
+	})
 }
 
 func TestManifestSurvivesJSON(t *testing.T) {

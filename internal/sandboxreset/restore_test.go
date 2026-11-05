@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -678,11 +677,9 @@ func TestManifestValidationRefusesWhatRestoreCouldBeMisledBy(t *testing.T) {
 }
 
 // vora-init runs with its seccomp filter on and PR_SET_DUMPABLE 0, which hands
-// its /proc/self files to root. Both apply to the whole process, so this runs in
-// a child of the test binary.
+// its /proc/self files to root.
 func TestRestoreWorksUnderTheAgentsRestrictions(t *testing.T) {
-	const marker = "agent-restrictions-applied"
-	if os.Getenv("VORA_SANDBOXRESET_TEST_CHILD") == "1" {
+	inChild(t, func() {
 		if err := seccomp.Install(); err != nil {
 			t.Fatalf("seccomp: %v", err)
 		}
@@ -710,16 +707,5 @@ func TestRestoreWorksUnderTheAgentsRestrictions(t *testing.T) {
 		}
 		s.assertNames("mnt", seededNames...)
 		s.assertCanary()
-		fmt.Println(marker)
-		return
-	}
-	cmd := exec.Command(os.Args[0], "-test.run=^TestRestoreWorksUnderTheAgentsRestrictions$")
-	cmd.Env = append(os.Environ(), "VORA_SANDBOXRESET_TEST_CHILD=1")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("restricted child failed: %v\n%s", err, out)
-	}
-	if !strings.Contains(string(out), marker) {
-		t.Fatalf("restricted child did not run its restore:\n%s", out)
-	}
+	})
 }

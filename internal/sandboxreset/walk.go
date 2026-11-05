@@ -238,7 +238,7 @@ func readlinkAt(dirfd int, name string) (string, error) {
 
 func hashFileAt(parent int, name string, st *unix.Stat_t) (string, error) {
 	// O_NONBLOCK so a FIFO swapped in cannot hang the walk before the check below.
-	fd, err := unix.Openat(parent, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	fd, err := unix.Openat(parent, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return "", err
 	}

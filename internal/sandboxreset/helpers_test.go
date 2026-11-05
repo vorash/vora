@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -54,7 +57,7 @@ type sandbox struct {
 func newSandbox(t *testing.T) *sandbox {
 	t.Helper()
 	// Mount paths have to be canonical, as mountinfo's are.
-	base, err := filepath.EvalSymlinks(t.TempDir())
+	base, err := filepath.EvalSymlinks(tempBase(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,4 +219,77 @@ func rels(l MountListing) []string {
 		out = append(out, e.Rel)
 	}
 	return out
+}
+
+const (
+	childTestEnv = "VORA_SANDBOXRESET_TEST_CHILD"
+	childBaseEnv = "VORA_SANDBOXRESET_TEST_BASE"
+	childDone    = "sandboxreset-child-body-finished"
+)
+
+// inChild runs body in a fresh copy of the test binary, for what applies to a
+// whole process: a seccomp filter, a descriptor limit, a new session. Nothing
+// after the inChild call runs in the child's test, and the parent fails unless
+// body ran to its end.
+func inChild(t *testing.T, body func()) {
+	t.Helper()
+	if os.Getenv(childTestEnv) == t.Name() {
+		body()
+		fmt.Println(childDone)
+		return
+	}
+	parts := strings.Split(t.Name(), "/")
+	for i, p := range parts {
+		parts[i] = "^" + regexp.QuoteMeta(p) + "$"
+	}
+	cmd := exec.Command(os.Args[0], "-test.v", "-test.run="+strings.Join(parts, "/"))
+	cmd.Env = append(os.Environ(), childTestEnv+"="+t.Name(), childBaseEnv+"="+t.TempDir())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("child failed: %v\n%s", err, out)
+	}
+	if strings.Contains(string(out), "--- SKIP") {
+		t.Skipf("child skipped:\n%s", out)
+	}
+	if !strings.Contains(string(out), childDone) {
+		t.Fatalf("child did not run to its end:\n%s", out)
+	}
+}
+
+// tempBase gives a child a directory its parent removes, because a child may
+// have broken the syscalls its own t.TempDir cleanup needs.
+func tempBase(t *testing.T) string {
+	t.Helper()
+	parent := os.Getenv(childBaseEnv)
+	if parent == "" {
+		return t.TempDir()
+	}
+	base, err := os.MkdirTemp(parent, "child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base
+}
+
+// failSyscalls makes the kernel refuse each syscall with its errno from now on,
+// in every thread. It is how a test reaches a real error path that no file this
+// user can make would produce. Call it only inside inChild.
+func failSyscalls(t *testing.T, errnos map[uint32]unix.Errno) {
+	t.Helper()
+	filter := []unix.SockFilter{{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 0}}
+	for nr, errno := range errnos {
+		filter = append(filter,
+			unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 0, Jf: 1, K: nr},
+			unix.SockFilter{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ERRNO | uint32(errno)},
+		)
+	}
+	filter = append(filter, unix.SockFilter{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ALLOW})
+	prog := unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]}
+	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, errno := unix.Syscall(unix.SYS_SECCOMP, unix.SECCOMP_SET_MODE_FILTER,
+		unix.SECCOMP_FILTER_FLAG_TSYNC, uintptr(unsafe.Pointer(&prog))); errno != 0 {
+		t.Fatal(errno)
+	}
 }
