@@ -557,7 +557,7 @@ func TestBwrapOOMManySmall(t *testing.T) {
 	if exit == nil {
 		// A stream can end on this test's own deadline as well as on the agent's
 		// death, and only the second breaks the promise under test.
-		if err := execEcho(backend, h); err != nil {
+		if err := execEcho(backend, h, 2*time.Minute); err != nil {
 			t.Fatalf("hog exec stream ended without an exit chunk (%v) and the sandbox no longer answers (%v): the OOM took the agent down", recvErr, err)
 		}
 		t.Fatalf("hog exec stream ended without an exit chunk (%v) but the sandbox still answers execs: the hogs outran this test's deadline", recvErr)
@@ -570,10 +570,64 @@ func TestBwrapOOMManySmall(t *testing.T) {
 	}
 }
 
+// leakedHogs leaves processes behind that hold the sandbox at its memory limit
+// for a minute after the exec that started them has returned, the way a
+// workload that leaked would: 36 of a thirty-second of the limit each, so a few
+// more than fit. $1 is the limit in KiB.
+const leakedHogs = `
+setsid sh -c '
+i=0
+while [ "$i" -lt 36 ]; do
+	dd if=/dev/zero bs=$(( $1 / 32 ))k count=1 2>/dev/null &
+	i=$((i + 1))
+done | sleep 60 >/dev/null
+' sh "$1" >/dev/null 2>&1 </dev/null &
+echo started
+`
+
+// An exec started while leaked workload processes hold the sandbox at its
+// memory limit must not get the agent OOM-killed. The fork stalls in reclaim
+// until the kernel has killed a hog, and the kernel picks that victim by
+// oom_score_adj and size: the agent, at its baseline score, must not be it.
+func TestBwrapOOMExecUnderPressure(t *testing.T) {
+	const limit = 64 << 20
+	backend, h := newBwrapSandboxWith(t, nil, runtime.ResourceLimits{CPUMillis: 1000, MemoryBytes: limit, Pids: 512})
+
+	if got := strings.TrimSpace(run(t, backend, h, "/bin/sh", []string{"-c", leakedHogs, "sh", strconv.Itoa(limit >> 10)})); got != "started" {
+		t.Fatalf("leak exec = %q, want started", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for {
+		st, err := backend.Stats(ctx, h)
+		if err != nil {
+			t.Fatalf("Stats: %v", err)
+		}
+		if st.OOMKills >= 1 {
+			t.Logf("pressure: %+v", st)
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("the hogs never reached the limit: stats %+v", st)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// The kernel can keep a sandbox at its limit unscheduled for a minute or
+	// more, so a deadline here is a starved agent, not a dead one. Only a
+	// stream the agent dropped proves it died.
+	if err := execEcho(backend, h, 4*time.Minute); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("exec under memory pressure: %v: the agent is starved or dead", err)
+		}
+		t.Fatalf("exec under memory pressure: %v: the agent died with the hogs", err)
+	}
+}
+
 // execEcho runs echo in the sandbox on a deadline of its own and reports whether
 // the exec ran to its exit chunk.
-func execEcho(backend *bwrap.Backend, h runtime.Handle) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+func execEcho(backend *bwrap.Backend, h runtime.Handle, deadline time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 	stream, err := backend.Exec(ctx, h, runtime.ExecRequest{
 		ExecutionID: "exe_echo",
@@ -588,6 +642,9 @@ func execEcho(backend *bwrap.Backend, h runtime.Handle) error {
 	for {
 		chunk, err := stream.Recv()
 		if err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("no exit chunk within %s: %w", deadline, ctx.Err())
+			}
 			return fmt.Errorf("stream ended without an exit chunk: %w", err)
 		}
 		if chunk.Exit != nil {
