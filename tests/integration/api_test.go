@@ -42,7 +42,7 @@ func TestAPIControlPlane(t *testing.T) {
 	rootfs := imageRootfs(t, "base")
 	realImages := filepath.Dir(filepath.Dir(filepath.Dir(rootfs))) // .../images
 
-	stateDir := t.TempDir()
+	stateDir := stateTempDir(t)
 	if err := os.Symlink(realImages, filepath.Join(stateDir, "images")); err != nil {
 		t.Fatalf("symlink images: %v", err)
 	}
