@@ -40,7 +40,7 @@
     "sandbox"
   ],
   "dependencies": {
-    "@vorash/sdk": "^0.6.0"
+    "@vorash/sdk": "^0.7.0"
   },
   "peerDependencies": {
     "@openai/agents": "^0.18.0",
