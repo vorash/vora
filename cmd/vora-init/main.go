@@ -82,10 +82,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	refuse, err := refuseSandboxPeers(os.Getpid(), readInitComm)
+	if err != nil {
+		logger.Warn("refusing sandbox peers without knowing PID 1's name", "error", err)
+	}
 	lis, err := listenAgent(*socket)
 	if err != nil {
 		logger.Error("listen", "socket", *socket, "error", err)
 		os.Exit(1)
+	}
+	if refuse {
+		lis = newHostOnlyListener(lis, logger)
 	}
 
 	grpcServer := grpc.NewServer(
@@ -103,7 +110,7 @@ func main() {
 		}
 	}()
 
-	logger.Info("vora-init ready", "pid", os.Getpid(), "socket", *socket, "grace", grace.String())
+	logger.Info("vora-init ready", "pid", os.Getpid(), "socket", *socket, "grace", grace.String(), "refuse_sandbox_peers", refuse)
 	<-a.done
 
 	logger.Info("vora-init shutting down")
@@ -192,9 +199,6 @@ type agent struct {
 	// must never reap a child the Go runtime is waiting on, and against Capture
 	// and Reset.
 	execMu sync.Mutex
-	// resets counts finished resets, so a call queued on execMu can tell that one
-	// ran while it waited.
-	resets atomic.Uint64
 	// resetter is nil until main sets it, so a test's agent cannot reach a real one.
 	resetter *resetter
 
@@ -297,7 +301,6 @@ func reapChildren() {
 // Exec implements agentproto.Handler.
 func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.ExecChunk) error) error {
 	a.touch()
-	arrived := a.resets.Load()
 	command := req.GetCommand()
 	if command == "" {
 		return fmt.Errorf("empty command")
@@ -322,12 +325,8 @@ func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.Exe
 	// cannot reap this child.
 	a.execMu.Lock()
 	defer a.execMu.Unlock()
-	// A workload can call this over the control socket and die with the call queued
-	// here. Starting it after a reset would put a process into the next run that the
-	// reset's proof never saw.
-	if a.resets.Load() != arrived {
-		return errors.New("exec was queued across a reset")
-	}
+	// A caller that went away while queued here has nobody left to report to, and
+	// its command could outlive it.
 	if err := ctx.Err(); err != nil {
 		return err
 	}

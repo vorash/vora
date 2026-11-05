@@ -1,0 +1,105 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"time"
+
+	"github.com/vorash/vora/internal/agentproto"
+)
+
+// refusalLogInterval limits the log to one line per interval, however fast a workload
+// connects. A count stands in for the rest, so a workload that spins on connect or
+// forks through PIDs grows neither the log nor a per-PID table.
+const refusalLogInterval = time.Minute
+
+// refuseSandboxPeers decides whether the agent must refuse connections from inside its
+// own PID namespace. It is a decision for startup: nothing in a sandbox runs yet, so
+// nothing can influence it.
+//
+// An unreadable PID 1 name returns true along with the error. PID 2 is already proof of
+// a PID namespace (see isBwrapAgent), so turning the check off could open a real sandbox
+// to its own workload, while keeping it on can only lock out a host-run agent's client,
+// which fails on its first call.
+func refuseSandboxPeers(pid int, readInitComm func() (string, error)) (bool, error) {
+	if pid != agentPID {
+		return false, nil
+	}
+	comm, err := readInitComm()
+	if err != nil {
+		return true, err
+	}
+	return isBwrapAgent(pid, comm), nil
+}
+
+// hostOnlyListener passes on only connections made from outside the agent's PID
+// namespace. SO_PEERCRED translates the connecting task's PID into the namespace of the
+// reader, and a task the namespace cannot see reads 0. The runner is in an ancestor
+// namespace, and anything in the sandbox, nested namespaces included, reads nonzero.
+//
+// It works in Accept rather than a gRPC handshake because gRPC starts a goroutine per
+// accepted connection before it would run one. Here a refused connection costs one
+// accept, one getsockopt and one close, in the Serve loop's own goroutine, and gRPC
+// never sees it. So it reads no frame and cannot touch the watchdog's clock.
+type hostOnlyListener struct {
+	net.Listener
+	peerPID  func(net.Conn) (int32, error)
+	refusals *refusalLog
+}
+
+func newHostOnlyListener(lis net.Listener, logger *slog.Logger) *hostOnlyListener {
+	return &hostOnlyListener{
+		Listener: lis,
+		peerPID:  peerPID,
+		refusals: &refusalLog{logger: logger, now: time.Now},
+	}
+}
+
+// Accept returns the next connection from outside the namespace. A refusal must not
+// surface as an error: gRPC's Serve would return, and main ends the sandbox on that.
+func (l *hostOnlyListener) Accept() (net.Conn, error) {
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		pid, err := l.peerPID(conn)
+		if err == nil && pid == 0 {
+			return conn, nil
+		}
+		_ = conn.Close()
+		l.refusals.note(pid, err)
+	}
+}
+
+func peerPID(conn net.Conn) (int32, error) {
+	unixConn, ok := conn.(*net.UnixConn)
+	if !ok {
+		return 0, errors.New("not a unix connection")
+	}
+	cred, err := agentproto.PeerCred(unixConn)
+	if err != nil {
+		return 0, fmt.Errorf("read peer credentials: %w", err)
+	}
+	return cred.Pid, nil
+}
+
+// refusalLog is only used from the Serve loop's goroutine, so it takes no lock.
+type refusalLog struct {
+	logger  *slog.Logger
+	now     func() time.Time
+	last    time.Time
+	refused int
+}
+
+func (r *refusalLog) note(pid int32, err error) {
+	r.refused++
+	now := r.now()
+	if !r.last.IsZero() && now.Sub(r.last) < refusalLogInterval {
+		return
+	}
+	r.logger.Warn("refused an agent connection from inside the sandbox", "pid", pid, "error", err, "refused_since_last_line", r.refused)
+	r.last, r.refused = now, 0
+}

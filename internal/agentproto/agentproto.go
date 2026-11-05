@@ -113,6 +113,22 @@ func checkManifestSize(manifest []byte) error {
 	return nil
 }
 
+// PeerCred returns the credentials of the process on the other end of conn. On a
+// connection a listener accepted, that is the task that connected, with its PID as seen
+// from this process's PID namespace, or 0 if this namespace cannot see it.
+func PeerCred(conn *net.UnixConn) (*unix.Ucred, error) {
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return nil, err
+	}
+	var peer *unix.Ucred
+	var peerErr error
+	if err := raw.Control(func(fd uintptr) { peer, peerErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED) }); err != nil {
+		return nil, err
+	}
+	return peer, peerErr
+}
+
 // Client is a gRPC client for the in-sandbox agent.
 type Client struct {
 	conn *grpc.ClientConn
@@ -144,18 +160,9 @@ func Dial(socket string) (*Client, error) {
 		if !os.SameFile(before, after) {
 			return fail(fmt.Errorf("agentproto: control socket changed during dial"))
 		}
-		unixConn := connection.(*net.UnixConn)
-		raw, err := unixConn.SyscallConn()
+		peer, err := PeerCred(connection.(*net.UnixConn))
 		if err != nil {
 			return fail(err)
-		}
-		var peer *unix.Ucred
-		var peerErr error
-		if err := raw.Control(func(fd uintptr) { peer, peerErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED) }); err != nil {
-			return fail(err)
-		}
-		if peerErr != nil {
-			return fail(peerErr)
 		}
 		mu.Lock()
 		defer mu.Unlock()
