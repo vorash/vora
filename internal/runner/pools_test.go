@@ -432,6 +432,35 @@ func TestPoolsAreScopedToTheirTenant(t *testing.T) {
 	}
 }
 
+// vora-api records a pool's route before it asks for the pool, so the id it chose
+// is the only handle on a pool whose create answer was lost.
+func TestCreatePoolUsesTheCallersID(t *testing.T) {
+	h := newWarmHarness(t)
+	id := ulid.NewPool()
+	p, err := h.client.CreatePool(h.ctx(), &v1.CreatePoolRequest{Spec: poolSpec(0, 1), PoolId: id})
+	if err != nil || p.GetId() != id {
+		t.Fatalf("CreatePool = %v, %v, want id %s", p, err, id)
+	}
+	if got := h.get(id); got.GetId() != id {
+		t.Fatalf("GetPool by the caller's id = %v", got)
+	}
+
+	// A repeat under another id finds the pool by name and reports its real id.
+	again, err := h.client.CreatePool(h.ctx(), &v1.CreatePoolRequest{Spec: poolSpec(0, 1), PoolId: ulid.NewPool()})
+	if err != nil || again.GetId() != id {
+		t.Fatalf("repeat = %v, %v, want the existing pool %s", again, err, id)
+	}
+
+	other := poolSpec(0, 1)
+	other.Name = "other"
+	if _, err := h.client.CreatePool(h.ctx(), &v1.CreatePoolRequest{Spec: other, PoolId: id}); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("a second pool under a taken id: %v, want AlreadyExists", err)
+	}
+	if _, err := h.client.CreatePool(h.ctx(), &v1.CreatePoolRequest{Spec: other, PoolId: "../../etc"}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("a pool id that is not one, which names the pool's record path: %v, want InvalidArgument", err)
+	}
+}
+
 func TestCreatePoolIsIdempotentByNameAndReservesCapacity(t *testing.T) {
 	h := newWarmHarness(t)
 	h.s.cfg.MaxSandboxesPerTenant = 4

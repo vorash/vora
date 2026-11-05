@@ -424,7 +424,13 @@ func (s *Server) CreatePool(ctx context.Context, req *v1.CreatePoolRequest) (*v1
 			return nil, errPoolNotLoaded{n}
 		}
 	}
-	raw.ID = pool.ID(ulid.NewPool())
+	raw.ID = pool.ID(req.GetPoolId())
+	switch {
+	case raw.ID == "":
+		raw.ID = pool.ID(ulid.NewPool())
+	case !validPoolID(string(raw.ID)):
+		return nil, status.Error(codes.InvalidArgument, "invalid pool_id")
+	}
 	if raw.Template.Resources.DiskBytes == 0 {
 		raw.Template.Resources.DiskBytes = s.cfg.DefaultDiskBytes
 		if raw.Template.Resources.DiskBytes <= 0 {
@@ -450,6 +456,9 @@ func (s *Server) CreatePool(ctx context.Context, req *v1.CreatePoolRequest) (*v1
 		default:
 			return nil, status.Errorf(codes.AlreadyExists, "pool %s exists with a different spec", spec.Name())
 		}
+	}
+	if s.pools.get(spec.ID()) != nil || s.pools.notLoadedPool(spec.ID()) != nil {
+		return nil, status.Errorf(codes.AlreadyExists, "pool id %s is taken", spec.ID())
 	}
 	if err := s.checkPoolCapacity(spec); err != nil {
 		return nil, err

@@ -201,22 +201,17 @@ type Spec struct {
 // idle_expiry 1 h, reuse reset.
 func Parse(raw RawSpec, limits Limits) (Spec, error) {
 	limits = limits.withDefaults()
+	size, maxSize := sizes(raw.Size, raw.MaxSize)
 	s := Spec{
 		raw:           raw,
-		size:          defaultSize,
+		size:          size,
+		maxSize:       maxSize,
 		maxRuns:       raw.MaxRuns,
 		maxAge:        raw.MaxAge,
 		maxRun:        raw.MaxRun,
 		borrowTimeout: raw.BorrowTimeout,
 		idleExpiry:    raw.IdleExpiry,
 		reuse:         raw.Reuse,
-	}
-	if raw.Size != nil {
-		s.size = *raw.Size
-	}
-	s.maxSize = max(s.size, 1)
-	if raw.MaxSize != nil {
-		s.maxSize = *raw.MaxSize
 	}
 	if s.maxRuns == 0 {
 		s.maxRuns = defaultMaxRuns
@@ -283,6 +278,26 @@ func Parse(raw RawSpec, limits Limits) (Spec, error) {
 		return Spec{}, fmt.Errorf("%w: %q", ErrNotReusable, raw.Template.Backend)
 	}
 	return s, nil
+}
+
+func sizes(rawSize, rawMaxSize *int) (size, maxSize int) {
+	size = defaultSize
+	if rawSize != nil {
+		size = *rawSize
+	}
+	maxSize = max(size, 1)
+	if rawMaxSize != nil {
+		maxSize = *rawMaxSize
+	}
+	return size, maxSize
+}
+
+// MaxSizeOf is the max_size a declare with these raw fields gets once defaults
+// are filled in, so vora-api can reserve capacity before the runner parses the
+// spec.
+func MaxSizeOf(rawSize, rawMaxSize *int) int {
+	_, maxSize := sizes(rawSize, rawMaxSize)
+	return maxSize
 }
 
 func checkTemplate(t runtime.SandboxSpec, limits Limits) error {

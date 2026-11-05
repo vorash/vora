@@ -6,11 +6,14 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
 )
@@ -39,9 +42,24 @@ func dialOptions(creds credentials.TransportCredentials) []grpc.DialOption {
 	}
 }
 
+// remoteDialOptions are for vora-api's connections to a runner, which outlive any
+// one request. gRPC's default reconnect backoff grows to 2 minutes, so a runner
+// back from a long outage would go on failing that long; 5 s keeps the wait short.
+// Keepalive ends a stream on a host that vanished without closing it. A runner's
+// gRPC server treats pings closer than 5 minutes as abuse and drops the
+// connection, so the interval has to stay above that.
+func remoteDialOptions(creds credentials.TransportCredentials) []grpc.DialOption {
+	retry := backoff.DefaultConfig
+	retry.MaxDelay = 5 * time.Second
+	return append(dialOptions(creds),
+		grpc.WithConnectParams(grpc.ConnectParams{Backoff: retry, MinConnectTimeout: 20 * time.Second}),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 6 * time.Minute, Timeout: 20 * time.Second}),
+	)
+}
+
 // DialAddress connects to a runner's TCP gRPC endpoint (used by vora-api).
 func DialAddress(addr string) (*Client, error) {
-	conn, err := grpc.NewClient(addr, dialOptions(insecure.NewCredentials())...)
+	conn, err := grpc.NewClient(addr, remoteDialOptions(insecure.NewCredentials())...)
 	if err != nil {
 		return nil, fmt.Errorf("client: dial %s: %w", addr, err)
 	}
@@ -50,7 +68,7 @@ func DialAddress(addr string) (*Client, error) {
 
 // DialAddressTLS connects to a runner's TCP gRPC endpoint over TLS.
 func DialAddressTLS(addr string, cfg *tls.Config) (*Client, error) {
-	conn, err := grpc.NewClient(addr, dialOptions(credentials.NewTLS(cfg))...)
+	conn, err := grpc.NewClient(addr, remoteDialOptions(credentials.NewTLS(cfg))...)
 	if err != nil {
 		return nil, fmt.Errorf("client: dial %s: %w", addr, err)
 	}
@@ -65,7 +83,7 @@ type TunnelDialer interface {
 // DialTunnel connects to a runner over a reverse tunnel instead of the network,
 // so a runner behind NAT can still be driven by the control plane.
 func DialTunnel(runnerID string, t TunnelDialer) (*Client, error) {
-	opts := append(dialOptions(insecure.NewCredentials()),
+	opts := append(remoteDialOptions(insecure.NewCredentials()),
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 			return t.Dial(ctx, runnerID)
 		}))
@@ -78,6 +96,40 @@ func DialTunnel(runnerID string, t TunnelDialer) (*Client, error) {
 
 // Close closes the connection.
 func (c *Client) Close() error { return c.conn.Close() }
+
+// CreatePool declares a pool. It is idempotent by (tenant, name).
+func (c *Client) CreatePool(ctx context.Context, req *v1.CreatePoolRequest) (*v1.Pool, error) {
+	return c.stub.CreatePool(ctx, req)
+}
+
+// GetPool returns a pool's spec, state and live stats.
+func (c *Client) GetPool(ctx context.Context, poolID, tenantID string) (*v1.Pool, error) {
+	return c.stub.GetPool(ctx, &v1.GetPoolRequest{PoolId: poolID, TenantId: tenantID})
+}
+
+// DeletePool drains a pool and reports whether it is gone.
+func (c *Client) DeletePool(ctx context.Context, req *v1.DeletePoolRequest) (bool, error) {
+	resp, err := c.stub.DeletePool(ctx, req)
+	if err != nil {
+		return false, err
+	}
+	return resp.GetDrained(), nil
+}
+
+// RunInPool runs one command on a pool member and streams its frames.
+func (c *Client) RunInPool(ctx context.Context, req *v1.RunInPoolRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.RunChunk], error) {
+	return c.stub.RunInPool(ctx, req, opts...)
+}
+
+// PoolExecs returns a member's execution trail. The runner refuses a sandbox
+// whose record does not name poolID.
+func (c *Client) PoolExecs(ctx context.Context, sandboxID, poolID string) ([]*v1.SandboxExec, error) {
+	resp, err := c.stub.GetSandboxExecs(ctx, &v1.GetSandboxExecsRequest{SandboxId: sandboxID, PoolId: poolID})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetExecs(), nil
+}
 
 // CreateSandbox requests a new sandbox.
 func (c *Client) CreateSandbox(ctx context.Context, spec *v1.SandboxSpec) (*v1.Sandbox, error) {

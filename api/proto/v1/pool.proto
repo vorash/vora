@@ -57,6 +57,7 @@ message PoolStats {
 }
 
 enum PoolState {
+  // In an API listing, a pool whose runner did not answer.
   POOL_STATE_UNSPECIFIED = 0;
   POOL_ACTIVE = 1;
   POOL_DRAINING = 2;
@@ -67,7 +68,7 @@ enum PoolState {
 }
 
 message Pool {
-  string id = 1;        // pool_<ulid>, minted by the runner
+  string id = 1;        // pool_<ulid>
   PoolSpec spec = 2;    // with defaults filled in
   PoolState state = 3;
   string runner_id = 4;
@@ -78,9 +79,19 @@ message Pool {
   string not_loaded_reason = 7;
 }
 
+// ListPoolsResponse is GET /v1/pools.
+message ListPoolsResponse {
+  repeated Pool pools = 1;
+}
+
 message CreatePoolRequest {
   PoolSpec spec = 1;
   Actor actor = 2;
+  // pool_id is the id for a new pool, chosen by the caller so it can record
+  // the pool before asking for it: a create whose answer is lost is then still
+  // addressable. Empty means the runner mints one. Ignored when a pool of this
+  // (tenant, name) already exists: the answer carries that pool's id.
+  string pool_id = 3;
 }
 
 // tenant_id is required on every pool lookup. A pool owned by another tenant

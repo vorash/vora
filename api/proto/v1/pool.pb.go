@@ -76,6 +76,7 @@ func (PoolReuse) EnumDescriptor() ([]byte, []int) {
 type PoolState int32
 
 const (
+	// In an API listing, a pool whose runner did not answer.
 	PoolState_POOL_STATE_UNSPECIFIED PoolState = 0
 	PoolState_POOL_ACTIVE            PoolState = 1
 	PoolState_POOL_DRAINING          PoolState = 2
@@ -475,7 +476,7 @@ func (x *PoolStats) GetDormant() bool {
 
 type Pool struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
-	Id              string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`     // pool_<ulid>, minted by the runner
+	Id              string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`     // pool_<ulid>
 	Spec            *PoolSpec              `protobuf:"bytes,2,opt,name=spec,proto3" json:"spec,omitempty"` // with defaults filled in
 	State           PoolState              `protobuf:"varint,3,opt,name=state,proto3,enum=vora.v1.PoolState" json:"state,omitempty"`
 	RunnerId        string                 `protobuf:"bytes,4,opt,name=runner_id,json=runnerId,proto3" json:"runner_id,omitempty"`
@@ -567,17 +568,67 @@ func (x *Pool) GetNotLoadedReason() string {
 	return ""
 }
 
-type CreatePoolRequest struct {
+// ListPoolsResponse is GET /v1/pools.
+type ListPoolsResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Spec          *PoolSpec              `protobuf:"bytes,1,opt,name=spec,proto3" json:"spec,omitempty"`
-	Actor         *Actor                 `protobuf:"bytes,2,opt,name=actor,proto3" json:"actor,omitempty"`
+	Pools         []*Pool                `protobuf:"bytes,1,rep,name=pools,proto3" json:"pools,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListPoolsResponse) Reset() {
+	*x = ListPoolsResponse{}
+	mi := &file_api_proto_v1_pool_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListPoolsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListPoolsResponse) ProtoMessage() {}
+
+func (x *ListPoolsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_proto_v1_pool_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListPoolsResponse.ProtoReflect.Descriptor instead.
+func (*ListPoolsResponse) Descriptor() ([]byte, []int) {
+	return file_api_proto_v1_pool_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *ListPoolsResponse) GetPools() []*Pool {
+	if x != nil {
+		return x.Pools
+	}
+	return nil
+}
+
+type CreatePoolRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Spec  *PoolSpec              `protobuf:"bytes,1,opt,name=spec,proto3" json:"spec,omitempty"`
+	Actor *Actor                 `protobuf:"bytes,2,opt,name=actor,proto3" json:"actor,omitempty"`
+	// pool_id is the id for a new pool, chosen by the caller so it can record
+	// the pool before asking for it: a create whose answer is lost is then still
+	// addressable. Empty means the runner mints one. Ignored when a pool of this
+	// (tenant, name) already exists: the answer carries that pool's id.
+	PoolId        string `protobuf:"bytes,3,opt,name=pool_id,json=poolId,proto3" json:"pool_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CreatePoolRequest) Reset() {
 	*x = CreatePoolRequest{}
-	mi := &file_api_proto_v1_pool_proto_msgTypes[3]
+	mi := &file_api_proto_v1_pool_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -589,7 +640,7 @@ func (x *CreatePoolRequest) String() string {
 func (*CreatePoolRequest) ProtoMessage() {}
 
 func (x *CreatePoolRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_v1_pool_proto_msgTypes[3]
+	mi := &file_api_proto_v1_pool_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -602,7 +653,7 @@ func (x *CreatePoolRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreatePoolRequest.ProtoReflect.Descriptor instead.
 func (*CreatePoolRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_v1_pool_proto_rawDescGZIP(), []int{3}
+	return file_api_proto_v1_pool_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *CreatePoolRequest) GetSpec() *PoolSpec {
@@ -619,6 +670,13 @@ func (x *CreatePoolRequest) GetActor() *Actor {
 	return nil
 }
 
+func (x *CreatePoolRequest) GetPoolId() string {
+	if x != nil {
+		return x.PoolId
+	}
+	return ""
+}
+
 // tenant_id is required on every pool lookup. A pool owned by another tenant
 // is NOT_FOUND, as if it did not exist.
 type GetPoolRequest struct {
@@ -631,7 +689,7 @@ type GetPoolRequest struct {
 
 func (x *GetPoolRequest) Reset() {
 	*x = GetPoolRequest{}
-	mi := &file_api_proto_v1_pool_proto_msgTypes[4]
+	mi := &file_api_proto_v1_pool_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -643,7 +701,7 @@ func (x *GetPoolRequest) String() string {
 func (*GetPoolRequest) ProtoMessage() {}
 
 func (x *GetPoolRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_v1_pool_proto_msgTypes[4]
+	mi := &file_api_proto_v1_pool_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -656,7 +714,7 @@ func (x *GetPoolRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPoolRequest.ProtoReflect.Descriptor instead.
 func (*GetPoolRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_v1_pool_proto_rawDescGZIP(), []int{4}
+	return file_api_proto_v1_pool_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *GetPoolRequest) GetPoolId() string {
@@ -688,7 +746,7 @@ type DeletePoolRequest struct {
 
 func (x *DeletePoolRequest) Reset() {
 	*x = DeletePoolRequest{}
-	mi := &file_api_proto_v1_pool_proto_msgTypes[5]
+	mi := &file_api_proto_v1_pool_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -700,7 +758,7 @@ func (x *DeletePoolRequest) String() string {
 func (*DeletePoolRequest) ProtoMessage() {}
 
 func (x *DeletePoolRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_v1_pool_proto_msgTypes[5]
+	mi := &file_api_proto_v1_pool_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -713,7 +771,7 @@ func (x *DeletePoolRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeletePoolRequest.ProtoReflect.Descriptor instead.
 func (*DeletePoolRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_v1_pool_proto_rawDescGZIP(), []int{5}
+	return file_api_proto_v1_pool_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *DeletePoolRequest) GetPoolId() string {
@@ -755,7 +813,7 @@ type DeletePoolResponse struct {
 
 func (x *DeletePoolResponse) Reset() {
 	*x = DeletePoolResponse{}
-	mi := &file_api_proto_v1_pool_proto_msgTypes[6]
+	mi := &file_api_proto_v1_pool_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -767,7 +825,7 @@ func (x *DeletePoolResponse) String() string {
 func (*DeletePoolResponse) ProtoMessage() {}
 
 func (x *DeletePoolResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_v1_pool_proto_msgTypes[6]
+	mi := &file_api_proto_v1_pool_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -780,7 +838,7 @@ func (x *DeletePoolResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeletePoolResponse.ProtoReflect.Descriptor instead.
 func (*DeletePoolResponse) Descriptor() ([]byte, []int) {
-	return file_api_proto_v1_pool_proto_rawDescGZIP(), []int{6}
+	return file_api_proto_v1_pool_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *DeletePoolResponse) GetDrained() bool {
@@ -802,7 +860,7 @@ type RunInPoolRequest struct {
 
 func (x *RunInPoolRequest) Reset() {
 	*x = RunInPoolRequest{}
-	mi := &file_api_proto_v1_pool_proto_msgTypes[7]
+	mi := &file_api_proto_v1_pool_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -814,7 +872,7 @@ func (x *RunInPoolRequest) String() string {
 func (*RunInPoolRequest) ProtoMessage() {}
 
 func (x *RunInPoolRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_v1_pool_proto_msgTypes[7]
+	mi := &file_api_proto_v1_pool_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -827,7 +885,7 @@ func (x *RunInPoolRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunInPoolRequest.ProtoReflect.Descriptor instead.
 func (*RunInPoolRequest) Descriptor() ([]byte, []int) {
-	return file_api_proto_v1_pool_proto_rawDescGZIP(), []int{7}
+	return file_api_proto_v1_pool_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *RunInPoolRequest) GetPoolId() string {
@@ -876,7 +934,7 @@ type PoolRun struct {
 
 func (x *PoolRun) Reset() {
 	*x = PoolRun{}
-	mi := &file_api_proto_v1_pool_proto_msgTypes[8]
+	mi := &file_api_proto_v1_pool_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -888,7 +946,7 @@ func (x *PoolRun) String() string {
 func (*PoolRun) ProtoMessage() {}
 
 func (x *PoolRun) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_v1_pool_proto_msgTypes[8]
+	mi := &file_api_proto_v1_pool_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -901,7 +959,7 @@ func (x *PoolRun) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PoolRun.ProtoReflect.Descriptor instead.
 func (*PoolRun) Descriptor() ([]byte, []int) {
-	return file_api_proto_v1_pool_proto_rawDescGZIP(), []int{8}
+	return file_api_proto_v1_pool_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *PoolRun) GetPoolId() string {
@@ -973,7 +1031,7 @@ type PoolRunDone struct {
 
 func (x *PoolRunDone) Reset() {
 	*x = PoolRunDone{}
-	mi := &file_api_proto_v1_pool_proto_msgTypes[9]
+	mi := &file_api_proto_v1_pool_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -985,7 +1043,7 @@ func (x *PoolRunDone) String() string {
 func (*PoolRunDone) ProtoMessage() {}
 
 func (x *PoolRunDone) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_v1_pool_proto_msgTypes[9]
+	mi := &file_api_proto_v1_pool_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -998,7 +1056,7 @@ func (x *PoolRunDone) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PoolRunDone.ProtoReflect.Descriptor instead.
 func (*PoolRunDone) Descriptor() ([]byte, []int) {
-	return file_api_proto_v1_pool_proto_rawDescGZIP(), []int{9}
+	return file_api_proto_v1_pool_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *PoolRunDone) GetOutcome() PoolResetOutcome {
@@ -1041,7 +1099,7 @@ type RunChunk struct {
 
 func (x *RunChunk) Reset() {
 	*x = RunChunk{}
-	mi := &file_api_proto_v1_pool_proto_msgTypes[10]
+	mi := &file_api_proto_v1_pool_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1053,7 +1111,7 @@ func (x *RunChunk) String() string {
 func (*RunChunk) ProtoMessage() {}
 
 func (x *RunChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_api_proto_v1_pool_proto_msgTypes[10]
+	mi := &file_api_proto_v1_pool_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1066,7 +1124,7 @@ func (x *RunChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunChunk.ProtoReflect.Descriptor instead.
 func (*RunChunk) Descriptor() ([]byte, []int) {
-	return file_api_proto_v1_pool_proto_rawDescGZIP(), []int{10}
+	return file_api_proto_v1_pool_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *RunChunk) GetPayload() isRunChunk_Payload {
@@ -1205,10 +1263,13 @@ const file_api_proto_v1_pool_proto_rawDesc = "" +
 	"\trunner_id\x18\x04 \x01(\tR\brunnerId\x12(\n" +
 	"\x05stats\x18\x05 \x01(\v2\x12.vora.v1.PoolStatsR\x05stats\x12+\n" +
 	"\x12created_at_unix_ms\x18\x06 \x01(\x03R\x0fcreatedAtUnixMs\x12*\n" +
-	"\x11not_loaded_reason\x18\a \x01(\tR\x0fnotLoadedReason\"`\n" +
+	"\x11not_loaded_reason\x18\a \x01(\tR\x0fnotLoadedReason\"8\n" +
+	"\x11ListPoolsResponse\x12#\n" +
+	"\x05pools\x18\x01 \x03(\v2\r.vora.v1.PoolR\x05pools\"y\n" +
 	"\x11CreatePoolRequest\x12%\n" +
 	"\x04spec\x18\x01 \x01(\v2\x11.vora.v1.PoolSpecR\x04spec\x12$\n" +
-	"\x05actor\x18\x02 \x01(\v2\x0e.vora.v1.ActorR\x05actor\"F\n" +
+	"\x05actor\x18\x02 \x01(\v2\x0e.vora.v1.ActorR\x05actor\x12\x17\n" +
+	"\apool_id\x18\x03 \x01(\tR\x06poolId\"F\n" +
 	"\x0eGetPoolRequest\x12\x17\n" +
 	"\apool_id\x18\x01 \x01(\tR\x06poolId\x12\x1b\n" +
 	"\ttenant_id\x18\x02 \x01(\tR\btenantId\"\x88\x01\n" +
@@ -1276,7 +1337,7 @@ func file_api_proto_v1_pool_proto_rawDescGZIP() []byte {
 }
 
 var file_api_proto_v1_pool_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_api_proto_v1_pool_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_api_proto_v1_pool_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_api_proto_v1_pool_proto_goTypes = []any{
 	(PoolReuse)(0),             // 0: vora.v1.PoolReuse
 	(PoolState)(0),             // 1: vora.v1.PoolState
@@ -1284,40 +1345,42 @@ var file_api_proto_v1_pool_proto_goTypes = []any{
 	(*PoolSpec)(nil),           // 3: vora.v1.PoolSpec
 	(*PoolStats)(nil),          // 4: vora.v1.PoolStats
 	(*Pool)(nil),               // 5: vora.v1.Pool
-	(*CreatePoolRequest)(nil),  // 6: vora.v1.CreatePoolRequest
-	(*GetPoolRequest)(nil),     // 7: vora.v1.GetPoolRequest
-	(*DeletePoolRequest)(nil),  // 8: vora.v1.DeletePoolRequest
-	(*DeletePoolResponse)(nil), // 9: vora.v1.DeletePoolResponse
-	(*RunInPoolRequest)(nil),   // 10: vora.v1.RunInPoolRequest
-	(*PoolRun)(nil),            // 11: vora.v1.PoolRun
-	(*PoolRunDone)(nil),        // 12: vora.v1.PoolRunDone
-	(*RunChunk)(nil),           // 13: vora.v1.RunChunk
-	(*SandboxSpec)(nil),        // 14: vora.v1.SandboxSpec
-	(*Actor)(nil),              // 15: vora.v1.Actor
-	(*ExecRequest)(nil),        // 16: vora.v1.ExecRequest
-	(*ExecExit)(nil),           // 17: vora.v1.ExecExit
+	(*ListPoolsResponse)(nil),  // 6: vora.v1.ListPoolsResponse
+	(*CreatePoolRequest)(nil),  // 7: vora.v1.CreatePoolRequest
+	(*GetPoolRequest)(nil),     // 8: vora.v1.GetPoolRequest
+	(*DeletePoolRequest)(nil),  // 9: vora.v1.DeletePoolRequest
+	(*DeletePoolResponse)(nil), // 10: vora.v1.DeletePoolResponse
+	(*RunInPoolRequest)(nil),   // 11: vora.v1.RunInPoolRequest
+	(*PoolRun)(nil),            // 12: vora.v1.PoolRun
+	(*PoolRunDone)(nil),        // 13: vora.v1.PoolRunDone
+	(*RunChunk)(nil),           // 14: vora.v1.RunChunk
+	(*SandboxSpec)(nil),        // 15: vora.v1.SandboxSpec
+	(*Actor)(nil),              // 16: vora.v1.Actor
+	(*ExecRequest)(nil),        // 17: vora.v1.ExecRequest
+	(*ExecExit)(nil),           // 18: vora.v1.ExecExit
 }
 var file_api_proto_v1_pool_proto_depIdxs = []int32{
-	14, // 0: vora.v1.PoolSpec.sandbox:type_name -> vora.v1.SandboxSpec
+	15, // 0: vora.v1.PoolSpec.sandbox:type_name -> vora.v1.SandboxSpec
 	0,  // 1: vora.v1.PoolSpec.reuse:type_name -> vora.v1.PoolReuse
 	3,  // 2: vora.v1.Pool.spec:type_name -> vora.v1.PoolSpec
 	1,  // 3: vora.v1.Pool.state:type_name -> vora.v1.PoolState
 	4,  // 4: vora.v1.Pool.stats:type_name -> vora.v1.PoolStats
-	3,  // 5: vora.v1.CreatePoolRequest.spec:type_name -> vora.v1.PoolSpec
-	15, // 6: vora.v1.CreatePoolRequest.actor:type_name -> vora.v1.Actor
-	15, // 7: vora.v1.DeletePoolRequest.actor:type_name -> vora.v1.Actor
-	16, // 8: vora.v1.RunInPoolRequest.exec:type_name -> vora.v1.ExecRequest
-	15, // 9: vora.v1.RunInPoolRequest.actor:type_name -> vora.v1.Actor
-	0,  // 10: vora.v1.PoolRun.reuse:type_name -> vora.v1.PoolReuse
-	2,  // 11: vora.v1.PoolRunDone.outcome:type_name -> vora.v1.PoolResetOutcome
-	11, // 12: vora.v1.RunChunk.run:type_name -> vora.v1.PoolRun
-	17, // 13: vora.v1.RunChunk.exit:type_name -> vora.v1.ExecExit
-	12, // 14: vora.v1.RunChunk.run_done:type_name -> vora.v1.PoolRunDone
-	15, // [15:15] is the sub-list for method output_type
-	15, // [15:15] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	5,  // 5: vora.v1.ListPoolsResponse.pools:type_name -> vora.v1.Pool
+	3,  // 6: vora.v1.CreatePoolRequest.spec:type_name -> vora.v1.PoolSpec
+	16, // 7: vora.v1.CreatePoolRequest.actor:type_name -> vora.v1.Actor
+	16, // 8: vora.v1.DeletePoolRequest.actor:type_name -> vora.v1.Actor
+	17, // 9: vora.v1.RunInPoolRequest.exec:type_name -> vora.v1.ExecRequest
+	16, // 10: vora.v1.RunInPoolRequest.actor:type_name -> vora.v1.Actor
+	0,  // 11: vora.v1.PoolRun.reuse:type_name -> vora.v1.PoolReuse
+	2,  // 12: vora.v1.PoolRunDone.outcome:type_name -> vora.v1.PoolResetOutcome
+	12, // 13: vora.v1.RunChunk.run:type_name -> vora.v1.PoolRun
+	18, // 14: vora.v1.RunChunk.exit:type_name -> vora.v1.ExecExit
+	13, // 15: vora.v1.RunChunk.run_done:type_name -> vora.v1.PoolRunDone
+	16, // [16:16] is the sub-list for method output_type
+	16, // [16:16] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_api_proto_v1_pool_proto_init() }
@@ -1327,7 +1390,7 @@ func file_api_proto_v1_pool_proto_init() {
 	}
 	file_api_proto_v1_common_proto_init()
 	file_api_proto_v1_pool_proto_msgTypes[0].OneofWrappers = []any{}
-	file_api_proto_v1_pool_proto_msgTypes[10].OneofWrappers = []any{
+	file_api_proto_v1_pool_proto_msgTypes[11].OneofWrappers = []any{
 		(*RunChunk_Run)(nil),
 		(*RunChunk_Stdout)(nil),
 		(*RunChunk_Stderr)(nil),
@@ -1340,7 +1403,7 @@ func file_api_proto_v1_pool_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_proto_v1_pool_proto_rawDesc), len(file_api_proto_v1_pool_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   11,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
