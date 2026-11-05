@@ -333,8 +333,9 @@ type resetReport struct {
 // runHelper runs a helper mode. It installs no seccomp filter because it starts no
 // process that could inherit one, and it needs no spare threads because no workload
 // exists to use up the pids limit. Under gVisor it is root with no filter, so it stays
-// non-dumpable in case the host's kill missed something. One P keeps its thread count
-// from scaling with the host's cores, since those threads count against the limit too.
+// non-dumpable in case the host's kill missed something. One P only keeps the walk small.
+// It does nothing for pids: the helper's threads are guest tasks, and under gVisor the limit
+// counts the Sentry's host threads.
 func runHelper(mode string) int {
 	goruntime.GOMAXPROCS(1)
 	if err := setNonDumpable(); err != nil {
