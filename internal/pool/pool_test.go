@@ -511,6 +511,7 @@ func TestCheckInAfterCloseLeavesTheMemberToTheRunner(t *testing.T) {
 	if done := receive(t, finished, "the run to check in after Close"); done.Cause != RetireDrain {
 		t.Fatalf("done %+v, want retired by drain", done)
 	}
+	h.pool.Close() // waits for any destroy that check-in wrongly started
 	if _, destroyed := h.fake.counts(); destroyed != 0 {
 		t.Fatalf("destroyed %d after Close, which must not start destroys", destroyed)
 	}
