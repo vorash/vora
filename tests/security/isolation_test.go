@@ -319,6 +319,56 @@ func TestReplacedControlSocketFailsClosed(t *testing.T) {
 	})
 }
 
+// TestProcSysIsReadOnly asserts a workload cannot open a sysctl for writing.
+//
+// Why it matters: kernel.cad_pid is listed with the PID namespace's sysctls and so looks
+// owned by the sandbox, but it acts on the host's value. On kernel 7.0 a workload with no
+// capabilities redirected the host's Ctrl-Alt-Del to itself. The IPC and PID namespace
+// sysctls are writable the same way, and a warm pool's next run could read them back.
+//
+// It only opens files and never writes, so a failure here leaves the host unchanged.
+func TestProcSysIsReadOnly(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, f *fixture) {
+		if _, ok := f.backend.(*bwrap.Backend); !ok {
+			t.Skip("gVisor's /proc/sys is the Sentry's own, and writes never reach the host")
+		}
+		h := f.create("sbx_proc_sys", limits(128, 64))
+		out, errOut, code := f.exec(h, "python3", "-c", `
+import errno, os, stat
+checked, writable = 0, []
+for d, _, names in os.walk("/proc/sys"):
+    for name in names:
+        path = os.path.join(d, name)
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            continue
+        checked += 1
+        try:
+            os.close(os.open(path, os.O_WRONLY))
+            writable.append(path)
+        except OSError as e:
+            if e.errno not in (errno.EROFS, errno.EACCES, errno.EPERM):
+                raise
+print("checked", checked)
+print("writable", writable)
+print("msgmax", open("/proc/sys/kernel/msgmax").read().strip())
+`)
+		if code != 0 {
+			t.Fatalf("exit %d:\n%s%s", code, out, errOut)
+		}
+		t.Log(out)
+		if !strings.Contains(out, "writable []") {
+			t.Fatalf("a workload can open sysctls for writing:\n%s", out)
+		}
+		if strings.Contains(out, "checked 0") {
+			t.Fatal("/proc/sys is empty, so this proved nothing")
+		}
+		// Hiding /proc/sys would pass the check above and break programs that read it.
+		if !strings.Contains(out, "msgmax ") {
+			t.Fatalf("a sysctl cannot be read:\n%s", out)
+		}
+	})
+}
+
 // TestVoraInitTamper asserts a workload cannot replace or change the agent
 // binary, from inside or as seen from the host.
 //
