@@ -94,7 +94,8 @@ func Args(opts BuildOptions) ([]string, error) {
 		"--bind", opts.WorkspaceDir, "/workspace",
 		"--bind", opts.HomeDir, "/root",
 		"--bind", opts.IPCDir, SocketDirInside,
-		// Must follow the directory bind, which would otherwise cover it.
+		// Must follow the directory bind: its target only exists once /vora is
+		// bound, and the other way round the sandbox does not start.
 		"--ro-bind", filepath.Join(opts.IPCDir, "vora-init"), InitInside,
 		"--tmpfs", "/tmp",
 		"--proc", "/proc",
