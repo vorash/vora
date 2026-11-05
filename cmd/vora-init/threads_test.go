@@ -36,8 +36,13 @@ func TestMain(m *testing.M) {
 // is what scales the scheduler, so the caller sets GOMAXPROCS to stand in for one.
 func startAgentProcess(t *testing.T, gomaxprocs int) (*exec.Cmd, *agentproto.Client) {
 	t.Helper()
+	return startAgentProcessWithGrace(t, gomaxprocs, "1m")
+}
+
+func startAgentProcessWithGrace(t *testing.T, gomaxprocs int, grace string) (*exec.Cmd, *agentproto.Client) {
+	t.Helper()
 	socket := filepath.Join(t.TempDir(), "control.sock")
-	cmd := exec.Command(os.Args[0], "-socket", socket, "-grace", "1m")
+	cmd := exec.Command(os.Args[0], "-socket", socket, "-grace", grace)
 	cmd.Env = []string{runAgentEnv + "=1", "GOMAXPROCS=" + strconv.Itoa(gomaxprocs)}
 	var agentErr bytes.Buffer
 	cmd.Stderr = &agentErr

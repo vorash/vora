@@ -50,7 +50,7 @@ func TestGvisorBackendLifecycle(t *testing.T) {
 		t.Skipf("gvisor backend unavailable: %v", err)
 	}
 
-	id := "sbx_gv_" + strings.ReplaceAll(time.Now().UTC().Format("150405.000000000"), ".", "")
+	id := ulid.NewSandbox()
 	ws := workspace.NewManager(cfg.SandboxesDir())
 	wsp := ws.Paths(id)
 	wsp.RootfsDir = rootfs
@@ -120,7 +120,7 @@ func TestGvisorVoraReadOnly(t *testing.T) {
 		t.Skipf("gvisor backend unavailable: %v", err)
 	}
 
-	id := "sbx_gv_ro_" + strings.ReplaceAll(time.Now().UTC().Format("150405.000000000"), ".", "")
+	id := ulid.NewSandbox()
 	ws := workspace.NewManager(cfg.SandboxesDir())
 	wsp := ws.Paths(id)
 	wsp.RootfsDir = rootfs
@@ -283,7 +283,7 @@ func TestGvisorShellLessImage(t *testing.T) {
 	}
 	buildHello(t, filepath.Join(rootfs, "hello"))
 
-	id := "sbx_gv_shellless_" + strings.ReplaceAll(time.Now().UTC().Format("150405.000000000"), ".", "")
+	id := ulid.NewSandbox()
 	ws := workspace.NewManager(cfg.SandboxesDir())
 	wsp := ws.Paths(id)
 	wsp.RootfsDir = rootfs
@@ -368,7 +368,7 @@ func TestGvisorRestrictedEgress(t *testing.T) {
 		return nil
 	})
 
-	id := "sbx_gv_egress_" + strings.ReplaceAll(time.Now().UTC().Format("150405.000000000"), ".", "")
+	id := ulid.NewSandbox()
 	ws := workspace.NewManager(cfg.SandboxesDir())
 	wsp := ws.Paths(id)
 	wsp.RootfsDir = rootfs
