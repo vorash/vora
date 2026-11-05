@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -342,13 +343,14 @@ libc = ctypes.CDLL(None)
 if libc.vfork() == 0:
     libc.sleep(300)
     libc._exit(0)
-' </dev/null >/dev/null 2>&1 &
-sleep 0.5`)
-	states := m.exec(t, `for p in /proc/[0-9]*; do awk '{print $1, $2, $3}' "$p/stat" 2>/dev/null; done`)
+' </dev/null >/dev/null 2>&1 &`)
+	// Without a python3 in D this proves nothing, so waitFor fails the test.
+	var states string
+	waitFor(t, 30*time.Second, func() bool {
+		states = m.exec(t, `for p in /proc/[0-9]*; do awk '{print $1, $2, $3}' "$p/stat" 2>/dev/null; done`)
+		return strings.Contains(states, "(python3) D")
+	})
 	t.Logf("before the reset:\n%s", states)
-	if !strings.Contains(states, "(python3) D") {
-		t.Fatal("no python3 in an uninterruptible wait, so this proves nothing")
-	}
 	start := time.Now()
 	report := m.mustReset(t)
 	t.Logf("reset in %v: %+v", time.Since(start), report)
@@ -357,6 +359,47 @@ sleep 0.5`)
 	}
 	if got := processes(t, m.backend, m.h); !slices.Equal(got, bwrapInitPIDs) {
 		t.Fatalf("the run sees %v, want %v", got, bwrapInitPIDs)
+	}
+}
+
+// A runner that dies between the freeze and the thaw leaves the sandbox frozen,
+// and in network none nothing else ends it: the outer bwrap's parent is systemd,
+// and the agent's watchdog cannot tick. A new runner has no handle and goes through
+// Reap, which is what reconciling at startup does. It does not hang on the freeze:
+// bwrap catches no signals, so systemd's SIGTERM is fatal and a fatal signal wakes
+// a frozen task, and bwrap's PID 1 takes the whole PID namespace with it.
+func TestBwrapReusableReapsAFrozenSandbox(t *testing.T) {
+	m := newMember(t)
+	m.exec(t, `setsid python3 -c '
+import signal, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+time.sleep(300)
+' </dev/null >/dev/null 2>&1 &
+setsid sh -c 'while :; do :; done' </dev/null >/dev/null 2>&1 &`)
+	if err := cgroup.Freeze(context.Background(), m.dir); err != nil {
+		t.Fatalf("Freeze: %v", err)
+	}
+	cgroups, err := cgroup.New(config.Config{SystemdMode: config.SystemdUser})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := bwrap.New(config.Config{StateDir: stateTempDir(t), SystemdMode: config.SystemdUser}, cgroups, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = restarted.Close() })
+	start := time.Now()
+	if err := restarted.Reap(context.Background(), m.h.ID()); err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	took := time.Since(start)
+	t.Logf("reap of a frozen sandbox took %v", took)
+	if _, err := cgroup.Procs(m.dir); !errors.Is(err, cgroup.ErrNotFound) {
+		t.Fatalf("the cgroup outlived the reap (%v)", err)
+	}
+	// systemd gives up on a stop after 90 s, and only then uses SIGKILL.
+	if took > 10*time.Second {
+		t.Fatalf("Reap of a frozen sandbox took %v", took)
 	}
 }
 
@@ -437,35 +480,40 @@ func TestBwrapReusableNetworkModes(t *testing.T) {
 	backend.EnableNetns(subtree, network.NewManager(stateDir, network.ManagerConfig{}, logger), func(egress.Event) error { return nil })
 	wsManager := workspace.NewManager(cfg.SandboxesDir())
 
+	start := func(t *testing.T, mode runtime.NetworkMode) *member {
+		t.Helper()
+		id := ulid.NewSandbox()
+		ws := wsManager.Paths(id)
+		ws.RootfsDir = rootfs
+		if _, err := wsManager.Create(ws); err != nil {
+			t.Fatalf("workspace: %v", err)
+		}
+		t.Cleanup(func() { _ = wsManager.Destroy(id) })
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		h, err := backend.Create(ctx, runtime.SandboxSpec{
+			ID: id, TenantID: "tenant-a", Image: "base",
+			Resources: runtime.ResourceLimits{CPUMillis: 1000, MemoryBytes: 256 << 20, Pids: 64},
+			Network:   runtime.NetworkPolicy{Mode: mode},
+			TTL:       time.Minute, Workspace: ws, DenyIPC: true,
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		t.Cleanup(func() { _ = backend.Destroy(context.Background(), h) })
+		if err := backend.Start(ctx, h); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		group, err := subtree.Attach(ctx, id)
+		if err != nil {
+			t.Fatalf("Attach: %v", err)
+		}
+		return prepareMember(t, backend, h, ws, group.Path())
+	}
+
 	for _, mode := range []runtime.NetworkMode{runtime.NetworkRestricted, runtime.NetworkFull, runtime.NetworkPrivate} {
 		t.Run(string(mode), func(t *testing.T) {
-			id := ulid.NewSandbox()
-			ws := wsManager.Paths(id)
-			ws.RootfsDir = rootfs
-			if _, err := wsManager.Create(ws); err != nil {
-				t.Fatalf("workspace: %v", err)
-			}
-			t.Cleanup(func() { _ = wsManager.Destroy(id) })
-			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			defer cancel()
-			h, err := backend.Create(ctx, runtime.SandboxSpec{
-				ID: id, TenantID: "tenant-a", Image: "base",
-				Resources: runtime.ResourceLimits{CPUMillis: 1000, MemoryBytes: 256 << 20, Pids: 64},
-				Network:   runtime.NetworkPolicy{Mode: mode},
-				TTL:       time.Minute, Workspace: ws, DenyIPC: true,
-			})
-			if err != nil {
-				t.Fatalf("Create: %v", err)
-			}
-			t.Cleanup(func() { _ = backend.Destroy(context.Background(), h) })
-			if err := backend.Start(ctx, h); err != nil {
-				t.Fatalf("Start: %v", err)
-			}
-			group, err := subtree.Attach(ctx, id)
-			if err != nil {
-				t.Fatalf("Attach: %v", err)
-			}
-			m := prepareMember(t, backend, h, ws, group.Path())
+			m := start(t, mode)
 			baseline := m.procs(t)
 			m.exec(t, `setsid sleep 300 </dev/null >/dev/null 2>&1 & echo run > /tmp/planted`)
 			report := m.mustReset(t)
@@ -481,6 +529,41 @@ func TestBwrapReusableNetworkModes(t *testing.T) {
 			testLeakMatrix(t, m.leakSandbox())
 		})
 	}
+
+	// Here the cgroup outlives its processes, because the runner made it, so a dead
+	// sandbox leaves an empty cgroup and not a missing one.
+	t.Run("a dead baseline fails at once", func(t *testing.T) {
+		m := start(t, runtime.NetworkPrivate)
+		m.exec(t, "setsid sh -c 'sleep 0.2; kill -KILL 2' </dev/null >/dev/null 2>&1 &")
+		waitFor(t, 5*time.Second, func() bool { return len(m.procs(t)) == 0 })
+		began := time.Now()
+		_, err := m.reset(context.Background())
+		took := time.Since(began)
+		t.Logf("reset of a dead sandbox failed in %v: %v", took, err)
+		if !errors.Is(err, runtime.ErrUnproven) {
+			t.Fatalf("Reset = %v, want ErrUnproven", err)
+		}
+		if took > time.Second {
+			t.Fatalf("Reset took %v to notice its baseline was gone", took)
+		}
+	})
+
+	// A runner that dies while this is frozen takes the outer bwrap with it through
+	// --die-with-parent, whose SIGKILL a frozen task obeys. No thaw has to happen.
+	t.Run("a frozen sandbox dies with its outer bwrap", func(t *testing.T) {
+		m := start(t, runtime.NetworkPrivate)
+		m.exec(t, `setsid sleep 300 </dev/null >/dev/null 2>&1 &`)
+		if err := cgroup.Freeze(context.Background(), m.dir); err != nil {
+			t.Fatalf("Freeze: %v", err)
+		}
+		outer := m.procs(t)[0]
+		began := time.Now()
+		if err := syscall.Kill(outer, syscall.SIGKILL); err != nil {
+			t.Fatalf("kill the outer bwrap %d: %v", outer, err)
+		}
+		waitFor(t, 5*time.Second, func() bool { return len(m.procs(t)) == 0 })
+		t.Logf("frozen sandbox gone %v after its outer bwrap was killed", time.Since(began))
+	})
 }
 
 // measuring gates the long runs below behind VORA_MEASURE, which CI does not set.
