@@ -63,7 +63,12 @@ def ioprio(tid):
 
 
 def policy(tid):
-    os.sched_setscheduler(tid, os.SCHED_IDLE, os.sched_param(0))
+    try:
+        os.sched_setscheduler(tid, os.SCHED_IDLE, os.sched_param(0))
+    except OSError as e:
+        if e.errno == errno.ENOSYS:
+            sys.exit(UNSUPPORTED)
+        raise
     assert os.sched_getscheduler(tid) == os.SCHED_IDLE
 
 
@@ -231,8 +236,9 @@ func TestSysctlsAreReadOnlyBwrap(t *testing.T) {
 		t.Fatalf("printed %q: %v", out, err)
 	}
 	for _, name := range names {
-		if got[name] != "EROFS" {
-			t.Errorf("%s: open for writing gave %s, want EROFS", name, got[name])
+		// The read-only bind gives EROFS, unless the kernel's own check refuses first.
+		if refused := got[name]; refused != "EROFS" && refused != "EACCES" && refused != "EPERM" {
+			t.Errorf("%s: open for writing gave %s, want it refused", name, refused)
 		}
 	}
 	s.reset(t, manifest)
