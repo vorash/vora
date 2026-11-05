@@ -53,6 +53,8 @@ func main() {
 		return
 	}
 
+	fixThreads()
+
 	socket := flag.String("socket", "/run/vora/control.sock", "control socket path inside the sandbox")
 	grace := flag.Duration("grace", 20*time.Second, "exit if the runner has not contacted us for this long")
 	flag.Parse()

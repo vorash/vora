@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	goruntime "runtime"
 	"strings"
+	"sync"
 )
 
 // workloadOOMScoreAdj makes every workload process the OOM killer's first
@@ -61,4 +63,39 @@ func (o *oomScore) startWorkload(cmd *exec.Cmd) (startErr, scoreErr error) {
 		scoreErr = fmt.Errorf("restore oom_score_adj: %w", err)
 	}
 	return startErr, scoreErr
+}
+
+// spareThreads is how many threads fixThreads starts. The agent needs one running
+// and one each for what can block at once: the signal loop, an exec's wait or fork,
+// and a write to its log. The rest is margin, because running out is fatal.
+const spareThreads = 5
+
+// fixThreads gives the agent every thread it will need before any workload exists.
+// Each thread counts against the sandbox's pids limit, and once a workload has used
+// that limit up, a Go program that needs another one crashes with "fatal error:
+// newosproc", which ends the sandbox. Go keeps idle threads, so starting them now
+// means the agent has no reason to ask again.
+//
+// One P keeps the number needed small and independent of the host's core count. The
+// agent only moves bytes and runs one exec at a time, so it costs nothing.
+//
+// A goroutine that locks its thread and then blocks holds that thread, so the next
+// goroutine needs a new one. This counts threads without waiting on the scheduler's
+// timing.
+func fixThreads() {
+	goruntime.GOMAXPROCS(1)
+
+	var locked sync.WaitGroup
+	release := make(chan struct{})
+	locked.Add(spareThreads)
+	for range spareThreads {
+		go func() {
+			goruntime.LockOSThread()
+			defer goruntime.UnlockOSThread()
+			locked.Done()
+			<-release
+		}()
+	}
+	locked.Wait()
+	close(release)
 }
