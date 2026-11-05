@@ -178,6 +178,11 @@ func TestPoolDeclareRefusesWhatTheKeyMayNotSay(t *testing.T) {
 	if got := fr.creates[0].GetSpec().GetAgentId(); got != "agent-1" {
 		t.Fatalf("an agent-bound key declared for agent %q", got)
 	}
+	// Names are per tenant, so another agent's key cannot take this one over.
+	otherAgent := mintKey(t, s, "tenant-a", "agent-2", ScopeSandbox)
+	if got := call(t, http.MethodPut, ts.URL+"/v1/pools/bound", otherAgent, poolBody(1, 1)); got.code != http.StatusConflict {
+		t.Fatalf("another agent redeclaring the name = %d %s, want 409", got.code, got.body)
+	}
 }
 
 // Every route a tenant can name a pool on, with the body a client would send.
@@ -224,8 +229,7 @@ func TestPoolInAnotherTenantIsIndistinguishableFromNone(t *testing.T) {
 			}
 		}
 		// Naming the owner on the query string gets a tenant key nothing.
-		sep := "?"
-		if got := call(t, route.method, ts.URL+route.path+sep+"tenant_id=tenant-a", stranger, route.body); got != want {
+		if got := call(t, route.method, ts.URL+route.path+"?tenant_id=tenant-a", stranger, route.body); got != want {
 			t.Errorf("%s %s?tenant_id=tenant-a = %v, but on no pool %v", route.method, route.path, got, want)
 		}
 	}
@@ -891,6 +895,7 @@ func TestRunnerStartingWindowIsExplained(t *testing.T) {
 		{"still starting", loading, http.StatusServiceUnavailable, "still starting"},
 		{"capacity", status.Error(codes.ResourceExhausted, "sandbox capacity reached"), http.StatusTooManyRequests, "capacity"},
 		{"state", status.Error(codes.FailedPrecondition, "sandbox sbx_x is in state STOPPED"), http.StatusConflict, "STOPPED"},
+		{"unreachable", status.Error(codes.Unavailable, `connection error: dial tcp 10.0.0.5:9200: connection refused`), http.StatusServiceUnavailable, "retry"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			fr := &fakeRunner{createErr: c.err}
@@ -903,6 +908,9 @@ func TestRunnerStartingWindowIsExplained(t *testing.T) {
 			}
 			if c.code != http.StatusConflict && resp.Header.Get("Retry-After") == "" {
 				t.Fatal("a retryable answer has no Retry-After")
+			}
+			if strings.Contains(string(data), "10.0.0.5") {
+				t.Fatalf("the runner's address reached a client: %s", data)
 			}
 		})
 	}

@@ -39,10 +39,13 @@ type fakePools struct {
 	runChunks      []*v1.RunChunk
 }
 
-func (f *fakePools) CreatePool(_ context.Context, req *v1.CreatePoolRequest) (*v1.Pool, error) {
+func (f *fakePools) CreatePool(ctx context.Context, req *v1.CreatePoolRequest) (*v1.Pool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
 	f.creates = append(f.creates, proto.Clone(req).(*v1.CreatePoolRequest))
 	if f.poolCreateErr != nil {
 		return nil, f.poolCreateErr

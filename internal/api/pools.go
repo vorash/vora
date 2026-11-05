@@ -46,18 +46,14 @@ var (
 // poolRouteFor resolves the request's pool for its key. It answers 404, with one
 // body, for a pool that does not exist, that another tenant owns, and that
 // another agent of this tenant owns. A global admin names the tenant with
-// ?tenant_id=, as it does in a create's body; any other key's tenant is its own.
+// ?tenant_id=, as it does in a create's body. Any other key that names one gets
+// no further than canAccessPool.
 func (s *Server) poolRouteFor(w http.ResponseWriter, r *http.Request) (PoolRoute, bool) {
 	key := principalFrom(r.Context()).key
 	tenant := r.URL.Query().Get("tenant_id")
-	if isGlobalAdmin(key) {
-		if tenant == "" {
+	if tenant == "" {
+		if isGlobalAdmin(key) {
 			writeError(w, http.StatusBadRequest, "a global administrator must pass tenant_id")
-			return PoolRoute{}, false
-		}
-	} else {
-		if tenant != "" && tenant != key.TenantID {
-			writeError(w, http.StatusNotFound, errPoolNotFound.Error())
 			return PoolRoute{}, false
 		}
 		tenant = key.TenantID
@@ -144,7 +140,7 @@ func (s *Server) dropPoolRoute(ctx context.Context, route PoolRoute, cause strin
 func createRefused(err error) bool {
 	switch status.Code(err) {
 	case codes.InvalidArgument, codes.AlreadyExists, codes.ResourceExhausted, codes.FailedPrecondition,
-		codes.PermissionDenied, codes.Unauthenticated, codes.NotFound, codes.Unimplemented:
+		codes.PermissionDenied, codes.Unauthenticated, codes.Unimplemented:
 		return true
 	default:
 		return false

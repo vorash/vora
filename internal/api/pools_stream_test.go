@@ -27,7 +27,13 @@ import (
 // wire. Only the run itself is scripted.
 type streamRunner struct {
 	v1.UnimplementedRunnerServiceServer
-	run func(req *v1.RunInPoolRequest, stream grpc.ServerStreamingServer[v1.RunChunk]) error
+	run         func(req *v1.RunInPoolRequest, stream grpc.ServerStreamingServer[v1.RunChunk]) error
+	deleteDelay time.Duration
+}
+
+func (r *streamRunner) DeletePool(context.Context, *v1.DeletePoolRequest) (*v1.DeletePoolResponse, error) {
+	time.Sleep(r.deleteDelay)
+	return &v1.DeletePoolResponse{Drained: true}, nil
 }
 
 func (r *streamRunner) CreatePool(_ context.Context, req *v1.CreatePoolRequest) (*v1.Pool, error) {
@@ -232,7 +238,7 @@ func TestStalledClientReleasesTheRunAndDoesNotStallOthers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if err := conn.(*net.TCPConn).SetReadBuffer(4 << 10); err != nil {
 		t.Fatal(err)
 	}
@@ -263,6 +269,7 @@ func TestStalledClientReleasesTheRunAndDoesNotStallOthers(t *testing.T) {
 	}
 	// Bounded by the kernel's socket buffers plus gRPC's flow-control window, with
 	// nothing buffered per run in the API.
+	t.Logf("the runner got %d KiB out to a client that read nothing", sent.Load()>>10)
 	if got := sent.Load(); got > 64<<20 {
 		t.Fatalf("the runner sent %d bytes to a client that read none", got)
 	}
@@ -397,31 +404,98 @@ func TestRunFailureAfterTheFirstFrameIsAnErrorLine(t *testing.T) {
 }
 
 // vora-api's server has a 30 s WriteTimeout, which must not end a run or a delete
-// that legitimately lasts longer.
+// that legitimately lasts longer, or cost a slow refusal its status.
 func TestPoolStreamsOutlastTheServersWriteTimeout(t *testing.T) {
-	runner := &streamRunner{run: func(_ *v1.RunInPoolRequest, stream grpc.ServerStreamingServer[v1.RunChunk]) error {
-		// The first frame arrives after WriteTimeout has passed, and later ones too.
-		time.Sleep(300 * time.Millisecond)
+	serve := func(t *testing.T, f *streamFixture) {
+		t.Helper()
+		f.ts.Close()
+		server := &http.Server{Handler: f.s.Handler(), WriteTimeout: 100 * time.Millisecond}
+		lis, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func() { _ = server.Serve(lis) }()
+		t.Cleanup(func() { _ = server.Close() })
+		f.ts = &httptest.Server{URL: "http://" + lis.Addr().String()}
+	}
+	t.Run("a run", func(t *testing.T) {
+		f := newStreamFixture(t, &streamRunner{run: func(_ *v1.RunInPoolRequest, stream grpc.ServerStreamingServer[v1.RunChunk]) error {
+			time.Sleep(300 * time.Millisecond)
+			if err := stream.Send(frame("run")); err != nil {
+				return err
+			}
+			time.Sleep(300 * time.Millisecond)
+			if err := stream.Send(frame("exit")); err != nil {
+				return err
+			}
+			return stream.Send(frame("done"))
+		}}, 5*time.Second)
+		serve(t, f)
+		resp, err := http.DefaultClient.Do(runRequest(context.Background(), f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var keys []string
+		lines := bufio.NewScanner(resp.Body)
+		for lines.Scan() {
+			keys = append(keys, frameKind(t, lines.Bytes()))
+		}
+		if strings.Join(keys, ",") != "run,exit,runDone" {
+			t.Fatalf("frames = %v, err %v", keys, lines.Err())
+		}
+	})
+	t.Run("a refusal after a long wait for a member", func(t *testing.T) {
+		f := newStreamFixture(t, &streamRunner{run: func(*v1.RunInPoolRequest, grpc.ServerStreamingServer[v1.RunChunk]) error {
+			time.Sleep(300 * time.Millisecond)
+			return status.Error(codes.ResourceExhausted, "pool: no sandbox free within the borrow timeout")
+		}}, 5*time.Second)
+		serve(t, f)
+		resp, err := http.DefaultClient.Do(runRequest(context.Background(), f))
+		if err != nil {
+			t.Fatalf("the status was lost to the write deadline: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusTooManyRequests {
+			t.Fatalf("status = %d, want 429", resp.StatusCode)
+		}
+	})
+	t.Run("a slow delete", func(t *testing.T) {
+		runner := &streamRunner{}
+		runner.deleteDelay = 300 * time.Millisecond
+		f := newStreamFixture(t, runner, 5*time.Second)
+		serve(t, f)
+		req, _ := http.NewRequest(http.MethodDelete, f.ts.URL+"/v1/pools/py", nil)
+		req.Header.Set("Authorization", "Bearer "+f.key)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("the drain's answer was lost to the write deadline: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204", resp.StatusCode)
+		}
+	})
+}
+
+// The write deadline is per frame. A run that outlives it with a client still
+// reading must not be cut off.
+func TestWriteTimeoutIsPerFrame(t *testing.T) {
+	f := newStreamFixture(t, &streamRunner{run: func(_ *v1.RunInPoolRequest, stream grpc.ServerStreamingServer[v1.RunChunk]) error {
 		if err := stream.Send(frame("run")); err != nil {
 			return err
 		}
-		time.Sleep(300 * time.Millisecond)
+		for range 5 {
+			time.Sleep(100 * time.Millisecond)
+			if err := stream.Send(&v1.RunChunk{Payload: &v1.RunChunk_Stdout{Stdout: []byte("tick")}}); err != nil {
+				return err
+			}
+		}
 		if err := stream.Send(frame("exit")); err != nil {
 			return err
 		}
 		return stream.Send(frame("done"))
-	}}
-	f := newStreamFixture(t, runner, 5*time.Second)
-	f.ts.Close()
-	server := &http.Server{Handler: f.s.Handler(), WriteTimeout: 100 * time.Millisecond}
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() { _ = server.Serve(lis) }()
-	t.Cleanup(func() { _ = server.Close() })
-	f.ts = &httptest.Server{URL: "http://" + lis.Addr().String()}
-
+	}}, 250*time.Millisecond)
 	resp, err := http.DefaultClient.Do(runRequest(context.Background(), f))
 	if err != nil {
 		t.Fatal(err)
@@ -432,7 +506,7 @@ func TestPoolStreamsOutlastTheServersWriteTimeout(t *testing.T) {
 	for lines.Scan() {
 		keys = append(keys, frameKind(t, lines.Bytes()))
 	}
-	if strings.Join(keys, ",") != "run,exit,runDone" {
-		t.Fatalf("frames = %v, err %v", keys, lines.Err())
+	if len(keys) != 8 || keys[7] != "runDone" {
+		t.Fatalf("frames = %v, err %v: a run longer than one frame's deadline was cut off", keys, lines.Err())
 	}
 }
