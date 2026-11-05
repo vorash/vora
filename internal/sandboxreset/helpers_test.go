@@ -5,6 +5,7 @@ package sandboxreset
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -124,6 +125,26 @@ func (s *sandbox) chmodBack(rel string) {
 func (s *sandbox) remove(rel string) {
 	s.t.Helper()
 	if err := os.RemoveAll(s.path(rel)); err != nil {
+		s.t.Fatal(err)
+	}
+}
+
+// setxattr skips a test whose filesystem has no attributes, so that the test cannot
+// pass by exercising nothing.
+func (s *sandbox) setxattr(rel, name, value string) {
+	s.t.Helper()
+	err := unix.Setxattr(s.path(rel), name, []byte(value), 0)
+	if errors.Is(err, unix.ENOTSUP) {
+		s.t.Skipf("the filesystem under %s has no %s attributes: %v", s.base, name, err)
+	}
+	if err != nil {
+		s.t.Fatal(err)
+	}
+}
+
+func (s *sandbox) removexattr(rel, name string) {
+	s.t.Helper()
+	if err := unix.Removexattr(s.path(rel), name); err != nil {
 		s.t.Fatal(err)
 	}
 }

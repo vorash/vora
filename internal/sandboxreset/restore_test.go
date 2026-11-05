@@ -340,6 +340,114 @@ func TestRestoreRejectsAListedEntryThatChangedOrWentAway(t *testing.T) {
 	}
 }
 
+// An attribute is state a later run can read, so one that changed is as bad as
+// changed content. The reset cannot put one back, so it destroys the sandbox.
+func TestRestoreRejectsChangedAttributes(t *testing.T) {
+	targets := map[string]string{
+		"file":        "mnt/file",
+		"directory":   "mnt/dir",
+		"nested file": "mnt/dir/inner",
+		"mount root":  "mnt",
+	}
+	changes := map[string]func(s *sandbox, rel string){
+		"value changed": func(s *sandbox, rel string) { s.setxattr(rel, "user.seed", "other") },
+		"added":         func(s *sandbox, rel string) { s.setxattr(rel, "user.leak", "secret") },
+		"removed":       func(s *sandbox, rel string) { s.removexattr(rel, "user.seed") },
+	}
+	for targetName, rel := range targets {
+		for changeName, change := range changes {
+			t.Run(targetName+"/"+changeName, func(t *testing.T) {
+				s := newSandbox(t)
+				seedTree(s)
+				s.setxattr(rel, "user.seed", "1")
+				info := s.info()
+				m := capture(t, info)
+				change(s, rel)
+				if _, err := restore(t, m, info); !errors.Is(err, ErrUnrestorable) {
+					t.Fatalf("err = %v, want ErrUnrestorable", err)
+				}
+			})
+		}
+	}
+}
+
+func TestRestoreAcceptsUnchangedAttributes(t *testing.T) {
+	s := newSandbox(t)
+	seedTree(s)
+	for _, rel := range []string{"mnt", "mnt/dir", "mnt/file"} {
+		s.setxattr(rel, "user.seed", "1")
+	}
+	info := s.info()
+	m := capture(t, info)
+	s.write("mnt/dir/planted", "x")
+	if removed, err := restore(t, m, info); err != nil || removed != 1 {
+		t.Fatalf("Restore: removed %d, %v", removed, err)
+	}
+}
+
+// posixACLWithUser is a default or access ACL in the kernel's binary form that names
+// a user, so the kernel cannot fold it into the mode bits.
+func posixACLWithUser(uid uint32) string {
+	var b strings.Builder
+	le := func(v uint32, n int) {
+		for range n {
+			b.WriteByte(byte(v))
+			v >>= 8
+		}
+	}
+	le(2, 4)
+	for _, e := range []struct {
+		tag, perm uint16
+		id        uint32
+	}{
+		{0x01, 7, 0xffffffff},
+		{0x02, 5, uid},
+		{0x04, 5, 0xffffffff},
+		{0x10, 5, 0xffffffff},
+		{0x20, 5, 0xffffffff},
+	} {
+		le(uint32(e.tag), 2)
+		le(uint32(e.perm), 2)
+		le(e.id, 4)
+	}
+	return b.String()
+}
+
+// A directory's ctime is not compared, so only the attributes can show this one.
+func TestRestoreRejectsAPOSIXACLOnADirectory(t *testing.T) {
+	s := newSandbox(t)
+	seedTree(s)
+	info := s.info()
+	m := capture(t, info)
+	s.setxattr("mnt/dir", "system.posix_acl_default", posixACLWithUser(uint32(os.Getuid())))
+	if _, err := restore(t, m, info); !errors.Is(err, ErrUnrestorable) {
+		t.Fatalf("err = %v, want ErrUnrestorable", err)
+	}
+}
+
+// Kernels differ on which types take user.*, and an unprivileged test can set no
+// other namespace. Where the kernel takes it, the attribute must be caught.
+func TestRestoreRejectsAttributesOnOtherEntryTypes(t *testing.T) {
+	for _, rel := range []string{"mnt/link", "mnt/pipe", "mnt/sock"} {
+		t.Run(rel, func(t *testing.T) {
+			s := newSandbox(t)
+			seedTree(s)
+			info := s.info()
+			m := capture(t, info)
+			err := unix.Lsetxattr(s.path(rel), "user.leak", []byte("secret"), 0)
+			if errors.Is(err, unix.EPERM) || errors.Is(err, unix.ENOTSUP) {
+				t.Skipf("the kernel refuses user.* on %s: %v", rel, err)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := restore(t, m, info); !errors.Is(err, ErrUnrestorable) {
+				t.Fatalf("err = %v, want ErrUnrestorable", err)
+			}
+		})
+	}
+}
+
 func TestRestoreRejectsAChangedOwner(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("chown needs root")
@@ -804,8 +912,13 @@ func TestRestoreWorksUnderTheAgentsRestrictions(t *testing.T) {
 
 		s := newSandbox(t)
 		seedTree(s)
+		s.setxattr("mnt/file", "user.seed", "1")
+		s.setxattr("mnt/dir", "user.seed", "1")
 		info := s.info()
 		m := capture(t, info)
+		if digest := entry(t, listing(t, m, s.mount), "file").Xattrs; digest == "" {
+			t.Fatal("no attribute seen under the agent's filter")
+		}
 		s.mkdir("mnt/locked/nested")
 		s.write("mnt/locked/nested/secret", "x")
 		s.chmod("mnt/locked/nested", 0)

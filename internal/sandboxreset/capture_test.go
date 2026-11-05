@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -323,6 +324,145 @@ func TestHashingASwappedInTerminalDoesNotMakeItTheControllingTerminal(t *testing
 		if !errors.Is(err, unix.ENXIO) {
 			t.Fatalf("open /dev/tty: %v, want ENXIO for a session with no terminal", err)
 		}
+	})
+}
+
+func TestCaptureDigestsNamesAndValuesInAnyOrder(t *testing.T) {
+	s := newSandbox(t)
+	set := func(rel string, attrs ...[2]string) {
+		s.write("mnt/"+rel, "same content")
+		for _, a := range attrs {
+			s.setxattr("mnt/"+rel, a[0], a[1])
+		}
+	}
+	set("none")
+	set("ab", [2]string{"user.a", "1"}, [2]string{"user.b", "2"})
+	set("ba", [2]string{"user.b", "2"}, [2]string{"user.a", "1"})
+	set("swapped", [2]string{"user.a", "2"}, [2]string{"user.b", "1"})
+	set("renamed", [2]string{"user.a", "1"}, [2]string{"user.c", "2"})
+	set("fewer", [2]string{"user.a", "1"})
+	set("emptyvalue", [2]string{"user.a", ""})
+	set("othervalue", [2]string{"user.a", "x"})
+	// Without a length on each part, this one's bytes read the same as ab's.
+	set("run-together", [2]string{"user.a", "1\x00user.b\x002"})
+
+	l := listing(t, capture(t, s.info()), s.mount)
+	digest := func(rel string) string { return entry(t, l, rel).Xattrs }
+
+	if digest("none") != "" {
+		t.Errorf("no attributes: digest %q, want empty", digest("none"))
+	}
+	if digest("ab") != digest("ba") {
+		t.Errorf("the order attributes were set in changed the digest")
+	}
+	seen := map[string]string{"": "none"}
+	for _, rel := range []string{"ab", "swapped", "renamed", "fewer", "emptyvalue", "othervalue", "run-together"} {
+		if other, dup := seen[digest(rel)]; dup {
+			t.Errorf("%s and %s have the same digest", rel, other)
+		}
+		seen[digest(rel)] = rel
+	}
+}
+
+// A read that followed the link would record the target's attributes as the link's,
+// and could read a file outside the mount.
+func TestCaptureReadsALinksOwnAttributesNotItsTargets(t *testing.T) {
+	s := newSandbox(t)
+	s.write("mnt/target", "x")
+	s.setxattr("mnt/target", "user.a", "1")
+	s.symlink("target", "mnt/link")
+	l := listing(t, capture(t, s.info()), s.mount)
+	if entry(t, l, "target").Xattrs == "" {
+		t.Fatal("the target's attribute was not seen, so this shows nothing about the link")
+	}
+	if got := entry(t, l, "link").Xattrs; got != "" {
+		t.Fatalf("link digest %q, want empty: it read through to the target", got)
+	}
+}
+
+// Reading the attributes must not need an open that the mode forbids. The mount is
+// in the temp directory, so this reads nothing of the system's.
+func TestCaptureReadsAttributesOfNodesItCannotOpen(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can open a mode-000 node")
+	}
+	s := newSandbox(t)
+	s.mknod("mnt/pipe", unix.S_IFIFO|0)
+	s.mknod("mnt/sock", unix.S_IFSOCK|0)
+	l := listing(t, capture(t, s.info()), s.mount)
+	if want := []string{".", "pipe", "sock"}; !slices.Equal(rels(l), want) {
+		t.Fatalf("entries %q, want %q", rels(l), want)
+	}
+}
+
+// These are the device shapes real sandboxes list: a bind of a host device, a mode
+// 000 root-owned node under devpts, and the terminal device, none of which may be
+// opened. This only reads attributes of one node at a time. The temp tree cannot
+// hold a device without root.
+func TestAttributesOfRealDeviceNodesReadWithoutOpeningThem(t *testing.T) {
+	for _, p := range []string{"/dev/null", "/dev/tty", "/dev/pts/ptmx", "/dev/pts"} {
+		t.Run(p, func(t *testing.T) {
+			parent, err := unix.Open(filepath.Dir(p), unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+			if err != nil {
+				t.Skipf("no %s here: %v", filepath.Dir(p), err)
+			}
+			defer func() { _ = unix.Close(parent) }()
+			var st unix.Stat_t
+			if err := lstatAt(parent, filepath.Base(p), &st); err != nil {
+				t.Skipf("no %s here: %v", p, err)
+			}
+			if _, err := xattrDigestAt(parent, filepath.Base(p), &st); err != nil {
+				t.Fatalf("%s (mode %#o): %v", p, st.Mode, err)
+			}
+		})
+	}
+}
+
+func TestAttributeReadErrorsFailClosed(t *testing.T) {
+	seed := func(t *testing.T) *sandbox {
+		s := newSandbox(t)
+		s.write("mnt/file", "x")
+		s.setxattr("mnt/file", "user.a", "1")
+		return s
+	}
+	// Each of these leaves attributes that could exist unread, so none can mean "no
+	// attributes".
+	for _, tc := range []struct {
+		name  string
+		nr    uint32
+		errno unix.Errno
+	}{
+		{"list EIO", unix.SYS_LISTXATTR, unix.EIO},
+		{"list EACCES", unix.SYS_LISTXATTR, unix.EACCES},
+		{"list EPERM", unix.SYS_LISTXATTR, unix.EPERM},
+		{"list ENODATA", unix.SYS_LISTXATTR, unix.ENODATA},
+		{"list ERANGE", unix.SYS_LISTXATTR, unix.ERANGE},
+		{"list ENOSYS", unix.SYS_LISTXATTR, unix.ENOSYS},
+		{"listed name then EIO", unix.SYS_GETXATTR, unix.EIO},
+		{"listed name then EACCES", unix.SYS_GETXATTR, unix.EACCES},
+		{"listed name then ENODATA", unix.SYS_GETXATTR, unix.ENODATA},
+		{"listed name then unsupported", unix.SYS_GETXATTR, unix.ENOTSUP},
+		{"listed name then ERANGE", unix.SYS_GETXATTR, unix.ERANGE},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inChild(t, func() {
+				s := seed(t)
+				failSyscalls(t, map[uint32]unix.Errno{tc.nr: tc.errno})
+				if _, err := Capture(context.Background(), strings.NewReader(s.info())); !errors.Is(err, tc.errno) {
+					t.Fatalf("err = %v, want %v", err, tc.errno)
+				}
+			})
+		})
+	}
+	// listxattr(2)'s answer for a filesystem with no attributes.
+	t.Run("list unsupported is an empty set", func(t *testing.T) {
+		inChild(t, func() {
+			s := seed(t)
+			failSyscalls(t, map[uint32]unix.Errno{unix.SYS_LISTXATTR: unix.ENOTSUP})
+			if got := entry(t, listing(t, capture(t, s.info()), s.mount), "file").Xattrs; got != "" {
+				t.Fatalf("digest %q, want empty", got)
+			}
+		})
 	})
 }
 

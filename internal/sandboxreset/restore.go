@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"slices"
-	"strconv"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -106,8 +105,8 @@ type pruner struct {
 }
 
 // pruneListed handles an entry the listing has. It rejects anything stat can
-// already tell has changed, so a file a run grew is never hashed. Content and
-// link targets are left to the verify walk.
+// already tell has changed, so a file a run grew is never hashed. Content, link
+// targets and extended attributes are left to the verify walk.
 func (p *pruner) pruneListed(parent int, name, rel string, st *unix.Stat_t) error {
 	want := p.want[rel]
 	if want.Type == TypeMountpoint {
@@ -117,7 +116,7 @@ func (p *pruner) pruneListed(parent int, name, rel string, st *unix.Stat_t) erro
 	if err != nil {
 		return err
 	}
-	want.SHA256, want.Target = "", ""
+	want.SHA256, want.Target, want.Xattrs = "", "", ""
 	if got != want {
 		return fmt.Errorf("%w: %s", ErrUnrestorable, shortRel(rel))
 	}
@@ -216,7 +215,7 @@ func openForRemoval(parent int, name string, st *unix.Stat_t) (int, error) {
 	if err := checkSameObject(handle, st); err != nil {
 		return -1, err
 	}
-	if err := unix.Chmod("/proc/self/fd/"+strconv.Itoa(handle), 0o700); err != nil {
+	if err := unix.Chmod(procFD(handle), 0o700); err != nil {
 		return -1, fmt.Errorf("chmod: %w", err)
 	}
 	return unix.Openat(handle, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)

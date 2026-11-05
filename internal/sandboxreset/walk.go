@@ -5,13 +5,16 @@ package sandboxreset
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -102,6 +105,9 @@ func (w *walker) visit(parent int, name, rel string) error {
 		if e.SHA256, err = hashFileAt(parent, name, &st); err != nil {
 			return fmt.Errorf("%s: %w", shortRel(rel), err)
 		}
+	}
+	if e.Xattrs, err = xattrDigestAt(parent, name, &st); err != nil {
+		return fmt.Errorf("%s: %w", shortRel(rel), err)
 	}
 	w.entries = append(w.entries, e)
 	if e.Type != TypeDir {
@@ -244,6 +250,81 @@ func readlinkAt(dirfd int, name string) (string, error) {
 		return "", err
 	}
 	return string(buf[:n]), nil
+}
+
+// xattrDigestAt digests the extended attributes of what st described. O_PATH needs
+// no permission on the object and never reaches a device's driver, so this works on
+// a mode-000 /dev/pts/ptmx and does not open /dev/tty. It is pinned against a swap
+// like every other open here.
+func xattrDigestAt(parent int, name string, st *unix.Stat_t) (string, error) {
+	fd, err := unix.Openat(parent, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	if err := checkSameObject(fd, st); err != nil {
+		return "", err
+	}
+	return xattrDigest(procFD(fd))
+}
+
+// xattrDigest hashes the sorted names and values of an object's attributes, and
+// is empty when it has none. Each is length-prefixed, so that bytes cannot move
+// from one to the next and hash the same.
+//
+// The calls follow the /proc link on purpose: the kernel resolves it to the pinned
+// object and stops there, even if that object is a symlink. llistxattr would read
+// the /proc link itself and always find nothing. Nothing else runs while this does,
+// so an attribute changing between two calls is an error and not a retry.
+func xattrDigest(proc string) (string, error) {
+	size, err := unix.Listxattr(proc, nil)
+	// The kernel says this for a filesystem or file type with no attributes at all.
+	// Once a name is listed, the same error from reading it is a failure.
+	if errors.Is(err, unix.ENOTSUP) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("list xattrs: %w", err)
+	}
+	if size == 0 {
+		return "", nil
+	}
+	list := make([]byte, size)
+	if size, err = unix.Listxattr(proc, list); err != nil {
+		return "", fmt.Errorf("list xattrs: %w", err)
+	}
+	names := strings.Split(strings.TrimSuffix(string(list[:size]), "\x00"), "\x00")
+	slices.Sort(names)
+
+	h := sha256.New()
+	for _, name := range names {
+		value, err := readXattr(proc, name)
+		if err != nil {
+			return "", fmt.Errorf("read xattr %q: %w", name, err)
+		}
+		for _, part := range [][]byte{[]byte(name), value} {
+			h.Write(binary.BigEndian.AppendUint64(nil, uint64(len(part))))
+			h.Write(part)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func readXattr(proc, name string) ([]byte, error) {
+	size, err := unix.Getxattr(proc, name, nil)
+	if err != nil || size == 0 {
+		return nil, err
+	}
+	value := make([]byte, size)
+	size, err = unix.Getxattr(proc, name, value)
+	if err != nil {
+		return nil, err
+	}
+	return value[:size], nil
+}
+
+func procFD(fd int) string {
+	return "/proc/self/fd/" + strconv.Itoa(fd)
 }
 
 func hashFileAt(parent int, name string, st *unix.Stat_t) (string, error) {

@@ -69,8 +69,8 @@ const (
 )
 
 // Entry identifies one file system object. Two equal entries mean that a later
-// run reads the same type, permissions, owner, device, link target and content
-// from the same inode. Timestamps are not part of it, because removing a planted
+// run reads the same type, permissions, owner, device, link target, content and
+// extended attributes from the same inode. Timestamps are not part of it, because removing a planted
 // file changes its directory's.
 type Entry struct {
 	Rel    string    `json:"rel"`
@@ -83,6 +83,9 @@ type Entry struct {
 	Size   int64     `json:"size,omitempty"`
 	SHA256 string    `json:"sha256,omitempty"`
 	Target string    `json:"target,omitempty"`
+	// Xattrs is a digest of every extended attribute, POSIX ACLs included. It is
+	// empty when there are none.
+	Xattrs string `json:"xattrs,omitempty"`
 }
 
 // validate is the check at the boundary where a manifest comes back from the
