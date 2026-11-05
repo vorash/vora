@@ -45,6 +45,10 @@ type ExecRecord struct {
 	// decisions that fell inside this execution's window.
 	EgressAllowed int64 `json:"egress_allowed,omitempty"`
 	EgressDenied  int64 `json:"egress_denied,omitempty"`
+	// PoolID and SandboxRun are set for a pool run. SandboxRun is 1-based and
+	// marks run boundaries inside a reused sandbox.
+	PoolID     string `json:"pool_id,omitempty"`
+	SandboxRun int    `json:"sandbox_run,omitempty"`
 }
 
 // WriteExecRecord writes an execution record to dir/<execution_id>.json

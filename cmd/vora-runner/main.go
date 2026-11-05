@@ -452,6 +452,12 @@ func run() error {
 	if err := server.Reconcile(ctx); err != nil {
 		logger.Warn("startup reconciliation failed", "error", err)
 	}
+	// Pools load after Reconcile has failed their old members, so each one
+	// refills from nothing.
+	if err := server.LoadPools(); err != nil {
+		logger.Warn("loading pools failed", "error", err)
+	}
+	defer server.ClosePools()
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -460,6 +466,7 @@ func run() error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				server.SweepPools()
 				if err := server.ReapExpired(ctx); err != nil {
 					logger.Warn("ttl reaper failed", "error", err)
 				}

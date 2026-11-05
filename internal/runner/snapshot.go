@@ -28,6 +28,9 @@ func (s *Server) SnapshotSandbox(_ context.Context, req *v1.SnapshotSandboxReque
 	if err != nil {
 		return nil, s.loadError(err, req.GetSandboxId())
 	}
+	if rec.Spec.PoolID != "" {
+		return nil, status.Errorf(codes.FailedPrecondition, "sandbox %s belongs to pool %s; use the pool API", rec.ID, rec.Spec.PoolID)
+	}
 	existing, err := s.snapshots.List()
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to check snapshot capacity")
@@ -158,11 +161,9 @@ func (s *Server) ForkSnapshot(ctx context.Context, req *v1.ForkSnapshotRequest) 
 	if err := s.enforceResourceLimits(&spec); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	s.createMu.Lock()
-	defer s.createMu.Unlock()
-	if err := s.checkSandboxCapacity(spec.TenantID); err != nil {
-		return nil, err
-	}
+	// createMu covers the capacity check and the record that claims the slot.
+	// The restore and the backend start below run outside it, so a fork does
+	// not serialise every other create for the length of a start.
 	spec.ID = ulid.NewSandbox()
 	ws := s.workspaces.Paths(spec.ID)
 	ws.RootfsDir = s.images.Rootfs(spec.Image)
@@ -173,12 +174,8 @@ func (s *Server) ForkSnapshot(ctx context.Context, req *v1.ForkSnapshotRequest) 
 		State:    sandbox.StateRequested,
 		RunnerID: s.runnerID,
 	}
-	if err := s.store.Create(rec); err != nil {
-		if _, loadErr := s.store.Load(spec.ID); loadErr == nil {
-			return nil, status.Errorf(codes.AlreadyExists, "sandbox %s already exists", spec.ID)
-		}
-		s.logger.Error("fork persist failed", "snapshot_id", snap.ID, "error", err)
-		return nil, status.Error(codes.Internal, "failed to persist sandbox")
+	if err := s.forkRecord(rec); err != nil {
+		return nil, err
 	}
 	if _, err := s.workspaces.Create(ws); err != nil {
 		_ = s.workspaces.Destroy(spec.ID)
@@ -213,6 +210,24 @@ func (s *Server) ForkSnapshot(ctx context.Context, req *v1.ForkSnapshotRequest) 
 		return nil, err
 	}
 	return &v1.ForkSnapshotResponse{Sandbox: started}, nil
+}
+
+// forkRecord claims the fork's capacity slot: capacity check and record
+// create, under createMu.
+func (s *Server) forkRecord(rec *sandbox.Record) error {
+	s.createMu.Lock()
+	defer s.createMu.Unlock()
+	if err := s.checkSandboxCapacity(rec.Spec.TenantID); err != nil {
+		return err
+	}
+	if err := s.store.Create(rec); err != nil {
+		if _, loadErr := s.store.Load(rec.ID); loadErr == nil {
+			return status.Errorf(codes.AlreadyExists, "sandbox %s already exists", rec.ID)
+		}
+		s.logger.Error("fork persist failed", "sandbox_id", rec.ID, "error", err)
+		return status.Error(codes.Internal, "failed to persist sandbox")
+	}
+	return nil
 }
 
 // abortFork marks a fork that could not start FAILED and destroys it, which

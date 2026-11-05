@@ -295,6 +295,8 @@ func execsToProto(execs []sandbox.ExecRecord) []*v1.SandboxExec {
 			PidsLimitHits:    e.PidsLimitHits,
 			EgressAllowed:    e.EgressAllowed,
 			EgressDenied:     e.EgressDenied,
+			PoolId:           e.PoolID,
+			SandboxRun:       uint32(e.SandboxRun),
 		})
 	}
 	return out
@@ -338,6 +340,7 @@ func toProtoSandbox(rec *sandbox.Record) *v1.Sandbox {
 		Reason:          reasonToProto(rec.Reason),
 		CreatedAtUnixMs: rec.CreatedAt.UnixMilli(),
 		UpdatedAtUnixMs: rec.UpdatedAt.UnixMilli(),
+		PoolId:          rec.Spec.PoolID,
 	}
 }
 

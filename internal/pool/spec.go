@@ -97,21 +97,21 @@ var namePattern = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
 // Zero means "default" for every field but Size, where 0 is a cold pool, so
 // Size and MaxSize are pointers.
 type RawSpec struct {
-	ID       ID
-	Name     string
-	TenantID string
-	AgentID  string
+	ID       ID     `json:"id"`
+	Name     string `json:"name"`
+	TenantID string `json:"tenant_id"`
+	AgentID  string `json:"agent_id,omitempty"`
 	// Template is every member's sandbox spec. Its ID, TenantID, AgentID and
 	// TTL must be empty: the pool owns identity and lifetime.
-	Template      runtime.SandboxSpec
-	Size          *int
-	MaxSize       *int
-	MaxRuns       int
-	MaxAge        time.Duration
-	MaxRun        time.Duration
-	BorrowTimeout time.Duration
-	IdleExpiry    time.Duration
-	Reuse         Reuse
+	Template      runtime.SandboxSpec `json:"template"`
+	Size          *int                `json:"size,omitempty"`
+	MaxSize       *int                `json:"max_size,omitempty"`
+	MaxRuns       int                 `json:"max_runs,omitempty"`
+	MaxAge        time.Duration       `json:"max_age_ns,omitempty"`
+	MaxRun        time.Duration       `json:"max_run_ns,omitempty"`
+	BorrowTimeout time.Duration       `json:"borrow_timeout_ns,omitempty"`
+	IdleExpiry    time.Duration       `json:"idle_expiry_ns,omitempty"`
+	Reuse         Reuse               `json:"reuse,omitempty"`
 }
 
 // Limits are the runner-wide rules a spec is checked against, so a pool that
@@ -298,9 +298,12 @@ func (s Spec) TenantID() string      { return s.raw.TenantID }
 func (s Spec) AgentID() string       { return s.raw.AgentID }
 func (s Spec) Size() int             { return s.size }
 func (s Spec) MaxSize() int          { return s.maxSize }
-func (s Spec) MaxRuns() int          { return s.maxRuns }
-func (s Spec) MaxRun() time.Duration { return s.maxRun }
-func (s Spec) Reuse() Reuse          { return s.reuse }
+func (s Spec) MaxRuns() int                 { return s.maxRuns }
+func (s Spec) MaxAge() time.Duration        { return s.maxAge }
+func (s Spec) MaxRun() time.Duration        { return s.maxRun }
+func (s Spec) BorrowTimeout() time.Duration { return s.borrowTimeout }
+func (s Spec) IdleExpiry() time.Duration    { return s.idleExpiry }
+func (s Spec) Reuse() Reuse                 { return s.reuse }
 
 // MemberTTL is the TTL stamped on every member's record. The pool lends no
 // member past max_age and retires it at check-in, and the runner's fn holds a

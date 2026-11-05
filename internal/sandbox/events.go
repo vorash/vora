@@ -21,6 +21,10 @@ type Event struct {
 	Reason    string    `json:"reason,omitempty"`
 	RunnerID  string    `json:"runner_id,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
+	// Kind and Detail describe a pool event (reset, retire, alive, destroy)
+	// on a member, which changes no state: From and To are then equal.
+	Kind   string `json:"kind,omitempty"`
+	Detail string `json:"detail,omitempty"`
 }
 
 // AppendEvent appends an event to dir/events.jsonl, creating the file if
