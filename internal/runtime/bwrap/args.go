@@ -2,6 +2,7 @@ package bwrap
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 )
 
@@ -13,8 +14,10 @@ const SocketInside = "/vora/control.sock"
 const SocketDirInside = "/vora"
 
 // InitInside is the agent binary path inside the sandbox. The binary is copied
-// into the ipc directory, which is bound read-write at SocketDirInside, so no
-// extra mount point (and no writable root) is required.
+// into the ipc directory, which is bound read-write at SocketDirInside so the
+// agent can create its control socket there. The binary itself is then bound
+// read-only over this path, so a workload cannot replace what later runs inside
+// a reused sandbox.
 const InitInside = "/vora/vora-init"
 
 // BuildOptions are the inputs for the Bubblewrap command line.
@@ -91,6 +94,8 @@ func Args(opts BuildOptions) ([]string, error) {
 		"--bind", opts.WorkspaceDir, "/workspace",
 		"--bind", opts.HomeDir, "/root",
 		"--bind", opts.IPCDir, SocketDirInside,
+		// Must follow the directory bind, which would otherwise cover it.
+		"--ro-bind", filepath.Join(opts.IPCDir, "vora-init"), InitInside,
 		"--tmpfs", "/tmp",
 		"--proc", "/proc",
 		"--dev", "/dev",
@@ -109,9 +114,8 @@ func Args(opts BuildOptions) ([]string, error) {
 		argv = append(argv, "--setenv", k, opts.Env[k])
 	}
 
-	// The agent binary lives in the ipc directory (bound at /vora) and runs
-	// as PID 1. No separate file bind is needed, which keeps the root fs
-	// genuinely read-only.
+	// The agent binary comes from the ipc directory (bound at /vora), not the
+	// image, so the root fs stays genuinely read-only.
 	argv = append(argv,
 		"--", InitInside, "--socket", SocketInside,
 	)

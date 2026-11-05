@@ -46,6 +46,7 @@ func TestArgsBuildsIsolationFlags(t *testing.T) {
 		"--bind /state/sbx/workspace /workspace",
 		"--bind /state/sbx/home /root",
 		"--bind /state/sbx/ipc /vora",
+		"--ro-bind /state/sbx/ipc/vora-init /vora/vora-init",
 		"--tmpfs /tmp",
 		"--proc /proc",
 		"--dev /dev",
@@ -70,6 +71,15 @@ func TestArgsBuildsIsolationFlags(t *testing.T) {
 	wsIdx := strings.Index(joined, "/state/sbx/workspace")
 	if roIdx < 0 || wsIdx < 0 || roIdx > wsIdx {
 		t.Errorf("rootfs bind must precede workspace bind")
+	}
+
+	// bwrap applies mounts in argv order. The other way round, the writable
+	// directory bind covers the read-only file bind and a workload can replace
+	// the agent binary.
+	dirIdx := indexOf(argv, "--bind", "/state/sbx/ipc")
+	fileIdx := indexOf(argv, "--ro-bind", "/state/sbx/ipc/vora-init")
+	if dirIdx < 0 || fileIdx < dirIdx {
+		t.Errorf("the vora-init file bind (@%d) must follow the /vora bind (@%d)", fileIdx, dirIdx)
 	}
 }
 
