@@ -43,10 +43,12 @@ type Handler interface {
 	Signal(ctx context.Context, sig int32) error
 	// Shutdown asks the agent to terminate the sandbox.
 	Shutdown(ctx context.Context) error
-	// Capture returns the manifest of the sandbox's writable mounts.
+	// Capture returns the manifest of the sandbox's writable mounts, long-lived
+	// processes and writable sysctls.
 	Capture(ctx context.Context) ([]byte, error)
-	// Reset restores the sandbox's processes and writable mounts to manifest and
-	// returns how many entries it removed. A nil error means those are proven clean.
+	// Reset kills every other process, proves the long-lived processes and sysctls are
+	// as manifest holds them, restores the writable mounts, and returns how many entries
+	// it removed. A nil error means all of those are proven clean.
 	Reset(ctx context.Context, manifest []byte) (int, error)
 }
 
@@ -85,7 +87,7 @@ func (s *Server) Shutdown(ctx context.Context, _ *v1.ShutdownRequest) (*v1.Shutd
 	return &v1.ShutdownResponse{}, nil
 }
 
-// Capture lists the sandbox's writable mounts.
+// Capture returns the sandbox's manifest.
 func (s *Server) Capture(ctx context.Context, _ *v1.CaptureRequest) (*v1.CaptureResponse, error) {
 	manifest, err := s.handler.Capture(ctx)
 	if err != nil {
@@ -250,7 +252,7 @@ func (c *Client) Shutdown(ctx context.Context) error {
 	return err
 }
 
-// Capture asks the agent for the manifest of the sandbox's writable mounts.
+// Capture asks the agent for the sandbox's manifest.
 func (c *Client) Capture(ctx context.Context) ([]byte, error) {
 	resp, err := c.stub.Capture(ctx, &v1.CaptureRequest{})
 	if err != nil {

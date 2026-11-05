@@ -100,6 +100,9 @@ type SandboxSpec struct {
 	// sandbox. A reset cannot clean them, so a sandbox that will be reset needs this.
 	// The default leaves them working, because a program like Postgres depends on them.
 	DenyIPC bool `json:"deny_ipc,omitempty"`
+	// PoolID names the pool that owns this sandbox. Empty for a sandbox created
+	// through the sandboxes API.
+	PoolID string `json:"pool_id,omitempty"`
 }
 
 // Validate checks that a spec is structurally usable by any backend. Backends
@@ -309,6 +312,47 @@ type BrokerAware interface {
 	// StartWithCredentials starts a sandbox with the resolved credentials for
 	// the aliases its spec grants.
 	StartWithCredentials(ctx context.Context, h Handle, creds []egress.Credential) error
+}
+
+// ErrUnproven wraps every Reset failure, so a caller can tell "not proven
+// clean" from a transport error without string matching.
+var ErrUnproven = errors.New("runtime: sandbox not proven clean")
+
+// Reusable is implemented by backends whose running sandboxes can be put back
+// into the state they had right after Start, so the runner may pool them. The
+// runner checks for it with a type assertion, like BrokerAware and Sweeper. A
+// backend without it cannot host a resetting pool.
+type Reusable interface {
+	// Prepare records the sandbox's just-started state (the listing of every
+	// writable mount inside it and the host's view of its init processes),
+	// runs one full reset against that baseline and proves it. Call it before
+	// the first workload exec. The returned Resettable is the only way to
+	// reset, so a reset without a baseline cannot be written.
+	Prepare(ctx context.Context, h Handle) (Resettable, error)
+}
+
+// Resettable restores one prepared sandbox. It holds the baseline privately.
+type Resettable interface {
+	// Reset kills every process but the sandbox's init and proves the process
+	// set, has a helper from a read-only binary put every writable mount back
+	// to the prepared listing and verify it from inside, then proves the
+	// process set again. A nil error means proven clean. Any error, including
+	// ctx expiry, wraps ErrUnproven and means the sandbox must be destroyed.
+	// Reset never reports partial success.
+	//
+	// Reset returns promptly on ctx expiry. A caller that has waited past that
+	// treats the sandbox as unproven, ignores whatever Reset later returns, and
+	// may destroy the sandbox while Reset is still running.
+	Reset(ctx context.Context) (ResetReport, error)
+	// Alive reports whether init is running and reachable. Cheap. It returns
+	// promptly on ctx expiry, as Reset does.
+	Alive(ctx context.Context) error
+}
+
+// ResetReport is what one successful reset found and removed.
+type ResetReport struct {
+	ProcessesKilled int
+	EntriesRemoved  int
 }
 
 // Sweeper is implemented by backends that keep runtime state outside the

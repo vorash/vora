@@ -14,12 +14,16 @@ service AgentService {
   rpc Exec(ExecRequest) returns (stream ExecChunk);
   rpc Signal(SignalRequest) returns (SignalResponse);
   rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
-  // Capture lists the sandbox's writable mounts. The runner calls it once, before
+  // Capture lists the sandbox's writable mounts and records the attributes of its
+  // long-lived processes and its writable sysctls. The runner calls it once, before
   // the first workload, and keeps the manifest. The agent stores nothing.
   rpc Capture(CaptureRequest) returns (CaptureResponse);
-  // Reset restores the sandbox's processes and writable mounts to manifest and proves
-  // them. It does not cover IPC namespaces, which are for seccomp to close. Any error
-  // means the sandbox is not proven clean, and the runner must destroy it.
+  // Reset kills every other process, proves that the long-lived processes' attributes
+  // and the writable sysctls are as captured, then restores the writable mounts and
+  // proves them. It repairs no attribute or sysctl: a changed one fails the reset. It
+  // does not cover IPC namespaces' contents, which are for seccomp to close, or the PID
+  // counter, which is accepted. Any error means the sandbox is not proven clean, and the
+  // runner must destroy it.
   rpc Reset(ResetRequest) returns (ResetResponse);
 }
 
