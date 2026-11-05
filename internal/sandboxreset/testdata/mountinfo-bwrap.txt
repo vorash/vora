@@ -1,0 +1,15 @@
+874 101 252:1 /.local/share/containerd/io.containerd.snapshotter.v1.native/snapshots/6 / ro,nosuid,nodev,relatime master:118 - xfs /dev/mapper/ubuntu--vg-vora--lv rw,inode64,logbufs=8,logbsize=32k,prjquota
+883 874 252:1 /sandboxes/sbx_PLACEHOLDER/workspace /workspace rw,nosuid,nodev,relatime master:118 - xfs /dev/mapper/ubuntu--vg-vora--lv rw,inode64,logbufs=8,logbsize=32k,prjquota
+886 874 252:1 /sandboxes/sbx_PLACEHOLDER/home /root rw,nosuid,nodev,relatime master:118 - xfs /dev/mapper/ubuntu--vg-vora--lv rw,inode64,logbufs=8,logbsize=32k,prjquota
+891 874 252:1 /sandboxes/sbx_PLACEHOLDER/ipc /vora rw,nosuid,nodev,relatime master:118 - xfs /dev/mapper/ubuntu--vg-vora--lv rw,inode64,logbufs=8,logbsize=32k,prjquota
+892 891 252:1 /sandboxes/sbx_PLACEHOLDER/ipc/vora-init /vora/vora-init ro,nosuid,nodev,relatime master:118 - xfs /dev/mapper/ubuntu--vg-vora--lv rw,inode64,logbufs=8,logbsize=32k,prjquota
+893 874 0:195 / /tmp rw,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=755,uid=994,gid=983,inode64
+894 874 0:204 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw
+898 874 0:208 / /dev rw,nosuid,nodev,relatime - tmpfs tmpfs rw,mode=755,uid=994,gid=983,inode64
+899 898 0:7 /null /dev/null rw,nosuid master:2 - devtmpfs devtmpfs rw,size=12200720k,nr_inodes=3050180,mode=755,inode64
+900 898 0:7 /zero /dev/zero rw,nosuid master:2 - devtmpfs devtmpfs rw,size=12200720k,nr_inodes=3050180,mode=755,inode64
+902 898 0:7 /full /dev/full rw,nosuid master:2 - devtmpfs devtmpfs rw,size=12200720k,nr_inodes=3050180,mode=755,inode64
+906 898 0:7 /random /dev/random rw,nosuid master:2 - devtmpfs devtmpfs rw,size=12200720k,nr_inodes=3050180,mode=755,inode64
+907 898 0:7 /urandom /dev/urandom rw,nosuid master:2 - devtmpfs devtmpfs rw,size=12200720k,nr_inodes=3050180,mode=755,inode64
+908 898 0:7 /tty /dev/tty rw,nosuid master:2 - devtmpfs devtmpfs rw,size=12200720k,nr_inodes=3050180,mode=755,inode64
+909 898 0:222 / /dev/pts rw,nosuid,noexec,relatime - devpts devpts rw,mode=620,ptmxmode=666

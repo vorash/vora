@@ -180,7 +180,7 @@ func visibleMounts(table []Mount) (map[string]Mount, error) {
 	for p, stack := range stacks {
 		var tops []Mount
 		for _, m := range stack {
-			// gVisor gives a mount with no parent its own ID as parent.
+			// gVisor's generator gives a mount with no parent its own ID as parent.
 			covered := slices.ContainsFunc(stack, func(o Mount) bool {
 				return o.ID != m.ID && o.ParentID == m.ID
 			})

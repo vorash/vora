@@ -171,7 +171,8 @@ func TestCaptureDoesNotCrossANestedMountAndListsWritableOnesSeparately(t *testin
 	}
 }
 
-// bwrap's --dev binds /dev/null and friends as writable mounts of a single file.
+// bwrap's --dev binds /dev/null and friends as writable mounts of a single device
+// node. A regular file stands in here, since making a device needs root.
 func TestCaptureListsAWritableMountWhoseRootIsNotADirectory(t *testing.T) {
 	s := newSandbox(t)
 	s.mkdir("mnt/dev")
