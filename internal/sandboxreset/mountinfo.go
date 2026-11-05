@@ -140,9 +140,17 @@ func selectMounts(table []Mount) ([]plannedMount, error) {
 
 	planned := map[string]*plannedMount{}
 	for p, m := range visible {
-		if m.Writable && p != "/" && !isExcludedMount(p) {
-			planned[p] = &plannedMount{Path: p, Nested: map[string]bool{}}
+		if !m.Writable || p == "/" {
+			continue
 		}
+		if isExcludedMount(p) {
+			// procfs itself holds nothing a run can create. Anything mounted on it can.
+			if p != "/proc" {
+				return nil, fmt.Errorf("%w: %s", ErrUncoveredMount, p)
+			}
+			continue
+		}
+		planned[p] = &plannedMount{Path: p, Nested: map[string]bool{}}
 	}
 	if len(planned) == 0 {
 		return nil, errors.New("mount table has no writable mount")

@@ -41,7 +41,13 @@ type BuildOptions struct {
 	DenyIPC bool
 }
 
-const binfmtMisc = "/proc/sys/fs/binfmt_misc"
+const (
+	binfmtMisc   = "/proc/sys/fs/binfmt_misc"
+	procPressure = "/proc/pressure"
+)
+
+// pid1MaskedFiles are masked for PID 1 and its only thread.
+var pid1MaskedFiles = []string{"clear_refs", "sched"}
 
 // Args builds the bubblewrap argv for a sandbox. It is pure so it can be
 // unit-tested without a running sandbox.
@@ -110,8 +116,25 @@ func Args(opts BuildOptions) ([]string, error) {
 	)
 	// The bind above carries the host's binfmt_misc mount with it, which would show what
 	// the host has registered. The target must already exist: /proc/sys is read-only now.
+	// Writable, this tmpfs would keep what a run left in it, since a reset leaves /proc alone.
 	if info, err := os.Stat(binfmtMisc); err == nil && info.IsDir() {
-		argv = append(argv, "--tmpfs", binfmtMisc)
+		argv = append(argv, "--tmpfs", binfmtMisc, "--remount-ro", binfmtMisc)
+	}
+	// A write here registers a pressure trigger on the host's own PSI group, which holds
+	// kernel memory outside the sandbox's limits for as long as the fd stays open.
+	if info, err := os.Stat(procPressure); err == nil && info.IsDir() {
+		argv = append(argv, "--ro-bind", procPressure, procPressure)
+	}
+	// PID 1 is the same uid as a workload and outlives every run, and a write to these
+	// resets its page and scheduler statistics for a later run to read. No program needs
+	// PID 1's, and a mask costs a reset nothing where comparing them would read its memory.
+	// bwrap cannot create a bind target under /proc, and a kernel config can leave these out.
+	for _, name := range pid1MaskedFiles {
+		if _, err := os.Stat(filepath.Join("/proc/self", name)); err != nil {
+			continue
+		}
+		argv = append(argv, "--ro-bind", "/dev/null", filepath.Join("/proc/1", name))
+		argv = append(argv, "--ro-bind", "/dev/null", filepath.Join("/proc/1/task/1", name))
 	}
 	argv = append(argv,
 		"--dev", "/dev",

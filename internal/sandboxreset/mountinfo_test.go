@@ -194,9 +194,9 @@ func TestSelectMountsExcludesProcAndSysButNotLookalikes(t *testing.T) {
 	plan := planFor(t, []Mount{
 		{ID: 1, Path: "/"},
 		{ID: 2, ParentID: 1, Path: "/proc", Writable: true},
-		{ID: 3, ParentID: 2, Path: "/proc/sys/fs/binfmt_misc", Writable: true},
-		{ID: 4, ParentID: 1, Path: "/sys", Writable: true},
-		{ID: 5, ParentID: 4, Path: "/sys/fs/cgroup", Writable: true},
+		{ID: 3, ParentID: 2, Path: "/proc/sys/fs/binfmt_misc"},
+		{ID: 4, ParentID: 1, Path: "/sys"},
+		{ID: 5, ParentID: 4, Path: "/sys/fs/cgroup"},
 		{ID: 6, ParentID: 1, Path: "/procfoo", Writable: true},
 		{ID: 7, ParentID: 1, Path: "/system", Writable: true},
 		{ID: 8, ParentID: 1, Path: "/tmp", Writable: true},
@@ -204,6 +204,32 @@ func TestSelectMountsExcludesProcAndSysButNotLookalikes(t *testing.T) {
 	if got, want := planPaths(plan), []string{"/procfoo", "/system", "/tmp"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("selected %q, want %q", got, want)
 	}
+}
+
+// Nothing lists what is under /proc and /sys, so a run could leave anything in a writable
+// mount there. A tmpfs over binfmt_misc did exactly that, and survived a reset.
+func TestSelectMountsRefusesAWritableMountItDoesNotCover(t *testing.T) {
+	for _, path := range []string{"/proc/sys/fs/binfmt_misc", "/proc/sys", "/sys", "/sys/fs/cgroup"} {
+		t.Run(path, func(t *testing.T) {
+			_, err := selectMounts([]Mount{
+				{ID: 1, Path: "/"},
+				{ID: 2, ParentID: 1, Path: "/proc", Writable: true},
+				{ID: 3, ParentID: 1, Path: "/tmp", Writable: true},
+				{ID: 4, ParentID: 2, Path: path, Writable: true},
+			})
+			if !errors.Is(err, ErrUncoveredMount) {
+				t.Fatalf("err = %v, want ErrUncoveredMount", err)
+			}
+		})
+	}
+	// The host's mount stays underneath, writable, and only the top of a stack counts.
+	planFor(t, []Mount{
+		{ID: 1, Path: "/"},
+		{ID: 2, ParentID: 1, Path: "/proc", Writable: true},
+		{ID: 3, ParentID: 1, Path: "/tmp", Writable: true},
+		{ID: 4, ParentID: 2, Path: "/proc/sys/fs/binfmt_misc", Writable: true},
+		{ID: 5, ParentID: 4, Path: "/proc/sys/fs/binfmt_misc"},
+	})
 }
 
 func TestSelectMountsGivesANestedMountToItsNearestMount(t *testing.T) {
