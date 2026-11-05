@@ -50,6 +50,8 @@ def nice(tid):
 
 
 def affinity(tid):
+    if len(os.sched_getaffinity(tid)) < 2:
+        sys.exit(UNSUPPORTED)
     cpus = set(sorted(os.sched_getaffinity(tid))[:1])
     os.sched_setaffinity(tid, cpus)
     assert os.sched_getaffinity(tid) == cpus
@@ -389,6 +391,9 @@ def visit(root, e):
         return
     if root == "/proc" and e.name in ("self", "thread-self", "net"):
         return
+    # Out of scope: these reach what a process holds open, not state a run can leave
+    # behind. The workload can open bwrap's fd 2, the runner's stderr pipe, but a pipe's
+    # data does not outlive the sandbox and the runner bounds what it reads.
     if re.fullmatch(r"/proc/\d+(/task/\d+)?", root) and e.name in ("fd", "fdinfo", "map_files", "ns", "net"):
         return
     if e.is_dir(follow_symlinks=False):
