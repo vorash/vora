@@ -58,6 +58,16 @@ func (b *Backend) Prepare(ctx context.Context, h runtime.Handle) (runtime.Resett
 	if !slices.Contains(baseline, int(peer.Pid)) {
 		return nil, fmt.Errorf("bwrap: prepare: agent pid %d is not in cgroup %s (%v)", peer.Pid, dir, baseline)
 	}
+	// The kill signals only what /proc places in this cgroup. Where /proc and the
+	// mount disagree, as in a cgroup namespace over a non-namespaced mount, it would
+	// signal nothing, and this sandbox's first run would be its last.
+	held, err := b.holds(dir, int(peer.Pid))
+	if err != nil {
+		return nil, fmt.Errorf("bwrap: prepare: %w", err)
+	}
+	if !held {
+		return nil, fmt.Errorf("bwrap: prepare: /proc does not place agent pid %d in cgroup %s", peer.Pid, dir)
+	}
 	manifest, err := client.Capture(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("bwrap: prepare: capture: %w", err)

@@ -44,6 +44,7 @@ type fakeSandbox struct {
 func newFakeSandbox(t *testing.T) *fakeSandbox {
 	t.Helper()
 	b, _ := newTestBackend(t)
+	b.holds = func(string, int) (bool, error) { return true, nil }
 	socket := filepath.Join(t.TempDir(), "control.sock")
 	lis, err := net.Listen("unix", socket)
 	if err != nil {
@@ -149,6 +150,29 @@ func TestPrepareRefusesASandboxItCannotProve(t *testing.T) {
 		s.setProcs(os.Getpid() + 1)
 		if _, err := s.b.Prepare(context.Background(), s.hd); err == nil || !strings.Contains(err.Error(), "not in cgroup") {
 			t.Fatalf("Prepare = %v, want the agent missing from the cgroup", err)
+		}
+	})
+	t.Run("proc places the agent elsewhere", func(t *testing.T) {
+		s := newFakeSandbox(t)
+		s.b.holds = func(dir string, pid int) (bool, error) {
+			if dir != s.dir || pid != os.Getpid() {
+				t.Errorf("holds(%q, %d), want the sandbox's cgroup and the connection's peer", dir, pid)
+			}
+			return false, nil
+		}
+		s.agent.reset = func([]byte) (int, error) {
+			t.Error("the admission reset ran on a sandbox whose kill could not signal anything")
+			return 0, nil
+		}
+		if _, err := s.b.Prepare(context.Background(), s.hd); err == nil || !strings.Contains(err.Error(), "does not place") {
+			t.Fatalf("Prepare = %v, want the mismatch named", err)
+		}
+	})
+	t.Run("proc cannot be read", func(t *testing.T) {
+		s := newFakeSandbox(t)
+		s.b.holds = func(string, int) (bool, error) { return false, errors.New("no cgroup v2 line") }
+		if _, err := s.b.Prepare(context.Background(), s.hd); err == nil || !strings.Contains(err.Error(), "no cgroup v2 line") {
+			t.Fatalf("Prepare = %v, want the read failure", err)
 		}
 	})
 }

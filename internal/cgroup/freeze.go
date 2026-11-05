@@ -171,7 +171,6 @@ func killOutside(dir string, keep []int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	rel := cgroupRel(dir)
 	killed := 0
 	for _, pid := range pids {
 		if slices.Contains(keep, pid) {
@@ -187,7 +186,7 @@ func killOutside(dir string, keep []int) (int, error) {
 		// The pidfd pins the task the pid named when it was opened. If the pid
 		// has since been reused, the cgroup read below is of the new task and
 		// does not match, so nothing is sent.
-		member, err := inCgroup(pid, rel)
+		member, err := Holds(dir, pid)
 		if err != nil {
 			_ = unix.Close(fd)
 			return killed, err
@@ -206,19 +205,15 @@ func killOutside(dir string, keep []int) (int, error) {
 	return killed, nil
 }
 
-// cgroupRel is dir as /proc/<pid>/cgroup names it: relative to the cgroup
-// mount, with a leading slash.
-func cgroupRel(dir string) string {
+// Holds reports whether the kernel places pid in the cgroup at dir, by comparing
+// /proc/<pid>/cgroup with dir's path under the mount. A pid that is gone is not
+// held. In a cgroup namespace over a non-namespaced mount the two paths differ
+// for every process, so callers that rely on it check a known member first.
+func Holds(dir string, pid int) (bool, error) {
 	rel := strings.TrimPrefix(dir, cgroupRoot)
 	if rel == "" {
-		return "/"
+		rel = "/"
 	}
-	return rel
-}
-
-// inCgroup reports whether pid's cgroup, as this process sees it, is rel. A pid
-// that is gone is not a member.
-func inCgroup(pid int, rel string) (bool, error) {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
 	if err != nil {
 		if os.IsNotExist(err) || errors.Is(err, unix.ESRCH) {

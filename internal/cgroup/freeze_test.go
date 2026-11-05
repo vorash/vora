@@ -163,6 +163,36 @@ func ownCgroup(t *testing.T) string {
 	return ""
 }
 
+// /proc names a process's cgroup relative to the mount. Under a cgroup namespace
+// over a non-namespaced mount the same process is named differently, and Holds
+// must say no rather than yes: the caller is relying on the answer to signal it.
+func TestHolds(t *testing.T) {
+	root := t.TempDir()
+	old := cgroupRoot
+	cgroupRoot = root
+	t.Cleanup(func() { cgroupRoot = old })
+	rel := ownCgroup(t)
+	cases := []struct {
+		name string
+		dir  string
+		pid  int
+		want bool
+	}{
+		{"this process in its own cgroup", filepath.Join(root, rel), os.Getpid(), true},
+		{"this process and another cgroup", filepath.Join(root, rel, "child"), os.Getpid(), false},
+		{"this process and a namespaced path", filepath.Join(root, "ns-root"), os.Getpid(), false},
+		{"a pid that is gone", filepath.Join(root, rel), neverPID(t), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := Holds(c.dir, c.pid)
+			if err != nil || got != c.want {
+				t.Fatalf("Holds(%q, %d) = %v, %v, want %v", c.dir, c.pid, got, err, c.want)
+			}
+		})
+	}
+}
+
 // The kill reaches a listed process only when the kernel says it is in this
 // cgroup. A pid the list names but that lives elsewhere, as after a pid reuse,
 // is left alone.
