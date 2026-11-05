@@ -56,6 +56,14 @@ done
 case "$sub" in
 ps)
   echo ps >> "$FAKE/calls"
+  if [ -f "$FAKE/ps.after" ] && [ -f "$FAKE/killed" ]; then
+    killed=$(cat "$FAKE/killed")
+    now=$(date +%s%N)
+    if [ $(( (now - killed) / 1000000 )) -ge "$(cat "$FAKE/ps.after")" ]; then
+      echo "[1]"
+      exit 0
+    fi
+  fi
   n=$(cat "$FAKE/ps.n" 2>/dev/null || echo 0)
   n=$((n+1))
   echo "$n" > "$FAKE/ps.n"
@@ -288,6 +296,50 @@ func TestSurvivorFailsClosedBeforeTheHelper(t *testing.T) {
 	}
 	if kills != killPasses {
 		t.Fatalf("%d kill passes, want %d", kills, killPasses)
+	}
+}
+
+// A killed process stays listed until the Sentry has torn it down, longer if the member is
+// out of CPU. The passes must outlast that rather than call it a survivor and cost a healthy
+// member. Without the backoff this fake runs through all ten passes in a few tens of ms.
+func TestKillPassesWaitForASlowDeath(t *testing.T) {
+	f := newFakeReuse(t, "[1]")
+	r := f.prepared()
+	f.restart("[1,7]")
+	f.write("ps.after", "400")
+	report, err := r.Reset(testCtx(t))
+	if err != nil {
+		t.Fatalf("a process that takes 400 ms to die: %v", err)
+	}
+	if report.ProcessesKilled != 1 {
+		t.Fatalf("report %+v", report)
+	}
+}
+
+// What never dies must still fail closed, bounded by passes and well inside the pool's 10 s,
+// and the backoff owes the deadline as much as any runsc call does.
+func TestKillPassesStayBounded(t *testing.T) {
+	f := newFakeReuse(t, "[1]")
+	r := f.prepared()
+	f.restart("[1,7]")
+	start := time.Now()
+	if _, err := r.Reset(testCtx(t)); !errors.Is(err, runtime.ErrUnproven) {
+		t.Fatalf("Reset = %v, want ErrUnproven", err)
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("giving up on a survivor took %v", took)
+	}
+
+	f.restart("[1,7]")
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	start = time.Now()
+	_, err := r.Reset(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Reset = %v, want the deadline", err)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("the backoff held a 150 ms deadline for %v", took)
 	}
 }
 

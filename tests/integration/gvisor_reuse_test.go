@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	goruntime "runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -763,6 +764,62 @@ func TestGvisorAbandonedExecFailsClosed(t *testing.T) {
 	if _, err := m.tryReset(); !errors.Is(err, runtime.ErrUnproven) || !strings.Contains(err.Error(), "abandoned") {
 		t.Fatalf("with the Sentry back, Reset = %v, want it still refused", err)
 	}
+}
+
+// busyHost loads every host CPU for the rest of the test.
+func busyHost(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	for range goruntime.NumCPU() {
+		cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "while :; do :; done")
+		cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		go func() { _ = cmd.Wait() }()
+	}
+}
+
+// holdMemory backgrounds a process that keeps sys.argv[1] bytes resident, then marks /tmp.
+const holdMemory = `
+import os, sys, time
+n = int(sys.argv[1])
+if os.fork() != 0:
+    os._exit(0)
+os.setsid()
+for fd in (0, 1, 2):
+    os.close(fd)
+b = bytearray(n)
+for i in range(0, n, 4096):
+    b[i] = 1
+open("/tmp/ready", "w").close()
+time.sleep(300)
+`
+
+// A process with a lot of memory takes the Sentry a while to tear down, and more on a member
+// out of CPU on a busy host. That must not read as a process that survived the kill passes.
+func TestGvisorResetOfALargeProcess(t *testing.T) {
+	requireGvisor(t)
+	busyHost(t)
+	m := mustGvisorMember(t, gvisorMemberOpts{cpuMillis: 1000, memory: 4 << 30})
+	var took []time.Duration
+	for range 3 {
+		mustExec(t, m.backend, m.h, "/usr/bin/python3", "-c", holdMemory, strconv.Itoa(2<<30))
+		waitForOutput(t, func() string { return mustExec(t, m.backend, m.h, "/bin/ls", "/tmp") }, "ready")
+		mustExec(t, m.backend, m.h, "/bin/sh", "-c", burners)
+		rss := m.cgroupFile(t, "memory.current")
+		start := time.Now()
+		report, err := m.tryReset()
+		if err != nil {
+			t.Fatalf("a large process at memory %s cost the member: %v", rss, err)
+		}
+		took = append(took, time.Since(start))
+		if report.ProcessesKilled != 5 {
+			t.Fatalf("report %+v, want the holder and the 4 burners", report)
+		}
+	}
+	t.Logf("reset %s", describeLatency(took))
 }
 
 // forkChains keeps moving: each process forks and exits, so a pid is stale by the time the
