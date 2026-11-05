@@ -965,9 +965,14 @@ func TestADeepTreeDoesNotSizeTheError(t *testing.T) {
 	})
 	t.Run("proof walk finding it", func(t *testing.T) {
 		s := newSandbox(t)
+		deepest := s.plantDeepTree("mnt")
 		m := capture(t, s.info())
-		s.plantDeepTree("mnt")
-		err := verifyListings(context.Background(), m)
+		leaf, err := unix.Openat(deepest, "planted", unix.O_CREAT|unix.O_WRONLY|unix.O_CLOEXEC, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = unix.Close(leaf)
+		err = verifyListings(context.Background(), m)
 		if !errors.Is(err, ErrNotClean) {
 			t.Fatalf("err = %v, want ErrNotClean", err)
 		}

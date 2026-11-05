@@ -375,7 +375,7 @@ func TestCaptureDigestsNamesAndValuesInAnyOrder(t *testing.T) {
 	set("emptyvalue", [2]string{"user.a", ""})
 	set("othervalue", [2]string{"user.a", "x"})
 	// Without a length on each part, this one's bytes read the same as ab's.
-	set("run-together", [2]string{"user.a", "1\x00user.b\x002"})
+	set("run-together", [2]string{"user.a", "1user.b2"})
 
 	l := listing(t, capture(t, s.info()), s.mount)
 	digest := func(rel string) string { return entry(t, l, rel).Xattrs }
