@@ -1129,7 +1129,7 @@ func TestManifestValidationRefusesWhatRestoreCouldBeMisledBy(t *testing.T) {
 // its /proc/self files to root.
 func TestRestoreWorksUnderTheAgentsRestrictions(t *testing.T) {
 	inChild(t, func() {
-		if err := seccomp.Install(); err != nil {
+		if err := seccomp.Install(true); err != nil {
 			t.Fatalf("seccomp: %v", err)
 		}
 		if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {

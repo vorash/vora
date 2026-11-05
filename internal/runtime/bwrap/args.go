@@ -36,6 +36,8 @@ type BuildOptions struct {
 	// sandbox resolves names through the gateway resolver. The image must
 	// provide the mount point.
 	ResolvConf string
+	// DenyIPC has the agent add seccomp.IPCSyscalls to its filter.
+	DenyIPC bool
 }
 
 // Args builds the bubblewrap argv for a sandbox. It is pure so it can be
@@ -120,5 +122,8 @@ func Args(opts BuildOptions) ([]string, error) {
 	argv = append(argv,
 		"--", InitInside, "--socket", SocketInside,
 	)
+	if opts.DenyIPC {
+		argv = append(argv, "--deny-ipc")
+	}
 	return argv, nil
 }

@@ -159,10 +159,19 @@ type resetSandbox struct {
 }
 
 // newResetSandbox seeds the workspace from the host, because a real template is in place
-// before the first capture and no exec may run before it.
+// before the first capture and no exec may run before it. It denies IPC like every
+// sandbox that gets reset, so these tests also prove Capture and Reset work without it.
 func newResetSandbox(t *testing.T) *resetSandbox {
 	t.Helper()
-	backend, h, ws := newBwrapSandboxPaths(t, nil, runtime.ResourceLimits{CPUMillis: 1000, MemoryBytes: 256 << 20, Pids: 64})
+	return newResetSandboxWith(t, true)
+}
+
+func newResetSandboxWith(t *testing.T, denyIPC bool) *resetSandbox {
+	t.Helper()
+	backend, h, ws := startBwrapSandbox(t, runtime.SandboxSpec{
+		Resources: runtime.ResourceLimits{CPUMillis: 1000, MemoryBytes: 256 << 20, Pids: 64},
+		DenyIPC:   denyIPC,
+	})
 	if err := os.WriteFile(filepath.Join(ws.WorkspaceDir, "keep"), []byte("template\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -789,6 +798,7 @@ func TestGvisorHelperCaptureAndReset(t *testing.T) {
 		Network:   runtime.NetworkPolicy{Mode: runtime.NetworkNone},
 		TTL:       time.Minute,
 		Workspace: wsp,
+		DenyIPC:   true,
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)

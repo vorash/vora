@@ -139,6 +139,13 @@ func newBwrapSandboxWith(t *testing.T, env map[string]string, limits runtime.Res
 // newBwrapSandboxPaths also returns the sandbox's paths on the host.
 func newBwrapSandboxPaths(t *testing.T, env map[string]string, limits runtime.ResourceLimits) (*bwrap.Backend, runtime.Handle, runtime.WorkspaceSpec) {
 	t.Helper()
+	return startBwrapSandbox(t, runtime.SandboxSpec{Resources: limits, Env: env})
+}
+
+// startBwrapSandbox starts a sandbox from what spec sets, plus an id, image, network
+// mode, TTL and workspace of its own.
+func startBwrapSandbox(t *testing.T, spec runtime.SandboxSpec) (*bwrap.Backend, runtime.Handle, runtime.WorkspaceSpec) {
+	t.Helper()
 
 	initBin := buildBinary(t, "vora-init")
 	t.Setenv("VORA_INIT_BINARY", initBin)
@@ -172,15 +179,11 @@ func newBwrapSandboxPaths(t *testing.T, env map[string]string, limits runtime.Re
 	}
 	t.Cleanup(func() { _ = wsManager.Destroy(id) })
 
-	spec := runtime.SandboxSpec{
-		ID:        id,
-		Image:     "base",
-		Resources: limits,
-		Network:   runtime.NetworkPolicy{Mode: runtime.NetworkNone},
-		TTL:       time.Minute,
-		Workspace: ws,
-		Env:       env,
-	}
+	spec.ID = id
+	spec.Image = "base"
+	spec.Network = runtime.NetworkPolicy{Mode: runtime.NetworkNone}
+	spec.TTL = time.Minute
+	spec.Workspace = ws
 
 	ctx := context.Background()
 	h, err := backend.Create(ctx, spec)
