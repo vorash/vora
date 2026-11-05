@@ -167,6 +167,45 @@ func (s *sandbox) assertCanary() {
 	}
 }
 
+// deepTreeDepth is deep enough that wrapping a name per level, or printing the
+// whole path, would make an error far longer than errorSizeLimit.
+const (
+	deepTreeDepth  = 600
+	errorSizeLimit = 2048
+)
+
+// plantDeepTree nests deepTreeDepth directories under rel and returns the deepest
+// one, open. It steps by descriptor because the whole path is longer than a
+// syscall takes.
+func (s *sandbox) plantDeepTree(rel string) int {
+	s.t.Helper()
+	name := strings.Repeat("d", 100)
+	fd, err := unix.Open(s.path(rel), unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	for range deepTreeDepth {
+		if err := unix.Mkdirat(fd, name, 0o755); err != nil {
+			s.t.Fatal(err)
+		}
+		next, err := unix.Openat(fd, name, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		_ = unix.Close(fd)
+		if err != nil {
+			s.t.Fatal(err)
+		}
+		fd = next
+	}
+	s.t.Cleanup(func() { _ = unix.Close(fd) })
+	return fd
+}
+
+func assertSmallError(t *testing.T, err error) {
+	t.Helper()
+	if n := len(err.Error()); n > errorSizeLimit {
+		t.Fatalf("error is %d bytes, want at most %d: %.200s...", n, errorSizeLimit, err.Error())
+	}
+}
+
 // capture lists the tree and sends the manifest through JSON, the way it reaches
 // the helper's stdin under gVisor.
 func capture(t *testing.T, info string) Manifest {

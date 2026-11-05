@@ -79,7 +79,7 @@ func (w *walker) visit(parent int, name, rel string) error {
 	}
 	var st unix.Stat_t
 	if err := lstatAt(parent, name, &st); err != nil {
-		return fmt.Errorf("%s: %w", rel, err)
+		return fmt.Errorf("%s: %w", shortRel(rel), err)
 	}
 	if w.nested[rel] {
 		w.entries = append(w.entries, Entry{Rel: rel, Type: TypeMountpoint})
@@ -92,15 +92,15 @@ func (w *walker) visit(parent int, name, rel string) error {
 	switch e.Type {
 	case TypeSymlink:
 		if e.Target, err = readlinkAt(parent, name); err != nil {
-			return fmt.Errorf("%s: %w", rel, err)
+			return fmt.Errorf("%s: %w", shortRel(rel), err)
 		}
 		// JSON would hand back a different target from the host.
 		if !utf8.ValidString(e.Target) {
-			return fmt.Errorf("%s: link target %q is not valid UTF-8", rel, e.Target)
+			return fmt.Errorf("%s: link target %q is not valid UTF-8", shortRel(rel), e.Target)
 		}
 	case TypeFile:
 		if e.SHA256, err = hashFileAt(parent, name, &st); err != nil {
-			return fmt.Errorf("%s: %w", rel, err)
+			return fmt.Errorf("%s: %w", shortRel(rel), err)
 		}
 	}
 	w.entries = append(w.entries, e)
@@ -109,16 +109,16 @@ func (w *walker) visit(parent int, name, rel string) error {
 	}
 
 	if st.Dev != w.rootDev {
-		return fmt.Errorf("%w: %s", ErrUnlistedMount, rel)
+		return fmt.Errorf("%w: %s", ErrUnlistedMount, shortRel(rel))
 	}
 	fd, err := openDirAt(parent, name, &st)
 	if err != nil {
-		return fmt.Errorf("%s: %w", rel, err)
+		return fmt.Errorf("%s: %w", shortRel(rel), err)
 	}
 	defer func() { _ = unix.Close(fd) }()
 	names, err := readNames(fd)
 	if err != nil {
-		return fmt.Errorf("%s: %w", rel, err)
+		return fmt.Errorf("%s: %w", shortRel(rel), err)
 	}
 	for _, child := range names {
 		if err := w.visit(fd, child, childRel(rel, child)); err != nil {
@@ -133,6 +133,16 @@ func childRel(rel, name string) string {
 		return name
 	}
 	return rel + "/" + name
+}
+
+// shortRel bounds a path in an error. A planted tree decides how deep a path can
+// be, and it must not decide how long a line in the reset log is.
+func shortRel(rel string) string {
+	const limit = 256
+	if len(rel) <= limit {
+		return rel
+	}
+	return "..." + rel[len(rel)-limit:]
 }
 
 func entryFromStat(rel string, st *unix.Stat_t) (Entry, error) {
@@ -156,7 +166,7 @@ func entryFromStat(rel string, st *unix.Stat_t) (Entry, error) {
 	case unix.S_IFIFO:
 		e.Type = TypeFIFO
 	default:
-		return Entry{}, fmt.Errorf("%s: unknown file type %#o", rel, st.Mode&unix.S_IFMT)
+		return Entry{}, fmt.Errorf("%s: unknown file type %#o", shortRel(rel), st.Mode&unix.S_IFMT)
 	}
 	return e, nil
 }

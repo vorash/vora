@@ -69,10 +69,14 @@ func verifyListings(ctx context.Context, m Manifest) error {
 
 func summarize(rels []string) string {
 	const shown = 5
-	if len(rels) <= shown {
-		return strings.Join(rels, ", ")
+	var names []string
+	for _, rel := range rels[:min(shown, len(rels))] {
+		names = append(names, shortRel(rel))
 	}
-	return fmt.Sprintf("%s and %d more", strings.Join(rels[:shown], ", "), len(rels)-shown)
+	if len(rels) <= shown {
+		return strings.Join(names, ", ")
+	}
+	return fmt.Sprintf("%s and %d more", strings.Join(names, ", "), len(rels)-shown)
 }
 
 // pruneMount removes what l does not list from one mount.
@@ -115,23 +119,23 @@ func (p *pruner) pruneListed(parent int, name, rel string, st *unix.Stat_t) erro
 	}
 	want.SHA256, want.Target = "", ""
 	if got != want {
-		return fmt.Errorf("%w: %s", ErrUnrestorable, rel)
+		return fmt.Errorf("%w: %s", ErrUnrestorable, shortRel(rel))
 	}
 	if got.Type != TypeDir {
 		return nil
 	}
 	if st.Dev != p.rootDev {
-		return fmt.Errorf("%w: %s", ErrUnlistedMount, rel)
+		return fmt.Errorf("%w: %s", ErrUnlistedMount, shortRel(rel))
 	}
 
 	fd, err := openDirAt(parent, name, st)
 	if err != nil {
-		return fmt.Errorf("%s: %w", rel, err)
+		return fmt.Errorf("%s: %w", shortRel(rel), err)
 	}
 	defer func() { _ = unix.Close(fd) }()
 	names, err := readNames(fd)
 	if err != nil {
-		return fmt.Errorf("%s: %w", rel, err)
+		return fmt.Errorf("%s: %w", shortRel(rel), err)
 	}
 	for _, child := range names {
 		if err := p.ctx.Err(); err != nil {
@@ -140,13 +144,13 @@ func (p *pruner) pruneListed(parent int, name, rel string, st *unix.Stat_t) erro
 		cr := childRel(rel, child)
 		if _, listed := p.want[cr]; !listed {
 			if err := p.remove(fd, child); err != nil {
-				return fmt.Errorf("remove %q: %w", cr, err)
+				return fmt.Errorf("remove %q: %w", shortRel(cr), err)
 			}
 			continue
 		}
 		var childSt unix.Stat_t
 		if err := lstatAt(fd, child, &childSt); err != nil {
-			return fmt.Errorf("%s: %w", cr, err)
+			return fmt.Errorf("%s: %w", shortRel(cr), err)
 		}
 		if err := p.pruneListed(fd, child, cr, &childSt); err != nil {
 			return err
@@ -189,7 +193,7 @@ func (p *pruner) remove(parent int, name string) error {
 	}
 	for _, child := range names {
 		if err := p.remove(fd, child); err != nil {
-			return fmt.Errorf("%q: %w", child, err)
+			return err
 		}
 	}
 	if err := unix.Unlinkat(parent, name, unix.AT_REMOVEDIR); err != nil {

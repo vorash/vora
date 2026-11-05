@@ -583,6 +583,117 @@ func TestRemoveRefusesADirectoryOnAnotherDevice(t *testing.T) {
 	s.assertNames("mnt/foreign", "file")
 }
 
+func TestRestoreRemovesADeepPlantedTree(t *testing.T) {
+	s := newSandbox(t)
+	info := s.info()
+	m := capture(t, info)
+	s.plantDeepTree("mnt")
+	removed, err := restore(t, m, info)
+	if err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if removed != deepTreeDepth {
+		t.Errorf("removed = %d, want %d", removed, deepTreeDepth)
+	}
+	s.assertNames("mnt")
+}
+
+// The error reaches a log line that the design appends to, and the workload
+// chooses how deep the tree is.
+func TestADeepTreeDoesNotSizeTheError(t *testing.T) {
+	t.Run("removal failing at the bottom", func(t *testing.T) {
+		inChild(t, func() {
+			s := newSandbox(t)
+			info := s.info()
+			m := capture(t, info)
+			s.plantDeepTree("mnt")
+			failSyscalls(t, map[uint32]unix.Errno{unix.SYS_UNLINKAT: unix.EIO})
+			_, err := restore(t, m, info)
+			if !errors.Is(err, unix.EIO) {
+				t.Fatalf("err = %v, want EIO", err)
+			}
+			assertSmallError(t, err)
+		})
+	})
+	t.Run("capture failing at the bottom", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads a mode-000 file")
+		}
+		s := newSandbox(t)
+		deepest := s.plantDeepTree("mnt")
+		leaf, err := unix.Openat(deepest, "leaf", unix.O_CREAT|unix.O_WRONLY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = unix.Close(leaf)
+		_, err = Capture(context.Background(), strings.NewReader(s.info()))
+		if !errors.Is(err, unix.EACCES) {
+			t.Fatalf("err = %v, want EACCES", err)
+		}
+		assertSmallError(t, err)
+	})
+	t.Run("listed entry changed at the bottom", func(t *testing.T) {
+		s := newSandbox(t)
+		deepest := s.plantDeepTree("mnt")
+		leaf, err := unix.Openat(deepest, "leaf", unix.O_CREAT|unix.O_WRONLY|unix.O_CLOEXEC, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = unix.Close(leaf)
+		info := s.info()
+		m := capture(t, info)
+		if err := unix.Fchmodat(deepest, "leaf", 0o600, 0); err != nil {
+			t.Fatal(err)
+		}
+		_, err = restore(t, m, info)
+		if !errors.Is(err, ErrUnrestorable) {
+			t.Fatalf("err = %v, want ErrUnrestorable", err)
+		}
+		assertSmallError(t, err)
+	})
+	t.Run("proof walk finding it", func(t *testing.T) {
+		s := newSandbox(t)
+		m := capture(t, s.info())
+		s.plantDeepTree("mnt")
+		err := verifyListings(context.Background(), m)
+		if !errors.Is(err, ErrNotClean) {
+			t.Fatalf("err = %v, want ErrNotClean", err)
+		}
+		assertSmallError(t, err)
+	})
+}
+
+// A walk holds one descriptor per level, so a deep enough tree runs out of them.
+func TestRunningOutOfDescriptorsFailsClosed(t *testing.T) {
+	limit := unix.Rlimit{Cur: 64, Max: 64}
+	t.Run("restore", func(t *testing.T) {
+		inChild(t, func() {
+			s := newSandbox(t)
+			info := s.info()
+			m := capture(t, info)
+			s.plantDeepTree("mnt")
+			if err := unix.Setrlimit(unix.RLIMIT_NOFILE, &limit); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := restore(t, m, info); !errors.Is(err, unix.EMFILE) {
+				t.Fatalf("err = %v, want EMFILE", err)
+			}
+		})
+	})
+	t.Run("capture", func(t *testing.T) {
+		inChild(t, func() {
+			s := newSandbox(t)
+			s.plantDeepTree("mnt")
+			if err := unix.Setrlimit(unix.RLIMIT_NOFILE, &limit); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Capture(context.Background(), strings.NewReader(s.info())); !errors.Is(err, unix.EMFILE) {
+				t.Fatalf("err = %v, want EMFILE", err)
+			}
+		})
+	})
+}
+
 // Restore prunes before this walk, so calling Restore cannot show that the walk
 // would catch something the prune left.
 func TestTheProofWalkReportsWhatThePruneLeft(t *testing.T) {
