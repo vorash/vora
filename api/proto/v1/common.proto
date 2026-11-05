@@ -101,6 +101,9 @@ message Sandbox {
   int64 created_at_unix_ms = 6;
   int64 updated_at_unix_ms = 7;
   string image_rootfs = 8;
+  // pool_id names the pool that owns this sandbox; empty for a sandbox
+  // created through the sandboxes API.
+  string pool_id = 9;
 }
 
 // ExecRequest is a command to run inside a sandbox.

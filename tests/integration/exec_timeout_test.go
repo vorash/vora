@@ -54,6 +54,9 @@ func newExecClient(t *testing.T) v1.RunnerServiceClient {
 		t.Fatalf("register: %v", err)
 	}
 	srv := runner.NewServer(cfg, sandbox.NewStore(cfg.SandboxesDir()), registry, ulid.NewRunner(), logger)
+	if err := srv.LoadPools(); err != nil {
+		t.Fatalf("LoadPools: %v", err)
+	}
 
 	socket := filepath.Join(t.TempDir(), "runner.sock")
 	lis, err := net.Listen("unix", socket)

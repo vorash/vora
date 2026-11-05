@@ -162,6 +162,37 @@ func TestBackgroundProcessOutlivesItsExec(t *testing.T) {
 	}
 }
 
+// A client can close the stream the moment it reads the exit chunk, before the
+// handler has returned. That close is not a client going away from a running
+// command: what the finished exec left in its group stays.
+func TestCancelOnTheExitChunkSparesABackgroundProcess(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var out strings.Builder
+	err := testAgent().Exec(ctx, &v1.ExecRequest{
+		Command: "/bin/sh", Cwd: t.TempDir(),
+		Args: []string{"-c", "sleep " + holderSeconds + " </dev/null >/dev/null 2>&1 & echo $!"},
+	}, func(c *v1.ExecChunk) error {
+		out.Write(c.GetStdout())
+		if c.GetExit() != nil {
+			cancel()
+			time.Sleep(200 * time.Millisecond)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(out.String()))
+	if err != nil {
+		t.Fatalf("pid %q: %v", out.String(), err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	if !pidAlive(t, pid) {
+		t.Fatal("the background process died with the client's cancel of a finished exec")
+	}
+}
+
 // The kill still has a job: a client that disconnects must not leave its command running.
 func TestClientGoneKillsTheExec(t *testing.T) {
 	_, client := startAgentProcess(t, 2)

@@ -96,10 +96,19 @@ func (u *Unit) Stats(ctx context.Context) (*runtime.Stats, error) {
 
 // OpenWindow starts a usage window on the unit's cgroup.
 func (u *Unit) OpenWindow(ctx context.Context) (*Window, error) {
-	if err := u.resolveCgroup(ctx); err != nil {
+	dir, err := u.Dir(ctx)
+	if err != nil {
 		return nil, err
 	}
-	return OpenWindow(filepath.Join(cgroupRoot, u.cgroupPath))
+	return OpenWindow(dir)
+}
+
+// Dir is the absolute filesystem path of the unit's cgroup directory.
+func (u *Unit) Dir(ctx context.Context) (string, error) {
+	if err := u.resolveCgroup(ctx); err != nil {
+		return "", err
+	}
+	return filepath.Join(cgroupRoot, u.cgroupPath), nil
 }
 
 // resolveCgroup asks systemd for the unit's cgroup when Start could not.

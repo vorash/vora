@@ -1,0 +1,157 @@
+syntax = "proto3";
+
+package vora.v1;
+
+import "api/proto/v1/common.proto";
+
+option go_package = "github.com/vorash/vora/api/proto/v1;v1";
+
+// PoolReuse is what happens to a pool sandbox between runs.
+enum PoolReuse {
+  POOL_REUSE_UNSPECIFIED = 0; // treated as RESET
+  POOL_REUSE_RESET = 1;
+  // Experiment baseline only. Needs an admin key at the API and
+  // VORA_POOL_UNSAFE_REUSE=allow on the runner.
+  POOL_REUSE_UNSAFE_NO_RESET = 2;
+}
+
+// PoolSpec is the desired state of a pool. It is immutable after create: a
+// declare with a different spec is refused, never an in-place update.
+message PoolSpec {
+  string name = 1;      // [a-z0-9-]{1,64}, unique per tenant
+  string tenant_id = 2; // forced from the key at the API
+  string agent_id = 3;  // forced from an agent-bound key
+  // Template for every member. sandbox_id, tenant_id, agent_id and
+  // ttl_seconds must be empty: the pool owns identity and lifetime.
+  // network.mode must be NETWORK_NONE in this version.
+  SandboxSpec sandbox = 4;
+  optional uint32 size = 5;              // warm target; default 8; 0 = every run starts cold
+  optional uint32 max_size = 6;          // ceiling on members of any kind; default max(size, 1)
+  optional uint32 max_runs = 7;          // runs per member before it is replaced; default 100
+  optional int64 max_age_seconds = 8;    // member age limit; default 1800
+  optional int64 max_run_seconds = 9;    // cap on a run's timeout_seconds; default 300
+  optional int64 borrow_timeout_ms = 10; // wait for an idle member; default 2000
+  optional int64 idle_expiry_seconds = 11; // no run for this long drains to size 0; default 3600
+  PoolReuse reuse = 12;
+}
+
+// PoolStats is a snapshot of one pool. Counters reset when the runner
+// process restarts.
+message PoolStats {
+  uint32 starting = 1;
+  uint32 idle = 2;
+  uint32 busy = 3;
+  uint32 resetting = 4;
+  uint32 retiring = 5;
+  uint64 runs_total = 6;
+  uint64 warm_runs_total = 7;
+  uint64 resets_total = 8;
+  uint64 reset_failures_total = 9;
+  uint64 destroyed_total = 10;
+  string last_start_error = 11;
+  uint64 exhausted_total = 12;
+  uint64 start_failed_total = 13;
+  // dormant is true while idle_expiry has passed with no run: the warm target
+  // is 0 until the next run.
+  bool dormant = 14;
+}
+
+enum PoolState {
+  POOL_STATE_UNSPECIFIED = 0;
+  POOL_ACTIVE = 1;
+  POOL_DRAINING = 2;
+  // The runner keeps this pool's definition but refused to load it at its last
+  // boot: it has no members and no reservation, runs are FAILED_PRECONDITION, and
+  // a boot that can honour it loads it again. not_loaded_reason says why.
+  POOL_NOT_LOADED = 3;
+}
+
+message Pool {
+  string id = 1;        // pool_<ulid>, minted by the runner
+  PoolSpec spec = 2;    // with defaults filled in
+  PoolState state = 3;
+  string runner_id = 4;
+  PoolStats stats = 5;
+  int64 created_at_unix_ms = 6;
+  // Why the pool is POOL_NOT_LOADED: backend_missing, backend_not_reusable,
+  // unsafe_reuse_not_granted, spec_refused, capacity or duplicate_name.
+  string not_loaded_reason = 7;
+}
+
+message CreatePoolRequest {
+  PoolSpec spec = 1;
+  Actor actor = 2;
+}
+
+// tenant_id is required on every pool lookup. A pool owned by another tenant
+// is NOT_FOUND, as if it did not exist.
+message GetPoolRequest {
+  string pool_id = 1;
+  string tenant_id = 2;
+}
+
+message DeletePoolRequest {
+  string pool_id = 1;
+  string tenant_id = 2;
+  Actor actor = 3;
+  // wait_ms is how long to wait for busy members to finish before answering
+  // drained=false. 0 answers at once. Keep it under the call's own deadline,
+  // or the answer never reaches the caller.
+  int64 wait_ms = 4;
+}
+
+// drained is false while busy members are still finishing; the call is
+// idempotent and the caller repeats it.
+message DeletePoolResponse {
+  bool drained = 1;
+}
+
+message RunInPoolRequest {
+  string pool_id = 1;
+  string tenant_id = 2;
+  ExecRequest exec = 3; // timeout_seconds required, <= max_run_seconds
+  Actor actor = 4;
+}
+
+// PoolRun is the first frame of every pool run. It is sent once the sandbox
+// has accepted the command, before any output.
+message PoolRun {
+  string pool_id = 1;
+  string sandbox_id = 2;
+  string execution_id = 3;
+  bool warm = 4;
+  int64 startup_ms = 5;   // borrow wait, plus the cold start when !warm
+  int64 reset_ms = 6;     // the reset that prepared this sandbox; 0 on its first run
+  uint32 sandbox_run = 7; // 1-based, this run included
+  PoolReuse reuse = 8;
+}
+
+// PoolResetOutcome is what happened to the member after the run.
+enum PoolResetOutcome {
+  POOL_RESET_UNSPECIFIED = 0;
+  POOL_RESET_OK = 1;      // proven clean, idle again
+  POOL_RESET_FAILED = 2;  // not proven; the member is being destroyed
+  POOL_RESET_SKIPPED = 3; // the pool does not reset (unsafe reuse)
+  POOL_RESET_RETIRED = 4; // retired without a reset (max_runs, max_age, shrink, drain)
+}
+
+// PoolRunDone is the last frame of every pool run: this run's own reset.
+// Clients that only need the result stop at exit.
+message PoolRunDone {
+  PoolResetOutcome outcome = 1;
+  int64 reset_ms = 2;      // the reset's duration, when one ran
+  string retire_cause = 3; // set when the member is being destroyed
+}
+
+// RunChunk is one streamed unit of a pool run: run first, output, exit, then
+// run_done. It is a separate type from ExecChunk, so a plain exec stream can
+// never carry a run frame.
+message RunChunk {
+  oneof payload {
+    PoolRun run = 1;
+    bytes stdout = 2;
+    bytes stderr = 3;
+    ExecExit exit = 4;
+    PoolRunDone run_done = 5;
+  }
+}

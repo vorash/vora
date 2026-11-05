@@ -3,6 +3,7 @@ package pool
 import (
 	"errors"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -104,6 +105,8 @@ func TestParseRejects(t *testing.T) {
 		{"borrow_timeout below its floor", func(r *RawSpec) { r.BorrowTimeout = time.Nanosecond }, testLimits, ErrInvalidSpec},
 		{"idle_expiry below its floor", func(r *RawSpec) { r.IdleExpiry = time.Nanosecond }, testLimits, ErrInvalidSpec},
 		{"bad name", func(r *RawSpec) { r.Name = "Py Pool" }, testLimits, ErrInvalidSpec},
+		{"name too long", func(r *RawSpec) { r.Name = strings.Repeat("a", 65) }, testLimits, ErrInvalidSpec},
+		{"tenant too long", func(r *RawSpec) { r.TenantID = strings.Repeat("a", 129) }, testLimits, ErrInvalidSpec},
 		{"no tenant", func(r *RawSpec) { r.TenantID = "" }, testLimits, ErrInvalidSpec},
 	}
 	for _, c := range cases {
@@ -157,5 +160,32 @@ func TestParseAcceptsTheBoundaries(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// The two backends' pids limits count different things, and on gVisor reaching it kills
+// the sandbox, so a limit that would be fine under bwrap makes a pool that can never start.
+func TestPidsFloorDependsOnTheBackend(t *testing.T) {
+	for _, tc := range []struct {
+		backend string
+		pids    int64
+		ok      bool
+	}{
+		{"bwrap", 11, false},
+		{"bwrap", 12, true},
+		{"gvisor", 12, false},
+		{"gvisor", 63, false},
+		{"gvisor", 64, true},
+	} {
+		raw := rawSpec(4, 8)
+		raw.Template.Backend = tc.backend
+		raw.Template.Resources.Pids = tc.pids
+		_, err := Parse(raw, testLimits)
+		if tc.ok && err != nil {
+			t.Errorf("%s pids %d: %v", tc.backend, tc.pids, err)
+		}
+		if !tc.ok && !errors.Is(err, ErrInvalidSpec) {
+			t.Errorf("%s pids %d: err = %v, want ErrInvalidSpec", tc.backend, tc.pids, err)
+		}
 	}
 }

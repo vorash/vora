@@ -60,6 +60,9 @@ func TestRunnerSandboxLifecycle(t *testing.T) {
 	}
 	store := sandbox.NewStore(cfg.SandboxesDir())
 	srv := runner.NewServer(cfg, store, registry, ulid.NewRunner(), logger)
+	if err := srv.LoadPools(); err != nil {
+		t.Fatalf("LoadPools: %v", err)
+	}
 
 	socket := filepath.Join(t.TempDir(), "runner.sock")
 	lis, err := net.Listen("unix", socket)
@@ -172,6 +175,9 @@ func TestRunnerEnforcesDiskQuota(t *testing.T) {
 	}
 	store := sandbox.NewStore(cfg.SandboxesDir())
 	srv := runner.NewServer(cfg, store, registry, ulid.NewRunner(), logger)
+	if err := srv.LoadPools(); err != nil {
+		t.Fatalf("LoadPools: %v", err)
+	}
 
 	socket := filepath.Join(t.TempDir(), "runner.sock")
 	lis, err := net.Listen("unix", socket)

@@ -25,6 +25,7 @@ import (
 	"github.com/vorash/vora/internal/egress"
 	"github.com/vorash/vora/internal/identity"
 	"github.com/vorash/vora/internal/images"
+	"github.com/vorash/vora/internal/pool"
 	"github.com/vorash/vora/internal/quota"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/sandbox"
@@ -76,7 +77,29 @@ type Server struct {
 	// store, the only one retention may prune. It is configuration, not a type
 	// check, so wrapping the store cannot silently disable retention.
 	localAudit bool
+
+	pools  poolRegistry
+	events poolEvents
+	// auditTimeout bounds an audit write on the path of a sandbox start, exec or
+	// destroy: a stalled store loses the record, logged and counted, rather than
+	// holding the caller, and with it a pool member.
+	auditTimeout time.Duration
+	// execGrace is how long past its own timeout a pool run may stay open
+	// before the runner ends it with a synthesized TIMEOUT_EXCEEDED.
+	execGrace time.Duration
+	// poolCloseTimeout bounds waiting for the pools to stop at shutdown.
+	poolCloseTimeout time.Duration
+	// poolOptions tune every pool's timeouts; zero means pool's defaults.
+	poolOptions pool.Options
 }
+
+// defaultExecGrace is the design's hard deadline margin: timeout + 5 s.
+const defaultExecGrace = 5 * time.Second
+
+const (
+	defaultAuditTimeout     = 5 * time.Second
+	defaultPoolCloseTimeout = 10 * time.Second
+)
 
 // sandboxHandle binds a sandbox to the backend that manages it, so later RPCs
 // (exec/stats/signal/destroy) use the right backend.
@@ -142,8 +165,15 @@ func NewServer(cfg config.Config, store *sandbox.Store, registry *runtime.Regist
 		allowedWindow:    defaultAllowedWindow,
 		allowedWindows:   make(map[allowedKey]*allowedCount),
 		allowedSandboxes: make(map[string]*allowedCount),
+		execGrace:        defaultExecGrace,
+		auditTimeout:     defaultAuditTimeout,
+		poolCloseTimeout: defaultPoolCloseTimeout,
 	}
+	s.pools.byID = make(map[pool.ID]*poolEntry)
+	s.pools.notLoaded = make(map[pool.ID]*notLoadedPool)
+	s.events.init(s)
 	s.setQuotaModeMetric()
+	s.metrics.RegisterPoolSource(s.poolSamples)
 	return s
 }
 
@@ -169,6 +199,7 @@ func (s *Server) SetMetrics(m *telemetry.Metrics) {
 	if m != nil {
 		s.metrics = m
 		s.setQuotaModeMetric()
+		m.RegisterPoolSource(s.poolSamples)
 	}
 }
 
@@ -431,7 +462,8 @@ func (s *Server) CreateSandbox(ctx context.Context, req *v1.CreateSandboxRequest
 }
 
 // createRecord persists a validated spec as a REQUESTED record and prepares its
-// workspace and disk quota. The caller holds createMu and has checked capacity.
+// workspace and disk quota. The caller has settled capacity: under createMu after
+// checkSandboxCapacity, or through a pool's reservation.
 func (s *Server) createRecord(ctx context.Context, spec runtime.SandboxSpec) (*sandbox.Record, error) {
 	// Prepare the per-sandbox directories and record the rootfs path. The
 	// image is not required to exist yet; the backend validates it at start.
@@ -460,14 +492,40 @@ func (s *Server) createRecord(ctx context.Context, spec runtime.SandboxSpec) (*s
 	return rec, nil
 }
 
+// checkSandboxCapacity admits one more plain sandbox for tenant. The caller
+// holds createMu.
 func (s *Server) checkSandboxCapacity(tenant string) error {
+	if !s.pools.isLoaded() {
+		return status.Error(codes.Unavailable, "the runner is still starting")
+	}
+	global, forTenant, err := s.committed(tenant)
+	if err != nil {
+		return err
+	}
+	maxGlobal, maxTenant := s.capacityCaps()
+	if global >= maxGlobal || forTenant >= maxTenant {
+		return status.Error(codes.ResourceExhausted, "sandbox capacity reached")
+	}
+	return nil
+}
+
+// committed counts what is spoken for on this runner and for tenant: every
+// active record that no loaded pool owns, plus each loaded pool's max_size.
+// A pool's members are covered by its reservation and never counted again,
+// so a pool that replaces members thousands of times never moves the books.
+// A pooled record whose pool is not loaded (deleted, or not yet loaded) still
+// counts, which keeps the books conservative.
+func (s *Server) committed(tenant string) (global, forTenant int, err error) {
 	records, err := s.store.List()
 	if err != nil {
-		return status.Error(codes.Internal, "failed to check sandbox capacity")
+		return 0, 0, status.Error(codes.Internal, "failed to check sandbox capacity")
 	}
-	global, forTenant := 0, 0
+	reservations := s.pools.reservations()
 	for _, rec := range records {
 		if rec.State == sandbox.StateDestroyed || rec.State == sandbox.StateFailed {
+			continue
+		}
+		if _, pooled := reservations[pool.ID(rec.Spec.PoolID)]; pooled {
 			continue
 		}
 		global++
@@ -475,15 +533,42 @@ func (s *Server) checkSandboxCapacity(tenant string) error {
 			forTenant++
 		}
 	}
-	maxGlobal, maxTenant := s.cfg.MaxSandboxes, s.cfg.MaxSandboxesPerTenant
+	for _, r := range reservations {
+		global += r.maxSize
+		if r.tenant == tenant {
+			forTenant += r.maxSize
+		}
+	}
+	return global, forTenant, nil
+}
+
+// capacityCaps are VORA_MAX_SANDBOXES and VORA_MAX_SANDBOXES_PER_TENANT with
+// their built-in defaults.
+func (s *Server) capacityCaps() (maxGlobal, maxTenant int) {
+	maxGlobal, maxTenant = int(s.cfg.MaxSandboxes), int(s.cfg.MaxSandboxesPerTenant)
 	if maxGlobal <= 0 {
 		maxGlobal = 64
 	}
 	if maxTenant <= 0 {
 		maxTenant = 16
 	}
-	if global >= int(maxGlobal) || forTenant >= int(maxTenant) {
-		return status.Error(codes.ResourceExhausted, "sandbox capacity reached")
+	return maxGlobal, maxTenant
+}
+
+// rejectPooled refuses a sandbox RPC that would act on a pool member. A
+// member is lent and reset by its pool alone; anything else acting on it
+// would break the next run's proof of cleanliness. A missing record is left
+// for the handler's own NotFound.
+func (s *Server) rejectPooled(id string) error {
+	if id == "" {
+		return nil
+	}
+	rec, err := s.store.Load(id)
+	if err != nil {
+		return nil
+	}
+	if rec.Spec.PoolID != "" {
+		return status.Errorf(codes.FailedPrecondition, "sandbox %s belongs to pool %s; use the pool API", id, rec.Spec.PoolID)
 	}
 	return nil
 }
@@ -556,6 +641,9 @@ func (s *Server) StartSandbox(ctx context.Context, req *v1.StartSandboxRequest) 
 	if req.GetSandboxId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "sandbox_id is required")
 	}
+	if err := s.rejectPooled(req.GetSandboxId()); err != nil {
+		return nil, err
+	}
 	rec, err := s.store.Load(req.GetSandboxId())
 	if err != nil {
 		return nil, s.loadError(err, req.GetSandboxId())
@@ -618,20 +706,23 @@ func (s *Server) startRecord(ctx context.Context, rec *sandbox.Record, keyID str
 		attribute.String("vora.image", rec.Spec.Image),
 		attribute.String("vora.backend", backend.Name()))
 	defer span.End()
+	// A start that fails because the caller went away (a client disconnect
+	// mid cold start) still has to be undone, so cleanup ignores ctx's cancel.
+	cleanup := context.WithoutCancel(ctx)
 	h, err := backend.Create(ctx, rec.Spec)
 	if err != nil {
 		s.fail(rec, runtime.ReasonRuntimeFailure, keyID)
 		return status.Errorf(codes.Internal, "create sandbox: %v", err)
 	}
 	if err := s.transition(rec, sandbox.StateStarting, "", keyID); err != nil {
-		_ = backend.Destroy(ctx, h)
+		_ = backend.Destroy(cleanup, h)
 		return status.Error(codes.Internal, err.Error())
 	}
 	var startErr error
 	if len(creds) > 0 {
 		ba, ok := backend.(runtime.BrokerAware)
 		if !ok {
-			_ = backend.Destroy(ctx, h)
+			_ = backend.Destroy(cleanup, h)
 			s.fail(rec, runtime.ReasonRuntimeFailure, keyID)
 			return status.Errorf(codes.InvalidArgument, "backend %s does not support credential brokering", backend.Name())
 		}
@@ -640,7 +731,7 @@ func (s *Server) startRecord(ctx context.Context, rec *sandbox.Record, keyID str
 		startErr = backend.Start(ctx, h)
 	}
 	if startErr != nil {
-		_ = backend.Destroy(ctx, h)
+		_ = backend.Destroy(cleanup, h)
 		s.fail(rec, runtime.ReasonRuntimeFailure, keyID)
 		return status.Errorf(codes.Internal, "start sandbox: %v", startErr)
 	}
@@ -658,6 +749,9 @@ func (s *Server) startRecord(ctx context.Context, rec *sandbox.Record, keyID str
 func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStreamingServer[v1.ExecChunk]) error {
 	start := time.Now()
 	defer func() { s.metrics.ExecDuration.Observe(time.Since(start).Seconds()) }()
+	if err := s.rejectPooled(req.GetSandboxId()); err != nil {
+		return err
+	}
 	backend, h, err := s.handle(req.GetSandboxId())
 	if err != nil {
 		return err
@@ -665,15 +759,40 @@ func (s *Server) ExecSandbox(req *v1.ExecSandboxRequest, stream grpc.ServerStrea
 	if req.GetExec().GetExecutionId() != "" {
 		return status.Error(codes.InvalidArgument, "execution_id is assigned by the runner")
 	}
-	return s.runExec(stream.Context(), req.GetSandboxId(), backend, h, execRequestFromProto(req.GetExec()), req.GetActor().GetKeyId(), stream.Send)
+	_, err = s.runExec(stream.Context(), req.GetSandboxId(), backend, h, execRequestFromProto(req.GetExec()), req.GetActor().GetKeyId(), execOptions{}, stream.Send)
+	return err
 }
+
+// execOptions are the ways a pool run differs from a plain exec. The zero
+// value is a plain exec.
+type execOptions struct {
+	// poolID and sandboxRun go into the exec record, so the audit trail marks
+	// run boundaries inside a reused sandbox.
+	poolID     string
+	sandboxRun int
+	// hard, when set, closes at the run's hard deadline, on top of the backend's
+	// own timeout. An exec still open past it is closed with a synthesized
+	// TIMEOUT_EXCEEDED exit, whatever the backend is doing: a process holding the
+	// exec's stdout cannot hold a pool member. A send that hard interrupted
+	// returns errClientStalled, and ends the run the same way.
+	hard <-chan struct{}
+	// beforeFirst runs once, after the backend accepted the command and before
+	// anything is forwarded, with the minted execution id. The pool sends its
+	// run frame here. If runExec fails and beforeFirst never ran, the exec did
+	// not start.
+	beforeFirst func(executionID string) error
+}
+
+// timedOutExitCode is the exit code of a run the runner's hard deadline
+// ended, as gVisor reports a killed exec.
+const timedOutExitCode = -1
 
 // runExec runs one command in a started sandbox. It mints the execution ID,
 // meters the run, forwards the backend's chunks through send, and writes
 // exactly one exec record, persisted before the exit chunk is sent. A run that
 // ends without an exit chunk is recorded as a RuntimeFailure and returns an
-// error.
-func (s *Server) runExec(ctx context.Context, sandboxID string, backend runtime.Backend, h runtime.Handle, execReq runtime.ExecRequest, keyID string, send func(*v1.ExecChunk) error) error {
+// error. The returned reason is the one recorded.
+func (s *Server) runExec(ctx context.Context, sandboxID string, backend runtime.Backend, h runtime.Handle, execReq runtime.ExecRequest, keyID string, opts execOptions, send func(*v1.ExecChunk) error) (runtime.ExitReason, error) {
 	execReq.ExecutionID = ulid.NewExec()
 
 	started := time.Now().UTC()
@@ -684,56 +803,100 @@ func (s *Server) runExec(ctx context.Context, sandboxID string, backend runtime.
 	stopMeter := s.meterExec(execCtx, sandboxID, execReq.ExecutionID, backend, h)
 	// Closes the window on paths that never read it, such as a failed send.
 	defer stopMeter()
+	var stdoutBytes, stderrBytes int64
+	failed := func() runtime.ExitReason {
+		s.recordExec(sandboxID, execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure, stopMeter(), keyID, opts)
+		s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure)).Inc()
+		return runtime.ReasonRuntimeFailure
+	}
+	// timedOut ends a run past opts.hard. The member's reset kills whatever still
+	// holds the exec; here the run just ends.
+	timedOut := func() (runtime.ExitReason, error) {
+		usage := stopMeter()
+		s.recordExec(sandboxID, execReq, started, stdoutBytes, stderrBytes, timedOutExitCode, runtime.ReasonTimeout, usage, keyID, opts)
+		s.metrics.ExecTotal.WithLabelValues("ok").Inc()
+		return runtime.ReasonTimeout, send(execExitToProto(timedOutExitCode, runtime.ReasonTimeout, usage, execReq.ExecutionID))
+	}
 	es, err := backend.Exec(execCtx, h, execReq)
 	if err != nil {
-		s.recordExec(sandboxID, execReq, started, 0, 0, 0, runtime.ReasonRuntimeFailure, stopMeter(), keyID)
-		s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure)).Inc()
-		return status.Errorf(codes.Internal, "exec: %v", err)
+		return failed(), status.Errorf(codes.Internal, "exec: %v", err)
 	}
-	defer es.Close()
+	defer func() { _ = es.Close() }()
+	if opts.beforeFirst != nil {
+		if err := opts.beforeFirst(execReq.ExecutionID); err != nil {
+			return failed(), err
+		}
+	}
 
-	var stdoutBytes, stderrBytes int64
-	var recorded bool
+	recv, stop := recvAsync(es)
+	defer close(stop)
 	for {
-		chunk, err := es.Recv()
+		var r received
+		select {
+		case r = <-recv:
+		case <-opts.hard:
+			return timedOut()
+		}
+		chunk, err := r.chunk, r.err
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			if !recorded {
-				s.recordExec(sandboxID, execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure, stopMeter(), keyID)
-				s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure)).Inc()
-			}
-			return status.Errorf(codes.Internal, "exec stream: %v", err)
+			failed()
+			return runtime.ReasonRuntimeFailure, status.Errorf(codes.Internal, "exec stream: %v", err)
 		}
 		stdoutBytes += int64(len(chunk.Stdout))
 		stderrBytes += int64(len(chunk.Stderr))
-		out := execChunkToProto(chunk)
-		if chunk.Exit != nil && !recorded {
+		if chunk.Exit != nil {
 			// Persist before observing: the client may destroy the sandbox the
 			// moment it sees the exit chunk (the API closes its response right
 			// after forwarding it), so the record must be on disk first. The exit
 			// chunk is final, so the byte totals are complete here.
 			usage := stopMeter()
 			reason := usage.Reason(chunk.Exit.Reason, chunk.Exit.ExitCode)
-			s.recordExec(sandboxID, execReq, started, stdoutBytes, stderrBytes, chunk.Exit.ExitCode, reason, usage, keyID)
+			s.recordExec(sandboxID, execReq, started, stdoutBytes, stderrBytes, chunk.Exit.ExitCode, reason, usage, keyID, opts)
 			s.metrics.ExecTotal.WithLabelValues("ok").Inc()
-			recorded = true
-			out = execExitToProto(chunk.Exit.ExitCode, reason, usage, execReq.ExecutionID)
+			return reason, send(execExitToProto(chunk.Exit.ExitCode, reason, usage, execReq.ExecutionID))
 		}
-		if err := send(out); err != nil {
-			return err
+		if err := send(execChunkToProto(chunk)); err != nil {
+			if errors.Is(err, errClientStalled) {
+				return timedOut()
+			}
+			return failed(), err
 		}
 	}
 
-	if recorded {
-		return nil
-	}
 	// EOF with no exit record is a killed run (watchdog, timeout, agent
 	// death) — never a silent success.
-	s.recordExec(sandboxID, execReq, started, stdoutBytes, stderrBytes, 0, runtime.ReasonRuntimeFailure, stopMeter(), keyID)
-	s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure)).Inc()
-	return status.Error(codes.Internal, "exec stream ended without an exit record (the run was killed)")
+	return failed(), status.Error(codes.Internal, "exec stream ended without an exit record (the run was killed)")
+}
+
+type received struct {
+	chunk runtime.ExecChunk
+	err   error
+}
+
+// recvAsync reads es on its own goroutine, so the caller can stop waiting at
+// its deadline even if Recv never returns. The goroutine ends on the first
+// error from Recv, or when stop is closed; es.Close after the deadline is
+// what makes a blocked Recv return.
+func recvAsync(es runtime.ExecStream) (<-chan received, chan<- struct{}) {
+	out := make(chan received)
+	stop := make(chan struct{})
+	go func() {
+		for {
+			chunk, err := es.Recv()
+			select {
+			case out <- received{chunk, err}:
+			case <-stop:
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return out, stop
 }
 
 // meterExec opens the exec's usage window and returns the function that
@@ -770,10 +933,12 @@ func (s *Server) meterExec(ctx context.Context, sandboxID, executionID string, b
 
 // recordExec persists an execution audit record. Failures are logged, not
 // fatal: losing an audit write must not fail the caller's command.
-func (s *Server) recordExec(sandboxID string, req runtime.ExecRequest, started time.Time, stdoutBytes, stderrBytes int64, code int, reason runtime.ExitReason, usage runtime.Usage, keyID string) {
+func (s *Server) recordExec(sandboxID string, req runtime.ExecRequest, started time.Time, stdoutBytes, stderrBytes int64, code int, reason runtime.ExitReason, usage runtime.Usage, keyID string, opts execOptions) {
 	finished := time.Now().UTC()
 	allowed, denied := s.egressInWindow(sandboxID, started, finished)
 	rec := sandbox.ExecRecord{
+		PoolID:          opts.poolID,
+		SandboxRun:      opts.sandboxRun,
 		ExecutionID:     req.ExecutionID,
 		SandboxID:       sandboxID,
 		Actor:           s.recordActor(sandboxID, keyID),
@@ -794,7 +959,9 @@ func (s *Server) recordExec(sandboxID string, req runtime.ExecRequest, started t
 		EgressAllowed:   allowed,
 		EgressDenied:    denied,
 	}
-	if err := s.audit.AppendExec(context.Background(), sandboxID, rec); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), s.auditTimeout)
+	defer cancel()
+	if err := s.audit.AppendExec(ctx, sandboxID, rec); err != nil {
 		s.metrics.AuditWriteFailedTotal.Inc()
 		s.logger.Warn("write exec record failed", "sandbox_id", sandboxID, "execution_id", req.ExecutionID, "error", err)
 	}
@@ -803,7 +970,9 @@ func (s *Server) recordExec(sandboxID string, req runtime.ExecRequest, started t
 // egressInWindow counts restricted-network decisions inside [start, end], so an
 // execution's outbound requests and policy violations are recorded with it.
 func (s *Server) egressInWindow(sandboxID string, start, end time.Time) (allowed, denied int64) {
-	allowed, denied, err := s.audit.EgressCounts(context.Background(), sandboxID, start, end)
+	ctx, cancel := context.WithTimeout(context.Background(), s.auditTimeout)
+	defer cancel()
+	allowed, denied, err := s.audit.EgressCounts(ctx, sandboxID, start, end)
 	if err != nil {
 		return 0, 0
 	}
@@ -812,6 +981,9 @@ func (s *Server) egressInWindow(sandboxID string, start, end time.Time) (allowed
 
 // SignalSandbox forwards a signal to the sandbox.
 func (s *Server) SignalSandbox(ctx context.Context, req *v1.SignalSandboxRequest) (*v1.SignalSandboxResponse, error) {
+	if err := s.rejectPooled(req.GetSandboxId()); err != nil {
+		return nil, err
+	}
 	backend, h, err := s.handle(req.GetSandboxId())
 	if err != nil {
 		return nil, err
@@ -845,6 +1017,9 @@ func (s *Server) StatsSandbox(ctx context.Context, req *v1.StatsSandboxRequest) 
 // DestroySandbox stops a sandbox, releases its resources and records the
 // tombstone. It is idempotent.
 func (s *Server) DestroySandbox(ctx context.Context, req *v1.DestroySandboxRequest) (*v1.DestroySandboxResponse, error) {
+	if err := s.rejectPooled(req.GetSandboxId()); err != nil {
+		return nil, err
+	}
 	if err := s.destroy(ctx, req.GetSandboxId(), req.GetActor().GetKeyId()); err != nil {
 		return nil, err
 	}
@@ -959,6 +1134,13 @@ func (s *Server) ReapExpired(ctx context.Context) error {
 		if now.Before(rec.CreatedAt.Add(rec.Spec.TTL)) {
 			continue
 		}
+		// A pool member belongs to its pool, which retires it: now if idle, at
+		// check-in if a run holds it. Only a record no loaded pool owns is
+		// destroyed here.
+		if entry := s.pools.get(pool.ID(rec.Spec.PoolID)); entry != nil && entry.pool.RetireExpired(rec.ID) {
+			s.logger.Info("pool member TTL expired, handed to its pool", "sandbox_id", rec.ID, "pool_id", rec.Spec.PoolID)
+			continue
+		}
 		s.logger.Info("sandbox TTL expired", "sandbox_id", rec.ID, "ttl", rec.Spec.TTL.String())
 		if err := s.transition(rec, sandbox.StateExpired, runtime.ReasonTimeout, ""); err != nil {
 			s.logger.Warn("expire transition failed", "sandbox_id", rec.ID, "error", err)
@@ -1017,7 +1199,9 @@ func (s *Server) pruneOne(ctx context.Context, id string, cutoff time.Time) {
 
 // Reconcile fail-closes runner state at startup: active store records are
 // reaped and marked FAILED, then leftover backend containers and systemd
-// units are swept. Live sandboxes are not reattached.
+// units are swept. Live sandboxes are not reattached. A plain REQUESTED record
+// waits for its StartSandbox, but a pool member is started by its pool alone, so
+// one stranded before CREATING has nobody left to start or remove it.
 func (s *Server) Reconcile(ctx context.Context) error {
 	recs, err := s.store.List()
 	if err != nil {
@@ -1031,6 +1215,10 @@ func (s *Server) Reconcile(ctx context.Context) error {
 	for _, rec := range recs {
 		switch rec.State {
 		case sandbox.StateRunning, sandbox.StateStarting, sandbox.StateCreating, sandbox.StateStopping:
+		case sandbox.StateRequested, sandbox.StateScheduling:
+			if rec.Spec.PoolID == "" {
+				continue
+			}
 		default:
 			continue
 		}
@@ -1143,8 +1331,12 @@ func (s *Server) GetSandboxExecs(ctx context.Context, req *v1.GetSandboxExecsReq
 	if req.GetSandboxId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "sandbox_id is required")
 	}
-	if _, err := s.store.Load(req.GetSandboxId()); err != nil {
+	rec, err := s.store.Load(req.GetSandboxId())
+	if err != nil {
 		return nil, s.loadError(err, req.GetSandboxId())
+	}
+	if req.GetPoolId() != "" && rec.Spec.PoolID != req.GetPoolId() {
+		return nil, status.Errorf(codes.NotFound, "sandbox %s not found in pool %s", rec.ID, req.GetPoolId())
 	}
 	execs, err := s.audit.Execs(ctx, req.GetSandboxId())
 	if err != nil {
@@ -1170,6 +1362,9 @@ func (s *Server) GetSandboxEgress(ctx context.Context, req *v1.GetSandboxEgressR
 
 // GetSandboxFile reads one file from a running sandbox's writable roots.
 func (s *Server) GetSandboxFile(ctx context.Context, req *v1.GetSandboxFileRequest) (*v1.GetSandboxFileResponse, error) {
+	if err := s.rejectPooled(req.GetSandboxId()); err != nil {
+		return nil, err
+	}
 	spec, err := s.runningSpec(req.GetSandboxId())
 	if err != nil {
 		return nil, err
@@ -1183,6 +1378,9 @@ func (s *Server) GetSandboxFile(ctx context.Context, req *v1.GetSandboxFileReque
 
 // PutSandboxFile writes one file into a running sandbox's writable roots.
 func (s *Server) PutSandboxFile(ctx context.Context, req *v1.PutSandboxFileRequest) (*v1.PutSandboxFileResponse, error) {
+	if err := s.rejectPooled(req.GetSandboxId()); err != nil {
+		return nil, err
+	}
 	spec, err := s.runningSpec(req.GetSandboxId())
 	if err != nil {
 		return nil, err
@@ -1296,7 +1494,9 @@ func (s *Server) transition(rec *sandbox.Record, to sandbox.State, reason runtim
 		Reason:    string(reason),
 		RunnerID:  s.runnerID,
 	}
-	if err := s.audit.AppendEvent(context.Background(), rec.ID, event); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), s.auditTimeout)
+	defer cancel()
+	if err := s.audit.AppendEvent(ctx, rec.ID, event); err != nil {
 		s.metrics.AuditWriteFailedTotal.Inc()
 		s.logger.Warn("append event failed", "sandbox_id", rec.ID, "to", to, "error", err)
 	}

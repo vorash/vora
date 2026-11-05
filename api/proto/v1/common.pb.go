@@ -652,8 +652,11 @@ type Sandbox struct {
 	CreatedAtUnixMs int64                  `protobuf:"varint,6,opt,name=created_at_unix_ms,json=createdAtUnixMs,proto3" json:"created_at_unix_ms,omitempty"`
 	UpdatedAtUnixMs int64                  `protobuf:"varint,7,opt,name=updated_at_unix_ms,json=updatedAtUnixMs,proto3" json:"updated_at_unix_ms,omitempty"`
 	ImageRootfs     string                 `protobuf:"bytes,8,opt,name=image_rootfs,json=imageRootfs,proto3" json:"image_rootfs,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// pool_id names the pool that owns this sandbox; empty for a sandbox
+	// created through the sandboxes API.
+	PoolId        string `protobuf:"bytes,9,opt,name=pool_id,json=poolId,proto3" json:"pool_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Sandbox) Reset() {
@@ -738,6 +741,13 @@ func (x *Sandbox) GetUpdatedAtUnixMs() int64 {
 func (x *Sandbox) GetImageRootfs() string {
 	if x != nil {
 		return x.ImageRootfs
+	}
+	return ""
+}
+
+func (x *Sandbox) GetPoolId() string {
+	if x != nil {
+		return x.PoolId
 	}
 	return ""
 }
@@ -1208,7 +1218,7 @@ const file_api_proto_v1_common_proto_rawDesc = "" +
 	"\anetwork\x18\x06 \x01(\v2\x16.vora.v1.NetworkPolicyR\anetwork\x12\x10\n" +
 	"\x03env\x18\a \x03(\tR\x03env\x12\x1f\n" +
 	"\vttl_seconds\x18\b \x01(\x03R\n" +
-	"ttlSeconds\"\xb7\x02\n" +
+	"ttlSeconds\"\xd0\x02\n" +
 	"\aSandbox\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12(\n" +
 	"\x04spec\x18\x02 \x01(\v2\x14.vora.v1.SandboxSpecR\x04spec\x12+\n" +
@@ -1217,7 +1227,8 @@ const file_api_proto_v1_common_proto_rawDesc = "" +
 	"\x06reason\x18\x05 \x01(\x0e2\x13.vora.v1.ExitReasonR\x06reason\x12+\n" +
 	"\x12created_at_unix_ms\x18\x06 \x01(\x03R\x0fcreatedAtUnixMs\x12+\n" +
 	"\x12updated_at_unix_ms\x18\a \x01(\x03R\x0fupdatedAtUnixMs\x12!\n" +
-	"\fimage_rootfs\x18\b \x01(\tR\vimageRootfs\"\xc1\x01\n" +
+	"\fimage_rootfs\x18\b \x01(\tR\vimageRootfs\x12\x17\n" +
+	"\apool_id\x18\t \x01(\tR\x06poolId\"\xc1\x01\n" +
 	"\vExecRequest\x12!\n" +
 	"\fexecution_id\x18\x01 \x01(\tR\vexecutionId\x12\x18\n" +
 	"\acommand\x18\x02 \x01(\tR\acommand\x12\x12\n" +
