@@ -3,10 +3,13 @@ package gvisor
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -19,13 +22,34 @@ import (
 //	      deadline with the pipes open, FAIL exits 128.
 //	kill  logs the pid and exits with $FAKE/kill.rc, or 0.
 //	exec  takes the mode from its last argument, saves stdin to $FAKE/<mode>.stdin, prints
-//	      $FAKE/<mode>.out and exits with $FAKE/<mode>.rc. $FAKE/<mode>.hang sleeps instead.
+//	      $FAKE/<mode>.out and exits with $FAKE/<mode>.rc.
+//
+// A file named after the mode changes what exec does before it would report a PID, which
+// it logs as "started" and writes to -internal-pid-file if it was given one:
+//
+//	<mode>.hang          never answers
+//	<mode>.answer-after  answers after that many seconds
+//	<mode>.refuse        exits 128, as runsc does when it cannot run a command
+//	<mode>.crash         exits 2 with no answer
+//	<mode>.dies          is SIGKILLed with no answer
+//
+// and after it:
+//
+//	<mode>.runs          stays until the command is killed
+//	<mode>.holds         exits, and leaves a child holding stdout and stderr
 const fakeReuseRunsc = `#!/bin/sh
+hang() {
+  sleep 30 &
+  echo $! >> "$FAKE/hung"
+  wait
+}
 sub=""
 prev=""
+pidfile=""
 for a in "$@"; do
   case "$a" in ps|kill|exec) [ -z "$sub" ] && sub="$a" ;; esac
   [ "$prev" = "-pid" ] && pid="$a"
+  [ "$prev" = "-internal-pid-file" ] && pidfile="$a"
   prev="$a"
   last="$a"
 done
@@ -39,20 +63,38 @@ ps)
   [ "$n" -gt "$total" ] && n="$total"
   line=$(sed -n "${n}p" "$FAKE/ps")
   case "$line" in
-    HANG) sleep 30 ;;
+    HANG) hang ;;
     FAIL) echo "connection refused" >&2; exit 128 ;;
   esac
   echo "$line"
   ;;
 kill)
   echo "kill $pid" >> "$FAKE/calls"
+  [ -f "$FAKE/killed" ] || date +%s%N > "$FAKE/killed"
   [ -f "$FAKE/kill.rc" ] && exit "$(cat "$FAKE/kill.rc")"
   exit 0
   ;;
 exec)
   echo "exec $last" >> "$FAKE/calls"
   cat > "$FAKE/$last.stdin"
-  [ -f "$FAKE/$last.hang" ] && sleep 30
+  [ -f "$FAKE/$last.hang" ] && hang
+  [ -f "$FAKE/$last.answer-after" ] && sleep "$(cat "$FAKE/$last.answer-after")"
+  if [ -f "$FAKE/$last.refuse" ]; then echo "cannot execute" >&2; exit 128; fi
+  [ -f "$FAKE/$last.crash" ] && exit 2
+  [ -f "$FAKE/$last.dies" ] && kill -9 $$
+  if [ -n "$pidfile" ]; then
+    echo "started $last" >> "$FAKE/calls"
+    echo 4242 > "$pidfile"
+  fi
+  if [ -f "$FAKE/$last.runs" ]; then
+    while [ ! -f "$FAKE/killed" ]; do sleep 0.01; done
+    exit 137
+  fi
+  if [ -f "$FAKE/$last.holds" ]; then
+    sleep 30 &
+    echo $! >> "$FAKE/hung"
+    exit 0
+  fi
   [ -f "$FAKE/$last.out" ] && cat "$FAKE/$last.out"
   [ -f "$FAKE/$last.rc" ] && exit "$(cat "$FAKE/$last.rc")"
   exit 0
@@ -78,6 +120,7 @@ func newFakeReuse(t *testing.T, psLines ...string) *fakeReuse {
 	}
 	t.Setenv("FAKE", dir)
 	f := &fakeReuse{t: t, dir: dir}
+	t.Cleanup(f.killHung)
 	f.write("ps", strings.Join(psLines, "\n")+"\n")
 	f.write("capture.out", fakeManifest)
 	f.write("reset.out", `{"removed":3}`+"\n")
@@ -90,9 +133,22 @@ func newFakeReuse(t *testing.T, psLines ...string) *fakeReuse {
 		t.Fatal(err)
 	}
 	f.writeFile(filepath.Join(ws.WorkspaceDir, "keep"))
-	f.hd = &handle{id: "sbx_fake", spec: runtime.SandboxSpec{Workspace: ws}}
-	f.b = &Backend{runsc: script, root: dir, platform: "systrap", handles: map[string]*handle{f.hd.id: f.hd}}
+	f.hd = &handle{id: "sbx_fake", bundleDir: filepath.Join(dir, "bundle"), spec: runtime.SandboxSpec{Workspace: ws}}
+	if err := os.MkdirAll(f.hd.bundleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f.b = &Backend{logger: slog.New(slog.DiscardHandler), runsc: script, root: dir, platform: "systrap", handles: map[string]*handle{f.hd.id: f.hd}}
 	return f
+}
+
+// killHung ends the children the fake left holding pipes, which would otherwise sit there
+// long after the test that hung them.
+func (f *fakeReuse) killHung() {
+	for _, pid := range strings.Fields(f.read("hung")) {
+		if n, err := strconv.Atoi(pid); err == nil {
+			_ = syscall.Kill(n, syscall.SIGKILL)
+		}
+	}
 }
 
 func (f *fakeReuse) writeFile(path string) {
@@ -118,7 +174,9 @@ func (f *fakeReuse) read(name string) string {
 	return string(data)
 }
 
-func (f *fakeReuse) calls() []string { return strings.Fields(strings.ReplaceAll(f.read("calls"), " ", "=")) }
+func (f *fakeReuse) calls() []string {
+	return strings.Fields(strings.ReplaceAll(f.read("calls"), " ", "="))
+}
 
 // restart forgets the calls so far and scripts new ps answers.
 func (f *fakeReuse) restart(psLines ...string) {
@@ -454,5 +512,180 @@ func TestResetRacesDestroy(t *testing.T) {
 				t.Fatal("Reset did not return after Destroy")
 			}
 		})
+	}
+}
+
+func (f *fakeReuse) exec(command string) runtime.ExecStream {
+	f.t.Helper()
+	stream, err := f.b.Exec(testCtx(f.t), f.hd, runtime.ExecRequest{Command: command})
+	if err != nil {
+		f.t.Fatalf("Exec: %v", err)
+	}
+	f.t.Cleanup(func() { _ = stream.Close() })
+	return stream
+}
+
+func callsContain(f *fakeReuse, want string) bool { return slices.Contains(f.calls(), want) }
+
+func waitForCall(t *testing.T, f *fakeReuse, want string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for !callsContain(f, want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no %s among %v", want, f.calls())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A run's client can disconnect while `runsc exec` is mid-start, and the pool resets at once.
+// If the client were killed there, its request could still reach the Sentry after the reset
+// had looked, with nothing left to say it was coming. So the client lives to answer, the
+// reset's first look comes after that, and the command gets killed.
+func TestAResetWaitsForAnExecStillStarting(t *testing.T) {
+	f := newFakeReuse(t, "[1]")
+	r := f.prepared()
+	f.restart("[1]")
+	f.write("work.answer-after", "0.3")
+	_ = f.exec("work").Close()
+
+	if _, err := r.Reset(testCtx(t)); err != nil {
+		t.Fatal(err)
+	}
+	calls := f.calls()
+	started, firstPS := slices.Index(calls, "started=work"), slices.Index(calls, "ps")
+	if started < 0 {
+		t.Fatalf("the client did not live to answer: %v", calls)
+	}
+	if firstPS < started {
+		t.Fatalf("the reset looked before the exec had answered: %v", calls)
+	}
+	waitForCall(t, f, "kill=4242")
+}
+
+// A client that died without an answer may have left a request the Sentry has not read, so
+// no later listing means anything. That must cost the member, on this reset and on any other.
+func TestAnAbandonedExecFailsEveryLaterReset(t *testing.T) {
+	for _, tc := range []struct {
+		name, file string
+		cancel     bool
+	}{
+		{name: "client never answers, killed after the grace", file: "work.hang", cancel: true},
+		{name: "client crashes", file: "work.crash"},
+		{name: "client killed from outside", file: "work.dies"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeReuse(t, "[1]")
+			r := f.prepared()
+			f.restart("[1]")
+			f.write(tc.file, "")
+			stream := f.exec("work")
+			if tc.cancel {
+				_ = stream.Close()
+			}
+			for range 2 {
+				_, err := r.Reset(testCtx(t))
+				if !errors.Is(err, runtime.ErrUnproven) || !strings.Contains(err.Error(), "abandoned") {
+					t.Fatalf("Reset = %v, want ErrUnproven naming the abandoned exec", err)
+				}
+			}
+			for _, c := range f.calls() {
+				if c == "ps" || c == "exec=reset" {
+					t.Fatalf("the reset went on past an abandoned exec: %v", f.calls())
+				}
+			}
+		})
+	}
+}
+
+// Nothing answers from a stopped Sentry, and the reset still owes its caller the deadline.
+func TestAResetGivesUpOnAnExecThatNeverAnswers(t *testing.T) {
+	f := newFakeReuse(t, "[1]")
+	r := f.prepared()
+	f.restart("[1]")
+	f.write("work.hang", "")
+	f.exec("work")
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := r.Reset(ctx)
+	if !errors.Is(err, runtime.ErrUnproven) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Reset = %v, want ErrUnproven and the deadline", err)
+	}
+	if callsContain(f, "ps") {
+		t.Fatalf("the reset looked past an exec that had not answered: %v", f.calls())
+	}
+}
+
+// runsc refused the command, so its answer is that nothing started.
+func TestARefusedExecLeavesTheMemberResettable(t *testing.T) {
+	f := newFakeReuse(t, "[1]")
+	r := f.prepared()
+	f.restart("[1]")
+	f.write("work.refuse", "")
+	if got := lastChunk(t, f.exec("work")).Exit; got.ExitCode != 128 {
+		t.Fatalf("exit %+v, want 128", got)
+	}
+	if _, err := r.Reset(testCtx(t)); err != nil {
+		t.Fatalf("Reset after a refused exec: %v", err)
+	}
+}
+
+// Only the reset's kill ends these, so a reset that waited for them would never finish: a
+// process holding an exec's output after its client exited, and a command still running
+// under a client that has reported its PID.
+func TestAResetDoesNotWaitForWhatItKills(t *testing.T) {
+	for _, file := range []string{"work.holds", "work.runs"} {
+		t.Run(file, func(t *testing.T) {
+			f := newFakeReuse(t, "[1]")
+			r := f.prepared()
+			f.restart("[1,4242]", "[1]", "[1]")
+			f.write(file, "")
+			f.exec("work")
+			waitForCall(t, f, "started=work")
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			report, err := r.Reset(ctx)
+			if err != nil {
+				t.Fatalf("Reset with the exec's stream open: %v", err)
+			}
+			if report.ProcessesKilled != 1 {
+				t.Fatalf("report %+v, want the process killed", report)
+			}
+		})
+	}
+}
+
+// What an overlapping exec starts could land after any look the reset has taken. The pool
+// never does this, so it is an error that says so rather than a proof that means nothing.
+func TestAnExecDuringAResetIsRefused(t *testing.T) {
+	f := newFakeReuse(t, "[1]")
+	r := f.prepared()
+	f.restart("HANG")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.Reset(ctx)
+		done <- err
+	}()
+	waitForCall(t, f, "ps")
+
+	stream, err := f.b.Exec(testCtx(t), f.hd, runtime.ExecRequest{Command: "work"})
+	if err == nil {
+		_ = stream.Close()
+		t.Fatal("Exec during a reset was accepted")
+	}
+	if !strings.Contains(err.Error(), "being reset") {
+		t.Fatalf("Exec = %v, want it to say why", err)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, runtime.ErrUnproven) {
+		t.Fatalf("Reset = %v", err)
+	}
+
+	f.restart("[1]")
+	if got := lastChunk(t, f.exec("work")).Exit; got.ExitCode != 0 {
+		t.Fatalf("Exec after the reset ended: %+v", got)
 	}
 }

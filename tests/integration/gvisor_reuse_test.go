@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -669,6 +670,101 @@ func TestGvisorDestroyDuringReset(t *testing.T) {
 	}
 }
 
+// burners puts more CPU on a member than cpu=1000m gives it, so the cgroup throttles the
+// Sentry and everything it does, control requests included, runs late.
+const burners = `for i in 1 2 3 4; do (while :; do :; done) </dev/null >/dev/null 2>&1 & done`
+
+// A client can disconnect while `runsc exec` is mid-start, with the pool resetting at once.
+// The jitter puts the cancel across the start: a healthy exec answers in about 9 ms, and in
+// about 90 ms on a throttled member. A loss is a nil Reset with anything left over. Losing
+// takes a task that lands after the helper's walk, so a run of this rarely catches a backend
+// that gets it wrong, and the fake in reuse_test.go is what fixes the order.
+func TestGvisorAbandonedExecLeavesNothing(t *testing.T) {
+	requireGvisor(t)
+	for _, load := range []struct {
+		name, burn string
+		cycles     int
+		jitter     time.Duration
+	}{
+		{"idle", "", 100, 12 * time.Millisecond},
+		{"throttled", burners, 50, 100 * time.Millisecond},
+	} {
+		t.Run(load.name, func(t *testing.T) {
+			m := mustGvisorMember(t, gvisorMemberOpts{})
+			var landed int
+			var took []time.Duration
+			for i := range load.cycles {
+				if load.burn != "" {
+					mustExec(t, m.backend, m.h, "/bin/sh", "-c", load.burn)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				stream, err := m.backend.Exec(ctx, m.h, runtime.ExecRequest{Command: "/bin/sh", Args: []string{"-c", ": > /tmp/landed-$$"}, Cwd: "/"})
+				if err != nil {
+					cancel()
+					t.Fatalf("cycle %d: Exec: %v", i, err)
+				}
+				time.Sleep(time.Duration(rand.Int64N(int64(load.jitter))))
+				_ = stream.Close()
+				start := time.Now()
+				report, err := m.tryReset()
+				took = append(took, time.Since(start))
+				cancel()
+				if err != nil {
+					t.Fatalf("cycle %d: a member with a start this short should answer in time: %v", i, err)
+				}
+				if report.EntriesRemoved > 0 {
+					landed++
+				}
+				if got := mustExec(t, m.backend, m.h, "/bin/ls", "-A", "/tmp"); got != "" {
+					t.Fatalf("cycle %d: Reset = nil and the next run finds %q", i, got)
+				}
+				out, _, err := m.runsc(nil, "ps", "--format", "json", "--", m.id)
+				if got := strings.TrimSpace(out); err != nil || got != "[1]" {
+					t.Fatalf("cycle %d: Reset = nil and the host lists %q (%v)", i, got, err)
+				}
+			}
+			t.Logf("%d cycles, %d commands wrote before they died, reset %s", load.cycles, landed, describeLatency(took))
+			if landed == 0 {
+				t.Fatal("no command ever ran, so this test proves nothing")
+			}
+		})
+	}
+}
+
+// A client that cannot get an answer is killed once the grace ends, and its request may yet
+// be served. A stopped Sentry is the way to make that happen every time.
+func TestGvisorAbandonedExecFailsClosed(t *testing.T) {
+	requireGvisor(t)
+	m := mustGvisorMember(t, gvisorMemberOpts{})
+	pid := m.sentryPID(t)
+	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = syscall.Kill(pid, syscall.SIGCONT) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	stream, err := m.backend.Exec(ctx, m.h, runtime.ExecRequest{Command: "/bin/true", Cwd: "/"})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	_ = stream.Close()
+
+	start := time.Now()
+	_, err = m.tryReset()
+	if !errors.Is(err, runtime.ErrUnproven) || !strings.Contains(err.Error(), "abandoned") {
+		t.Fatalf("Reset = %v, want ErrUnproven naming the abandoned exec", err)
+	}
+	t.Logf("Reset refused after %v", time.Since(start))
+
+	if err := syscall.Kill(pid, syscall.SIGCONT); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.tryReset(); !errors.Is(err, runtime.ErrUnproven) || !strings.Contains(err.Error(), "abandoned") {
+		t.Fatalf("with the Sentry back, Reset = %v, want it still refused", err)
+	}
+}
+
 // forkChains keeps moving: each process forks and exits, so a pid is stale by the time the
 // host signals it. Guest code runs between a listing and its kills, so this is the workload
 // that can outrun the loop. Either the loop catches them all, and the proof must hold, or
@@ -754,7 +850,7 @@ ts = [threading.Thread(target=work) for _ in range(4)]
 func TestGvisorPidsLimits(t *testing.T) {
 	requireGvisor(t)
 	for _, tc := range []struct {
-		pids       int64
+		pids        int64
 		mustSurvive bool
 	}{{12, false}, {16, false}, {28, false}, {32, false}, {36, false}, {48, false}, {64, true}, {128, true}} {
 		t.Run(fmt.Sprintf("pids=%d", tc.pids), func(t *testing.T) {

@@ -63,6 +63,8 @@ type handle struct {
 	broker *egress.Broker
 	dns    *egress.DNS
 	cancel context.CancelFunc
+
+	execs execClients
 }
 
 func (h *handle) ID() string { return h.id }
@@ -490,37 +492,56 @@ func (b *Backend) Exec(ctx context.Context, h runtime.Handle, req runtime.ExecRe
 	pidFile := filepath.Join(pidDir, "pid")
 	args := append(b.globalFlags("none"), execArgsWithPID(hd.id, req, pidFile)...)
 	cmd := exec.CommandContext(execCtx, b.runsc, args...)
-	// Bounds the stdin copy in Wait: a process that left the command's group can
+	// A client killed mid-start can leave a command that starts later and that nothing can
+	// find (see execClients), so the end of ctx does not kill it. killExec ends the command
+	// and the client exits by itself. WaitDelay is the backstop for a client that does neither.
+	cmd.Cancel = func() error { return nil }
+	// It also bounds the stdin copy in Wait: a process that left the command's group can
 	// keep the read end of the stdin pipe open without ever reading it.
 	cmd.WaitDelay = execPipeGrace
 	if len(req.Stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(req.Stdin)
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
+	client := newExecClient(pidFile)
+	if err := hd.execs.begin(hd.id, client); err != nil {
 		cancel()
 		os.RemoveAll(pidDir)
 		return nil, err
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
+	abort := func(err error) (runtime.ExecStream, error) {
+		hd.execs.end(client, false)
 		cancel()
 		os.RemoveAll(pidDir)
 		return nil, err
+	}
+	stdout, stderr, closeClientEnds, err := outputPipes(cmd)
+	if err != nil {
+		return abort(err)
 	}
 	if err := cmd.Start(); err != nil {
-		cancel()
-		os.RemoveAll(pidDir)
-		return nil, err
+		closeClientEnds()
+		stdout.Close()
+		stderr.Close()
+		return abort(err)
 	}
+	closeClientEnds()
 
-	es := &execStream{ctx: execCtx, ch: make(chan runtime.ExecChunk, 16), done: make(chan struct{}), cancel: cancel, cmd: cmd, pidFile: pidFile, stopped: func() bool { return b.stopped(hd.id) }}
-	// The command's stdout/stderr pipes outlive the killed runsc client for as
-	// long as the command runs, so the kill cannot wait for them to drain.
+	es := &execStream{ctx: execCtx, ch: make(chan runtime.ExecChunk, 16), done: make(chan struct{}), cancel: cancel, client: client, stopped: func() bool { return b.stopped(hd.id) }}
+	// Wait runs now rather than after the output drains, because a reset has to learn the
+	// client is gone even while a process it left behind holds the pipes. runsc reports a
+	// refusal with its failure code, so any other end without a PID is a client that died
+	// with its request unanswered.
+	go func() {
+		es.waitErr = cmd.Wait()
+		es.endedByContext = execCtx.Err() != nil
+		hd.execs.end(client, client.pid() == 0 && cmd.ProcessState.ExitCode() != runscExitFailure)
+	}()
+	// The command's stdout/stderr pipes outlive the runsc client for as long as the command
+	// runs, so the kill cannot wait for them to drain.
 	go func() {
 		<-execCtx.Done()
 		if !es.finished.Load() {
-			b.killExec(hd.id, pidFile)
+			b.killExec(hd.id, client)
 			// A process that left the command's group with setsid survives that
 			// kill and keeps the pipes open. The readers get a bounded time to
 			// drain what the command wrote, so it cannot outlive its timeout.
@@ -529,10 +550,32 @@ func (b *Backend) Exec(ctx context.Context, h runtime.Handle, req runtime.ExecRe
 				_ = stderr.Close()
 			})
 		}
+		<-client.exited
 		os.RemoveAll(pidDir)
 	}()
 	go es.stream(stdout, stderr)
 	return es, nil
+}
+
+// outputPipes gives cmd a stdout and a stderr and returns the ends to read, with a function
+// that closes the ends only the client should hold. Unlike StdoutPipe, these stay open
+// after Wait returns.
+func outputPipes(cmd *exec.Cmd) (stdout, stderr *os.File, closeClientEnds func(), err error) {
+	stdout, stdoutW, err := os.Pipe()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	stderr, stderrW, err := os.Pipe()
+	if err != nil {
+		stdout.Close()
+		stdoutW.Close()
+		return nil, nil, nil, err
+	}
+	cmd.Stdout, cmd.Stderr = stdoutW, stderrW
+	return stdout, stderr, func() {
+		stdoutW.Close()
+		stderrW.Close()
+	}, nil
 }
 
 func execArgs(id string, req runtime.ExecRequest) []string {
@@ -559,25 +602,12 @@ func execArgsWithPID(id string, req runtime.ExecRequest, pidFile string) []strin
 	return append(args, req.Args...)
 }
 
-// killExec kills the command a stopped `runsc exec` client started, using the
-// sandbox PID runsc wrote to pidFile. If the client was stopped before it
-// reported a PID there is nothing to kill.
-func (b *Backend) killExec(id, pidFile string) {
-	// runsc writes the file just after the command starts; a cancel that lands
-	// in that window would otherwise find nothing to kill.
-	var data []byte
-	var err error
-	for range 20 {
-		if data, err = os.ReadFile(pidFile); err == nil {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if err != nil {
-		return
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
+// killExec kills the command of an exec whose context ended, by the sandbox PID its client
+// reports. A client that exits without reporting one started nothing to kill.
+func (b *Backend) killExec(id string, client *execClient) {
+	// Ends by itself: WaitDelay kills a client that outlives its context by that long.
+	pid, err := client.answer(context.Background())
+	if err != nil || pid == 0 {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -750,11 +780,12 @@ type execStream struct {
 	done   chan struct{}
 	ctx    context.Context
 	cancel context.CancelFunc
-	cmd    *exec.Cmd
 	once   sync.Once
-	// pidFile is where runsc reports the command's sandbox PID once it has started.
-	pidFile string
-	stopped func() bool
+	client *execClient
+	// waitErr and endedByContext are set before client.exited closes.
+	waitErr        error
+	endedByContext bool
+	stopped        func() bool
 	// finished is set once the command has run to completion, so a later
 	// cancel (the consumer closing the stream) does not kill anything.
 	finished atomic.Bool
@@ -783,21 +814,29 @@ func (e *execStream) send(chunk runtime.ExecChunk) {
 	}
 }
 
-func (e *execStream) stream(stdout, stderr io.Reader) {
+func (e *execStream) stream(stdout, stderr *os.File) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go pipeExec(stdout, func(b []byte) { e.send(runtime.ExecChunk{Stdout: b}) }, &wg)
 	go pipeExec(stderr, func(b []byte) { e.send(runtime.ExecChunk{Stderr: b}) }, &wg)
 	wg.Wait()
+	_ = stdout.Close()
+	_ = stderr.Close()
 
+	<-e.client.exited
 	code := 0
-	if err := e.cmd.Wait(); err != nil && !errors.Is(err, exec.ErrWaitDelay) {
+	if err := e.waitErr; err != nil && !errors.Is(err, exec.ErrWaitDelay) {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
 			code = ee.ExitCode()
 		} else {
 			code = -1
 		}
+	}
+	// The client may have reported what the kill did to the command, which is not the
+	// command's own result.
+	if e.endedByContext {
+		code = -1
 	}
 	if e.ctx.Err() == nil {
 		e.finished.Store(true)

@@ -3,6 +3,7 @@ package gvisor
 import (
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,7 +67,7 @@ func fakeExecBackend(t *testing.T, execSeconds string) (*Backend, *handle, strin
 	if err := os.MkdirAll(hd.bundleDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	b := &Backend{runsc: script, root: dir, platform: "systrap", handles: map[string]*handle{hd.id: hd}}
+	b := &Backend{logger: slog.New(slog.DiscardHandler), runsc: script, root: dir, platform: "systrap", handles: map[string]*handle{hd.id: hd}}
 	return b, hd, killLog
 }
 
@@ -107,17 +108,18 @@ func TestExecTimeoutKillsTheProcessInsideTheSandbox(t *testing.T) {
 	}
 	defer stream.Close()
 	start := time.Now()
-	if got := lastChunk(t, stream).Exit.Reason; got != runtime.ReasonTimeout {
-		t.Fatalf("reason = %s, want %s", got, runtime.ReasonTimeout)
+	got := lastChunk(t, stream).Exit
+	if got.Reason != runtime.ReasonTimeout || got.ExitCode != -1 {
+		t.Fatalf("exit %+v, want %s and -1, since the code is the kill's and not the command's", got, runtime.ReasonTimeout)
 	}
 	// The command holds the pipes for 30s; only killing it inside the sandbox
 	// lets the stream finish in time.
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("exit chunk took %v: the command was not killed at the timeout", elapsed)
 	}
-	got := readKillLog(t, killLog)
-	if !strings.Contains(got, "kill") || !strings.Contains(got, "-pid 4242") || !strings.Contains(got, "KILL") || !strings.Contains(got, hd.id) {
-		t.Fatalf("runsc kill log = %q, want a KILL of pid 4242 in %s", got, hd.id)
+	log := readKillLog(t, killLog)
+	if !strings.Contains(log, "kill") || !strings.Contains(log, "-pid 4242") || !strings.Contains(log, "KILL") || !strings.Contains(log, hd.id) {
+		t.Fatalf("runsc kill log = %q, want a KILL of pid 4242 in %s", log, hd.id)
 	}
 }
 

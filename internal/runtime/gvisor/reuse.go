@@ -39,6 +39,7 @@ var _ runtime.Reusable = (*Backend)(nil)
 type resettable struct {
 	b        *Backend
 	id       string
+	execs    *execClients
 	manifest []byte
 	host     []hostListing
 }
@@ -56,7 +57,7 @@ func (b *Backend) Prepare(ctx context.Context, h runtime.Handle) (runtime.Resett
 	if err != nil {
 		return nil, err
 	}
-	r := &resettable{b: b, id: hd.id}
+	r := &resettable{b: b, id: hd.id, execs: &hd.execs}
 	pids, err := r.processes(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("gvisor: prepare: %w", err)
@@ -93,7 +94,16 @@ func (r *resettable) Reset(ctx context.Context) (runtime.ResetReport, error) {
 // reset never trusts guest code before the host has proved that none but init exists,
 // so the helper it then starts is the only other process, and it comes from the read-only
 // bind at /vora.
+//
+// The caller has one duty: start the next run only after this returns. An Exec that returned
+// earlier is covered whether or not its stream is closed, and one that overlaps the reset is
+// refused, so a proof can only be undone by what starts after it.
 func (r *resettable) reset(ctx context.Context) (runtime.ResetReport, error) {
+	resume, err := r.execs.settle(ctx)
+	defer resume()
+	if err != nil {
+		return runtime.ResetReport{}, err
+	}
 	killed, err := r.killWorkload(ctx)
 	if err != nil {
 		return runtime.ResetReport{}, err
