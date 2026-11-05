@@ -162,3 +162,30 @@ func TestParseAcceptsTheBoundaries(t *testing.T) {
 		})
 	}
 }
+
+// The two backends' pids limits count different things, and on gVisor reaching it kills
+// the sandbox, so a limit that would be fine under bwrap makes a pool that can never start.
+func TestPidsFloorDependsOnTheBackend(t *testing.T) {
+	for _, tc := range []struct {
+		backend string
+		pids    int64
+		ok      bool
+	}{
+		{"bwrap", 11, false},
+		{"bwrap", 12, true},
+		{"gvisor", 12, false},
+		{"gvisor", 63, false},
+		{"gvisor", 64, true},
+	} {
+		raw := rawSpec(4, 8)
+		raw.Template.Backend = tc.backend
+		raw.Template.Resources.Pids = tc.pids
+		_, err := Parse(raw, testLimits)
+		if tc.ok && err != nil {
+			t.Errorf("%s pids %d: %v", tc.backend, tc.pids, err)
+		}
+		if !tc.ok && !errors.Is(err, ErrInvalidSpec) {
+			t.Errorf("%s pids %d: err = %v, want ErrInvalidSpec", tc.backend, tc.pids, err)
+		}
+	}
+}

@@ -51,11 +51,27 @@ var (
 	ErrNotReusable   = errors.New("pool: backend cannot reset sandboxes")
 )
 
-// minPids is the smallest pids limit a member can run with. An idle bwrap
-// sandbox holds a steady 10 or 11 tasks, so 12 is the first limit that always
-// leaves one for the workload. This floor was measured for bwrap exec (design
-// build log, v0.10.6). Steps 10 and 11 must re-measure it with reset running.
-const minPids = 12
+// A member's pids limit has a floor that depends on what the limit counts.
+//
+// Under bwrap it counts Vora's own tasks and the workload's. An idle sandbox holds a
+// steady 10 or 11, so 12 is the first limit that always leaves one for the workload. An
+// exec and a reset ran 100 of 100 there. A workload that leaves a process behind needs 13.
+//
+// Under gVisor it counts the Sentry's host threads, which grow with use, not guest tasks.
+// Reaching it kills the whole sandbox. Limits up to 26 cannot start, 28 to 36 died under
+// ordinary work, and 48, 64 and 128 each passed 60 cycles on a 16-core host. Thread growth
+// has no measured plateau, so 64 keeps a margin above the lowest that passed.
+const (
+	minPidsBwrap  = 12
+	minPidsGvisor = 64
+)
+
+func minPids(backend string) int64 {
+	if backend == "gvisor" {
+		return minPidsGvisor
+	}
+	return minPidsBwrap
+}
 
 const (
 	defaultSize          = 8
@@ -280,8 +296,8 @@ func checkTemplate(t runtime.SandboxSpec, limits Limits) error {
 		return fmt.Errorf("%w: this runner has no backend %q", ErrInvalidSpec, t.Backend)
 	case t.Network.Mode != runtime.NetworkNone:
 		return fmt.Errorf("%w: pools support network mode %q only", ErrInvalidSpec, runtime.NetworkNone)
-	case r.Pids < minPids:
-		return fmt.Errorf("%w: pids must be >= %d (the agent's own tasks)", ErrInvalidSpec, minPids)
+	case r.Pids < minPids(t.Backend):
+		return fmt.Errorf("%w: pids must be >= %d on backend %q", ErrInvalidSpec, minPids(t.Backend), t.Backend)
 	case r.MemoryBytes > limits.MaxMemoryBytes || r.CPUMillis > limits.MaxCPUMillis || r.Pids > limits.MaxPids || r.DiskBytes > limits.MaxDiskBytes:
 		return fmt.Errorf("%w: template resources exceed the runner's limits", ErrInvalidSpec)
 	}
