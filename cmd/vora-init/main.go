@@ -232,25 +232,37 @@ func (a *agent) streamInterceptor(srv any, ss grpc.ServerStream, _ *grpc.StreamS
 
 // watchdog exits the sandbox if the runner stops contacting the agent, which
 // preserves die-with-parent semantics when the runner dies unexpectedly.
+//
+// It counts the ticks it was awake for without a touch, not wall time. A
+// sandbox at its memory limit can leave the agent unscheduled for longer than
+// the grace while the runner keeps pinging: the kernel reclaim spins the
+// cgroup's CPU quota away and the pings time out unseen. On a clock the agent
+// would wake up, read a long silence, and end a sandbox whose runner is right
+// there. A stall delivers one tick, so the silence it counts is only what the
+// agent saw.
 func (a *agent) watchdog() {
 	interval := a.grace / 4
 	if interval < time.Second {
 		interval = time.Second
 	}
+	limit := int(a.grace / interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	seen := a.lastSeen.Load()
+	idle := 0
 	for {
 		select {
 		case <-a.done:
 			return
 		case <-ticker.C:
-			if a.activeStreams.Load() > 0 {
-				a.touch()
+			if now := a.lastSeen.Load(); now != seen || a.activeStreams.Load() > 0 {
+				seen = now
+				idle = 0
 				continue
 			}
-			last := time.Unix(0, a.lastSeen.Load())
-			if time.Since(last) > a.grace {
-				a.logger.Warn("runner detached, exiting", "idle_for", time.Since(last).String())
+			idle++
+			if idle >= limit {
+				a.logger.Warn("runner detached, exiting", "idle_ticks", idle, "interval", interval.String())
 				a.triggerShutdown()
 				return
 			}
