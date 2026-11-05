@@ -255,6 +255,9 @@ func TestRestoreSurvivesASymlinkSwappedInForAListedDirectory(t *testing.T) {
 	s.mkdir("mnt/listed")
 	info := s.info()
 	m := capture(t, info)
+	// Writing the listed directory's times through the swapped-in link would show here.
+	s.utimes("outside", unix.Timespec{Sec: 1500000000}, unix.Timespec{Sec: 1600000000})
+	outsideMtime := s.lstat("outside").Mtim
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -280,6 +283,9 @@ func TestRestoreSurvivesASymlinkSwappedInForAListedDirectory(t *testing.T) {
 	close(stop)
 	wg.Wait()
 	s.assertNames("outside", "canary")
+	if got := s.lstat("outside").Mtim; got != outsideMtime {
+		t.Fatalf("a restore wrote times outside the mount: mtime %+v, want %+v", got, outsideMtime)
+	}
 }
 
 // An entry in the listing cannot be put back with its inode, and a socket has a
@@ -500,6 +506,118 @@ func TestRestoreFailsAfterAHardLinkToAListedFile(t *testing.T) {
 	}
 	if _, err := restore(t, m, info); !errors.Is(err, ErrUnrestorable) {
 		t.Fatalf("err = %v, want ErrUnrestorable", err)
+	}
+}
+
+// Removing a planted file moves its directory's times, and an owner can set them to
+// anything. After a reset neither can be what the run left.
+func TestRestorePutsDirectoryTimesBack(t *testing.T) {
+	seededAtime := unix.Timespec{Sec: 1500000000, Nsec: 123456789}
+	seededMtime := unix.Timespec{Sec: 1600000000, Nsec: 987654321}
+	encodedAtime := unix.Timespec{Sec: 1111111, Nsec: 1}
+	encodedMtime := unix.Timespec{Sec: 2222222, Nsec: 2}
+	for name, rel := range map[string]string{
+		"mount root":       "mnt",
+		"listed directory": "mnt/dir",
+		"nested directory": "mnt/dir/sub",
+	} {
+		for action, act := range map[string]func(s *sandbox){
+			"file planted": func(s *sandbox) { s.write(rel+"/planted", "x") },
+			"utimes":       func(s *sandbox) { s.utimes(rel, encodedAtime, encodedMtime) },
+			"file planted and utimes": func(s *sandbox) {
+				s.write(rel+"/planted", "x")
+				s.utimes(rel, encodedAtime, encodedMtime)
+			},
+		} {
+			t.Run(name+"/"+action, func(t *testing.T) {
+				s := newSandbox(t)
+				seedTree(s)
+				s.utimes(rel, seededAtime, seededMtime)
+				wantMtime := s.lstat(rel).Mtim
+				info := s.info()
+				m := capture(t, info)
+
+				act(s)
+				if got := s.lstat(rel).Mtim; got == wantMtime {
+					t.Fatal("the run did not move the mtime, so this shows nothing")
+				}
+				if _, err := restore(t, m, info); err != nil {
+					t.Fatalf("Restore: %v", err)
+				}
+				after := s.lstat(rel)
+				if after.Mtim != wantMtime {
+					t.Errorf("mtime %+v, want %+v", after.Mtim, wantMtime)
+				}
+				if after.Atim == encodedAtime {
+					t.Errorf("atime is still what the run set: %+v", after.Atim)
+				}
+			})
+		}
+	}
+}
+
+// Atime is seen here straight after the write, because the verify walk's readdir may
+// then move it to the time of the reset. Either value is free of what the run chose.
+func TestRestoreDirTimesWritesBothTimes(t *testing.T) {
+	s := newSandbox(t)
+	s.mkdir("mnt/dir")
+	fd, err := unix.Open(s.path("mnt/dir"), unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Close(fd) }()
+	atime, mtime := unix.Timespec{Sec: 1500000000, Nsec: 7}, unix.Timespec{Sec: 1600000000, Nsec: 9}
+	if err := restoreDirTimes(fd, Entry{AtimeNs: atime.Nano(), MtimeNs: mtime.Nano()}); err != nil {
+		t.Fatal(err)
+	}
+	st := s.lstat("mnt/dir")
+	if st.Atim != atime || st.Mtim != mtime {
+		t.Fatalf("atime %+v mtime %+v, want %+v and %+v", st.Atim, st.Mtim, atime, mtime)
+	}
+}
+
+// An unprivileged test owns everything it makes, so the kernel's refusal comes from a
+// filter here: EPERM is what utimensat says on a directory this user does not own.
+func TestDirectoryTimesThatCannotBeWritten(t *testing.T) {
+	t.Run("not owned and unchanged is clean", func(t *testing.T) {
+		inChild(t, func() {
+			s := newSandbox(t)
+			seedTree(s)
+			info := s.info()
+			m := capture(t, info)
+			failSyscalls(t, map[uint32]unix.Errno{unix.SYS_UTIMENSAT: unix.EPERM})
+			if removed, err := restore(t, m, info); err != nil || removed != 0 {
+				t.Fatalf("Restore: removed %d, %v", removed, err)
+			}
+		})
+	})
+	t.Run("not owned and moved by a removal fails the verify", func(t *testing.T) {
+		inChild(t, func() {
+			s := newSandbox(t)
+			seedTree(s)
+			s.utimes("mnt/dir", unix.Timespec{Sec: 1500000000}, unix.Timespec{Sec: 1600000000})
+			info := s.info()
+			m := capture(t, info)
+			s.write("mnt/dir/planted", "x")
+			failSyscalls(t, map[uint32]unix.Errno{unix.SYS_UTIMENSAT: unix.EPERM})
+			if _, err := restore(t, m, info); !errors.Is(err, ErrUnrestorable) {
+				t.Fatalf("err = %v, want ErrUnrestorable", err)
+			}
+		})
+	})
+	for _, errno := range []unix.Errno{unix.EIO, unix.EACCES, unix.EROFS, unix.ENOENT} {
+		t.Run("any other error fails closed/"+errno.Error(), func(t *testing.T) {
+			inChild(t, func() {
+				s := newSandbox(t)
+				seedTree(s)
+				info := s.info()
+				m := capture(t, info)
+				failSyscalls(t, map[uint32]unix.Errno{unix.SYS_UTIMENSAT: errno})
+				if _, err := restore(t, m, info); !errors.Is(err, errno) {
+					t.Fatalf("err = %v, want %v", err, errno)
+				}
+			})
+		})
 	}
 }
 
@@ -890,20 +1008,41 @@ func TestRunningOutOfDescriptorsFailsClosed(t *testing.T) {
 
 // Restore prunes before this walk, so calling Restore cannot show that the walk
 // would catch something the prune left.
-func TestTheProofWalkReportsWhatThePruneLeft(t *testing.T) {
-	s := newSandbox(t)
-	seedTree(s)
-	m := capture(t, s.info())
-	s.write("mnt/planted", "x")
-	if err := verifyListings(context.Background(), m); !errors.Is(err, ErrNotClean) {
-		t.Fatalf("planted file: err = %v, want ErrNotClean", err)
+func TestTheProofWalkJudgesWhatThePruneLeft(t *testing.T) {
+	setup := func(t *testing.T) (*sandbox, Manifest) {
+		s := newSandbox(t)
+		seedTree(s)
+		return s, capture(t, s.info())
 	}
-	s.assertExists("mnt/planted")
-	s.remove("mnt/planted")
-	s.write("mnt/file", "jello")
-	if err := verifyListings(context.Background(), m); !errors.Is(err, ErrUnrestorable) {
-		t.Fatalf("changed file: err = %v, want ErrUnrestorable", err)
-	}
+	t.Run("a planted file", func(t *testing.T) {
+		s, m := setup(t)
+		s.write("mnt/planted", "x")
+		if err := verifyListings(context.Background(), m); !errors.Is(err, ErrNotClean) {
+			t.Fatalf("err = %v, want ErrNotClean", err)
+		}
+		s.assertExists("mnt/planted")
+	})
+	t.Run("changed content", func(t *testing.T) {
+		s, m := setup(t)
+		s.write("mnt/file", "jello")
+		if err := verifyListings(context.Background(), m); !errors.Is(err, ErrUnrestorable) {
+			t.Fatalf("err = %v, want ErrUnrestorable", err)
+		}
+	})
+	t.Run("a directory's mtime moved", func(t *testing.T) {
+		s, m := setup(t)
+		s.utimes("mnt/dir", s.lstat("mnt/dir").Atim, unix.Timespec{Sec: 1600000000})
+		if err := verifyListings(context.Background(), m); !errors.Is(err, ErrUnrestorable) {
+			t.Fatalf("err = %v, want ErrUnrestorable", err)
+		}
+	})
+	t.Run("a directory's access time moved", func(t *testing.T) {
+		s, m := setup(t)
+		s.utimes("mnt/dir", unix.Timespec{Sec: 1500000000}, s.lstat("mnt/dir").Mtim)
+		if err := verifyListings(context.Background(), m); err != nil {
+			t.Fatalf("a walk moves access times, so this cannot fail the proof: %v", err)
+		}
+	})
 }
 
 func TestRestoreRemovesNothingFromACleanMemberAndPasses(t *testing.T) {
@@ -1011,11 +1150,16 @@ func TestRestoreWorksUnderTheAgentsRestrictions(t *testing.T) {
 		s.chmod("mnt/locked", 0)
 		s.chmodBack("mnt/locked")
 		s.symlink(s.outside, "mnt/out")
+		s.write("mnt/dir/planted", "x")
 
 		if _, err := restore(t, m, info); err != nil {
 			t.Fatalf("Restore: %v", err)
 		}
 		s.assertNames("mnt", seededNames...)
 		s.assertCanary()
+		st := s.lstat("mnt/dir")
+		if got, want := st.Mtim.Nano(), entry(t, listing(t, m, s.mount), "dir").MtimeNs; got != want {
+			t.Fatalf("mtime %d, want the captured %d: the agent's filter stopped the write", got, want)
+		}
 	})
 }

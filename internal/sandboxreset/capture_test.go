@@ -110,10 +110,15 @@ func TestCaptureRecordsWhatEachEntryKindNeeds(t *testing.T) {
 			t.Fatal(err)
 		}
 		want.UID, want.GID, want.Ino = st.Uid, st.Gid, st.Ino
-		if want.Type != TypeDir {
+		got := entry(t, l, rel)
+		if want.Type == TypeDir {
+			want.MtimeNs = st.Mtim.Nano()
+			// The capture's own walk may have moved it since.
+			want.AtimeNs = got.AtimeNs
+		} else {
 			want.CtimeNs = st.Ctim.Nano()
 		}
-		if got := entry(t, l, rel); got != want {
+		if got != want {
 			t.Errorf("%s: got %+v, want %+v", rel, got, want)
 		}
 	}

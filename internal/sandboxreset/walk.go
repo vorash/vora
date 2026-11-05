@@ -156,6 +156,8 @@ func entryFromStat(rel string, st *unix.Stat_t) (Entry, error) {
 	switch st.Mode & unix.S_IFMT {
 	case unix.S_IFDIR:
 		e.Type = TypeDir
+		e.MtimeNs = st.Mtim.Nano()
+		e.AtimeNs = st.Atim.Nano()
 	case unix.S_IFREG:
 		e.Type = TypeFile
 		e.Size = st.Size

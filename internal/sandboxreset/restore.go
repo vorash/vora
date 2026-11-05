@@ -4,6 +4,7 @@ package sandboxreset
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -12,8 +13,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Restore removes everything m does not list and then proves the result on a
-// fresh walk. It returns the number of objects removed. A nil error means every
+// Restore removes everything m does not list, writes each listed directory's times
+// back, and then proves the result on a fresh walk. It returns the number of objects removed. A nil error means every
 // writable mount matches m exactly. Any other outcome means the sandbox was not
 // proven clean and may be partly restored.
 //
@@ -56,11 +57,13 @@ func verifyListings(ctx context.Context, m Manifest) error {
 			return fmt.Errorf("%s: %w", l.Path, err)
 		}
 		extra, changed := diff(l.Entries, got)
-		if len(changed) > 0 {
-			return fmt.Errorf("%w: %s: %s", ErrUnrestorable, l.Path, summarize(changed))
-		}
+		// In this order because a planted file also moves its directory's mtime, and
+		// its name is what tells a reader what went wrong.
 		if len(extra) > 0 {
 			return fmt.Errorf("%w: %s: %s", ErrNotClean, l.Path, summarize(extra))
+		}
+		if len(changed) > 0 {
+			return fmt.Errorf("%w: %s: %s", ErrUnrestorable, l.Path, summarize(changed))
 		}
 	}
 	return nil
@@ -106,7 +109,8 @@ type pruner struct {
 
 // pruneListed handles an entry the listing has. It rejects anything stat can
 // already tell has changed, so a file a run grew is never hashed. Content, link
-// targets and extended attributes are left to the verify walk.
+// targets and extended attributes are left to the verify walk. So is a directory's
+// times, which this puts back once nothing more can be removed from it.
 func (p *pruner) pruneListed(parent int, name, rel string, st *unix.Stat_t) error {
 	want := p.want[rel]
 	if want.Type == TypeMountpoint {
@@ -116,8 +120,10 @@ func (p *pruner) pruneListed(parent int, name, rel string, st *unix.Stat_t) erro
 	if err != nil {
 		return err
 	}
-	want.SHA256, want.Target, want.Xattrs = "", "", ""
-	if got != want {
+	stated := want
+	stated.SHA256, stated.Target, stated.Xattrs = "", "", ""
+	stated.MtimeNs, stated.AtimeNs = got.MtimeNs, got.AtimeNs
+	if got != stated {
 		return fmt.Errorf("%w: %s", ErrUnrestorable, shortRel(rel))
 	}
 	if got.Type != TypeDir {
@@ -155,7 +161,23 @@ func (p *pruner) pruneListed(parent int, name, rel string, st *unix.Stat_t) erro
 			return err
 		}
 	}
+	if err := restoreDirTimes(fd, want); err != nil {
+		return fmt.Errorf("%s: restore times: %w", shortRel(rel), err)
+	}
 	return nil
+}
+
+// restoreDirTimes writes a directory's listed times through the handle that pinned
+// it. Setting explicit times takes ownership or CAP_FOWNER, so EPERM means a workload,
+// which has no more privilege than this, could not have set them either. The verify
+// walk still compares the mtime, so a removal this could not undo fails there.
+func restoreDirTimes(fd int, e Entry) error {
+	times := []unix.Timespec{unix.NsecToTimespec(e.AtimeNs), unix.NsecToTimespec(e.MtimeNs)}
+	err := unix.UtimesNanoAt(unix.AT_FDCWD, procFD(fd), times, 0)
+	if errors.Is(err, unix.EPERM) {
+		return nil
+	}
+	return err
 }
 
 // remove deletes name from parent, and if it is a directory, everything in it.

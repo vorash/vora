@@ -30,4 +30,11 @@ func TestDiffSeparatesExtraFromChanged(t *testing.T) {
 	if extra, changed := diff(want, want); extra != nil || changed != nil {
 		t.Errorf("identical listings: extra %q, changed %q", extra, changed)
 	}
+	walked := []Entry{{Rel: "d", Type: TypeDir, MtimeNs: 5, AtimeNs: 6}}
+	if _, changed := diff(walked, []Entry{{Rel: "d", Type: TypeDir, MtimeNs: 5, AtimeNs: 7}}); changed != nil {
+		t.Errorf("a walk moved a directory's access time: changed %q", changed)
+	}
+	if _, changed := diff(walked, []Entry{{Rel: "d", Type: TypeDir, MtimeNs: 8, AtimeNs: 6}}); !slices.Equal(changed, []string{"d"}) {
+		t.Errorf("a directory's mtime moved: changed %q", changed)
+	}
 }

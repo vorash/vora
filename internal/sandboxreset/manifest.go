@@ -5,8 +5,10 @@
 // Restore later removes whatever the listing does not have, refuses anything
 // the listing has that changed, and proves the result on a fresh walk.
 //
-// Restore only removes. It never recreates or repairs an entry, because the
-// caller destroys a sandbox it cannot prove clean.
+// Restore never recreates or repairs an entry, because the caller destroys a
+// sandbox it cannot prove clean. The one thing it writes is a listed directory's
+// times. Removing a planted file moves them, so without this every run that plants
+// a file would fail, and a timestamp holds no state a workload could rely on.
 package sandboxreset
 
 import (
@@ -92,6 +94,10 @@ type Entry struct {
 	// host can touch. A hard link planted to a listed file moves it when removed, so
 	// that run fails the reset.
 	CtimeNs int64 `json:"ctime_ns,omitempty"`
+	// MtimeNs and AtimeNs are a directory's times in nanoseconds, which Restore writes
+	// back. A directory has no comparable change time, because that write moves it.
+	MtimeNs int64 `json:"mtime_ns,omitempty"`
+	AtimeNs int64 `json:"atime_ns,omitempty"`
 }
 
 // validate is the check at the boundary where a manifest comes back from the
@@ -167,7 +173,10 @@ func diff(want, got []Entry) (extra, changed []string) {
 		}
 	}
 	for _, w := range want {
-		if g, ok := gotByRel[w.Rel]; !ok || g != w {
+		g, ok := gotByRel[w.Rel]
+		// The walk that produced got moved each directory's access time.
+		g.AtimeNs, w.AtimeNs = 0, 0
+		if !ok || g != w {
 			changed = append(changed, w.Rel)
 		}
 	}
