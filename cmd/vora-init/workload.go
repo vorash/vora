@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	goruntime "runtime"
 	"sync"
+	"time"
 )
 
 // workloadOOMScoreAdj makes every workload process the OOM killer's first
@@ -37,12 +40,30 @@ func startWorkload(cmd *exec.Cmd) (startErr, scoreErr error) {
 	if err := cmd.Start(); err != nil {
 		return err, nil
 	}
-	pid := cmd.Process.Pid
-	err := os.WriteFile(fmt.Sprintf("/proc/%d/oom_score_adj", pid), []byte(workloadOOMScoreAdj), 0)
-	if err != nil && !exited(pid) {
-		scoreErr = fmt.Errorf("raise oom_score_adj: %w", err)
+	return nil, raiseOOMScore(cmd.Process.Pid)
+}
+
+// raiseOOMScoreWait bounds the wait for a child's exec to finish. A child that stays
+// unwritable, such as one running a binary it cannot read, costs its exec this much.
+const raiseOOMScoreWait = time.Second
+
+// raiseOOMScore writes the child's score, waiting out the end of its exec. Start
+// returns when the exec closes the close-on-exec pipe, and the kernel does that before
+// it makes the new image dumpable. Until then the child is non-dumpable like this
+// agent, so its /proc files belong to root and the write fails with EACCES. A child
+// that is short of CPU can stay there for milliseconds.
+func raiseOOMScore(pid int) error {
+	deadline := time.Now().Add(raiseOOMScoreWait)
+	for {
+		err := os.WriteFile(fmt.Sprintf("/proc/%d/oom_score_adj", pid), []byte(workloadOOMScoreAdj), 0)
+		if err == nil || exited(pid) {
+			return nil
+		}
+		if !errors.Is(err, fs.ErrPermission) || time.Now().After(deadline) {
+			return fmt.Errorf("raise oom_score_adj: %w", err)
+		}
+		time.Sleep(time.Millisecond)
 	}
-	return nil, scoreErr
 }
 
 // exited reports whether pid is gone or a zombie. A command that has already

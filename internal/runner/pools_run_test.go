@@ -5,9 +5,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	dto "github.com/prometheus/client_model/go"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -112,31 +112,32 @@ func TestClientGoneAtExecKeepsTheMember(t *testing.T) {
 }
 
 // A retry that never reaches a program must not reach the run metrics, least of
-// all with the first attempt's placement and a zero start time.
+// all with the first attempt's placement and a zero start time. This calls the
+// handler itself: over gRPC the client's call ends before the handler hears of it,
+// and a backend released in that gap really does start the run.
 func TestRunThatNeverStartedIsNotObserved(t *testing.T) {
 	h := newWarmHarness(t)
 	p := h.create(poolSpec(1, 1))
 	h.waitIdle(p.GetId(), 1)
 	// As a destroy racing the borrow leaves it: the first attempt finds no handle.
 	h.s.delHandle(h.backend.live()[0])
-	gate := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	released := make(chan struct{})
 	h.backend.set(func(b *poolBackend) {
-		b.startHook = func(ctx context.Context, _ string) error {
+		// The first start is the retry's cold start, or a refill the retry waits on.
+		b.startHook = func(c context.Context, _ string) error {
+			cancel()
 			select {
-			case <-gate:
-			case <-ctx.Done():
+			case <-released:
+			case <-c.Done():
 			}
-			return ctx.Err()
+			return c.Err()
 		}
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-	if _, err := h.run(ctx, p.GetId(), 5); err == nil {
+	if err := h.s.RunInPool(&v1.RunInPoolRequest{PoolId: p.GetId(), TenantId: h.tenant, Exec: &v1.ExecRequest{Command: "true", TimeoutSeconds: 5}}, &runServerStream{ctx: ctx}); err == nil {
 		t.Fatal("a run with no member to run on succeeded")
 	}
-	// One slot: an idle member means the retry's cold start has unwound.
-	close(gate)
-	h.waitIdle(p.GetId(), 1)
 	for _, name := range []string{"vora_pool_runs_total", "vora_pool_run_duration_seconds", "vora_pool_startup_seconds", "vora_exec_duration_seconds"} {
 		f := h.metricFamily(name)
 		if f == nil {
@@ -148,7 +149,19 @@ func TestRunThatNeverStartedIsNotObserved(t *testing.T) {
 			}
 		}
 	}
+	close(released)
+	h.waitIdle(p.GetId(), 1)
 }
+
+// runServerStream is the server's side of a RunInPool stream, for calling the
+// handler directly.
+type runServerStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (r *runServerStream) Context() context.Context { return r.ctx }
+func (r *runServerStream) Send(*v1.RunChunk) error  { return r.ctx.Err() }
 
 // Both attempts refused: still nothing reached a program.
 func TestRefusedExecIsNotObserved(t *testing.T) {

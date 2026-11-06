@@ -45,6 +45,8 @@ func (c *countingAudit) EgressCounts(ctx context.Context, id string, start, end 
 	return c.Store.EgressCounts(ctx, id, start, end)
 }
 
+func endAllowedWindow(s *Server) { s.allowedWindow = time.Nanosecond }
+
 func budgetServer(t *testing.T, id string) (*Server, *countingAudit) {
 	t.Helper()
 	s := testServer(t, runtime.NewRegistry())
@@ -53,7 +55,9 @@ func budgetServer(t *testing.T, id string) (*Server, *countingAudit) {
 	}
 	c := &countingAudit{Store: s.audit}
 	s.SetAudit(c)
-	s.allowedWindow = 100 * time.Millisecond
+	// A real window would end whenever a flood outlasted it on a slow machine, so
+	// it stays open until a test ends it with endAllowedWindow.
+	s.allowedWindow = time.Hour
 	return s, c
 }
 
@@ -72,7 +76,7 @@ func TestAllowedFloodIsBoundedAndStillAccounted(t *testing.T) {
 		t.Fatalf("%d allowed decisions caused %d audit writes, want a bounded number", flood, c.writes)
 	}
 
-	time.Sleep(150 * time.Millisecond)
+	endAllowedWindow(s)
 	if err := s.RecordEgress(allowed(id, "api.example.com")); err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +156,7 @@ func TestSuppressedAllowedCountsAreFlushed(t *testing.T) {
 	if got := summaries(); got != 0 {
 		t.Fatalf("summary written before the window ended: %d", got)
 	}
-	time.Sleep(150 * time.Millisecond)
+	endAllowedWindow(s)
 	if err := s.FlushEgress(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +209,7 @@ func TestAllowedBudgetCoversFreshSubdomains(t *testing.T) {
 		t.Fatalf("%d fresh subdomains left %d tracked windows, want at most %d", flood, tracked, allowedSandboxBudget+1)
 	}
 
-	time.Sleep(150 * time.Millisecond)
+	endAllowedWindow(s)
 	if err := s.FlushEgress(context.Background()); err != nil {
 		t.Fatal(err)
 	}

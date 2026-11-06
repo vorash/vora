@@ -7,10 +7,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vorash/vora/internal/audit/audittest"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/sandbox"
 	"github.com/vorash/vora/internal/ulid"
 )
+
+func TestContract(t *testing.T) {
+	root := t.TempDir()
+	audittest.Run(t, New(func(sandboxID string) string {
+		dir := filepath.Join(root, sandboxID)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}))
+}
 
 // TestActorRoundTrip asserts attribution survives the on-disk store: records
 // that lose who acted are not an audit trail.

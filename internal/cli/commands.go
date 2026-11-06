@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -553,10 +554,10 @@ func (a *app) logsCmd() *cobra.Command {
 				}
 				for _, e := range records {
 					ts := time.UnixMilli(e.GetStartedAtUnixMs()).Format(time.RFC3339)
-					fmt.Printf("%s  %s %s  exit=%d reason=%s stdout=%dB stderr=%dB cpu=%dms rss=%dB egress=%d/%d\n",
+					fmt.Printf("%s  %s %s  exit=%d reason=%s stdout=%dB stderr=%dB cpu=%sms rss=%sB egress=%s/%s\n",
 						ts, e.GetCommand(), strings.Join(e.GetArgs(), " "),
 						e.GetExitCode(), shortReason(e.GetReason()), e.GetStdoutBytes(), e.GetStderrBytes(),
-						e.GetCpuMillis(), e.GetMemoryPeakBytes(), e.GetEgressAllowed(), e.GetEgressDenied())
+						measured(e.CpuMillis), measured(e.MemoryPeakBytes), measured(e.EgressAllowed), measured(e.EgressDenied))
 				}
 				return nil
 			}
@@ -609,6 +610,14 @@ func (a *app) logsCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&showEgress, "egress", false, "show restricted-network policy decisions")
 	cmd.MarkFlagsMutuallyExclusive("execs", "egress")
 	return cmd
+}
+
+// measured renders a usage field, where not measured must not print as zero.
+func measured(v *int64) string {
+	if v == nil {
+		return "-"
+	}
+	return strconv.FormatInt(*v, 10)
 }
 
 func shortReason(r v1.ExitReason) string {

@@ -112,7 +112,8 @@ func TestExecExitIgnoresEscapedStdinHolder(t *testing.T) {
 func pidAlive(t *testing.T, pid int) bool {
 	t.Helper()
 	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if errors.Is(err, os.ErrNotExist) {
+	// ESRCH is a process that exited between the open and the read.
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
 		return false
 	}
 	if err != nil {
