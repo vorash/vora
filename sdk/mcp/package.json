@@ -43,7 +43,7 @@
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "@vorash/sdk": "^0.7.0",
+    "@vorash/sdk": "^0.8.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {

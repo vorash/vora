@@ -1,4 +1,6 @@
 import { Transport } from "./http.js";
+import type { RetryPolicy } from "./http.js";
+import { Pools } from "./pools.js";
 import { Sandbox } from "./sandbox.js";
 import { Snapshots } from "./snapshots.js";
 import { decodeSandboxInfo, encodeSandboxSpec } from "./types.js";
@@ -11,6 +13,12 @@ export interface VoraOptions {
   apiKey?: string;
   /** Override `fetch` (custom transports, tests). */
   fetch?: typeof globalThis.fetch;
+  /**
+   * How pool calls that are safe to repeat handle 429 and 503. `null` turns it off.
+   * A pool run has its own `retry` option, off by default, `delete` waits by its own
+   * `maxWaitSeconds` whatever this is, and sandbox routes do not retry.
+   */
+  retry?: RetryPolicy | null;
 }
 
 export interface ListSandboxesOptions {
@@ -21,6 +29,7 @@ export interface ListSandboxesOptions {
 export class Vora {
   readonly sandboxes: Sandboxes;
   readonly snapshots: Snapshots;
+  readonly pools: Pools;
 
   constructor(options: VoraOptions = {}) {
     const baseUrl = options.baseUrl ?? env("VORA_API_URL") ?? "http://127.0.0.1:9300";
@@ -28,6 +37,7 @@ export class Vora {
     const transport = new Transport({ baseUrl, apiKey, fetch: options.fetch });
     this.sandboxes = new Sandboxes(transport);
     this.snapshots = new Snapshots(transport);
+    this.pools = new Pools(transport, options.retry === undefined ? {} : options.retry);
   }
 }
 

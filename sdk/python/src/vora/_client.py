@@ -7,7 +7,8 @@ from typing import Any
 
 import httpx
 
-from ._http import Transport, path_segment
+from ._http import RetryPolicy, Transport, path_segment
+from ._pools import Pools
 from ._sandbox import Sandbox
 from ._snapshots import Snapshots
 from ._types import decode_sandbox_info, encode_sandbox_spec
@@ -29,6 +30,7 @@ class Vora:
         base_url: str | None = None,
         api_key: str | None = None,
         client: httpx.AsyncClient | None = None,
+        retry: RetryPolicy | None = RetryPolicy(),
     ) -> None:
         """
         Args:
@@ -36,6 +38,10 @@ class Vora:
                 ``http://127.0.0.1:9300``.
             api_key: Bearer API key. Defaults to ``VORA_API_KEY``.
             client: An ``httpx.AsyncClient`` to reuse (custom transports, tests).
+            retry: How pool calls that are safe to repeat handle 429 and 503. None
+                turns it off. A pool run has its own ``retry`` argument, off by
+                default, ``delete`` waits by its own ``max_wait_seconds`` whatever this
+                is, and sandbox routes do not retry.
         """
         self._transport = Transport(
             (base_url or _env("VORA_API_URL") or _DEFAULT_BASE_URL),
@@ -44,6 +50,7 @@ class Vora:
         )
         self.sandboxes = Sandboxes(self._transport)
         self.snapshots = Snapshots(self._transport)
+        self.pools = Pools(self._transport, retry)
 
     async def aclose(self) -> None:
         await self._transport.aclose()
