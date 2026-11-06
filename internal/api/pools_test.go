@@ -432,6 +432,38 @@ func TestPoolReservationCountsInPlacement(t *testing.T) {
 	declare(t, ts, key, "more", poolBody(1, 3))
 }
 
+// A pool reserves max_size times its template's resources, so a template without
+// them cannot be placed. It must be refused before it reserves anything at zero.
+func TestDeclareRefusesATemplateWithNoResources(t *testing.T) {
+	fr := &fakeRunner{}
+	s, ts := newTestServer(t, fr)
+	key := tenantKey(t, s, "tenant-a")
+	sandbox := func(resources map[string]any) map[string]any {
+		body := poolBody(1, 1)
+		body["sandbox"].(map[string]any)["resources"] = resources
+		return body
+	}
+	noSandbox := poolBody(1, 1)
+	delete(noSandbox, "sandbox")
+	for name, body := range map[string]map[string]any{
+		"no sandbox":      noSandbox,
+		"no resources":    sandbox(map[string]any{}),
+		"no cpu":          sandbox(map[string]any{"memoryBytes": "1048576", "pids": "32"}),
+		"no memory":       sandbox(map[string]any{"cpuMillis": "100", "pids": "32"}),
+		"negative cpu":    sandbox(map[string]any{"cpuMillis": "-100", "memoryBytes": "1048576", "pids": "32"}),
+		"negative memory": sandbox(map[string]any{"cpuMillis": "100", "memoryBytes": "-1", "pids": "32"}),
+	} {
+		got := call(t, http.MethodPut, ts.URL+"/v1/pools/py", key, body)
+		if got.code != http.StatusBadRequest || !strings.Contains(got.body, "resources") {
+			t.Errorf("%s: declare = %d %s, want 400 about resources", name, got.code, got.body)
+		}
+		if _, ok := routeNamed(t, s, "tenant-a", "py"); ok || fr.callCount() != 0 {
+			t.Fatalf("%s: left a route %v, made %d runner calls", name, ok, fr.callCount())
+		}
+	}
+	declare(t, ts, key, "py", poolBody(1, 1))
+}
+
 // A declare with no sizes reserves what the runner will actually give it.
 func TestReservationUsesTheRunnersDefaults(t *testing.T) {
 	fr := &fakeRunner{}

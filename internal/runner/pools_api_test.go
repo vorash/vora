@@ -548,6 +548,28 @@ func TestAPIRunnerRestartThatLostThePool(t *testing.T) {
 	p.run("py", 5).mustComplete(t)
 }
 
+// Resources have no default to fill in: Parse refuses a template without them, so
+// no pool can exist that reserved nothing.
+func TestAPIRunnerRefusesATemplateWithNoResources(t *testing.T) {
+	h := newWarmHarness(t)
+	p := newAPIPlane(t, h.s)
+	for name, resources := range map[string]map[string]any{
+		"no-cpu":    {"memoryBytes": "1048576", "pids": "16"},
+		"no-memory": {"cpuMillis": "100", "pids": "16"},
+		"none":      {"pids": "16"},
+	} {
+		shape := planeShape(0, 1)
+		shape["sandbox"].(map[string]any)["resources"] = resources
+		got := p.call(http.MethodPut, "/v1/pools/"+name, p.key, shape)
+		if got.code != http.StatusBadRequest {
+			t.Fatalf("declare %s = %+v, want 400", name, got)
+		}
+		if _, err := p.store.PoolRoute(context.Background(), testTenant, name); !errors.Is(err, api.ErrNotFound) {
+			t.Fatalf("declare %s kept a route: %v", name, err)
+		}
+	}
+}
+
 func TestAPIRunnerRunStatuses(t *testing.T) {
 	t.Run("a full pool is 429", func(t *testing.T) {
 		h := newWarmHarness(t)

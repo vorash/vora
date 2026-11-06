@@ -198,7 +198,13 @@ func (s *Server) putPool(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "max_size is too large")
 		return
 	}
+	// The runner fills no default for these and would refuse them, but only after the
+	// route had gone in, with a placement check made at zero.
 	res := spec.GetSandbox().GetResources()
+	if res.GetCpuMillis() <= 0 || res.GetMemoryBytes() <= 0 {
+		writeError(w, http.StatusBadRequest, "sandbox.resources must set cpu_millis and memory_bytes above 0")
+		return
+	}
 
 	// Detached: a client that leaves mid-declare must not abandon a half-done create.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), poolCallTimeout)
