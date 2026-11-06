@@ -46,7 +46,8 @@ sandbox, so a backend that can't reset fails at warm-up and not at first reuse.
 starts until the reset returns.** An exec issued with a live context during a
 reset can leak past the proof: 198 of 300 tries returned clean with a run's
 process and file present, and cancelling first gave 300 of 300 clean (bwrap,
-backend level, logged for the step 10 work on 2026-11-05). `RunInPool` runs its
+backend level, step 10 of the build, 2026-11-05; the log names no host for this
+one). `RunInPool` runs its
 exec on the client's context and closes it before it returns, the pool resets
 only after that, and `rejectPooled` refuses every plain RPC that could change a
 member. On gVisor a reset also waits for each `runsc exec` client to answer, as
@@ -97,9 +98,9 @@ cleanliness between runs of that tenant.
 
 **7. A member's `pids` floor depends on the backend, because the limit counts
 different things.** Under bwrap it counts Vora's tasks and the workload's. An
-idle sandbox holds 10 or 11, and an exec and a reset ran 100 of 100 at 12, so the
-floor is 12 (bwrap, vora-mini, 2026-11-05). A workload that leaves a process
-behind needs 13.
+idle sandbox holds 10 or 11, so 12 is the first limit that always leaves the
+workload one, and an exec loop passed 150 of 150 there (bwrap, vora-mini,
+2026-11-05). A workload that leaves a process behind needs 13.
 
 Under gVisor it counts the Sentry's host threads, not guest tasks: 800 guest
 processes held `pids.current` at 38. So it doesn't bound a fork bomb, only

@@ -633,8 +633,8 @@ its flag is removed:
   ([ADR 011](docs/adr/011-rootless-containerd.md)).
 - **On gVisor, `pids` doesn't limit guest processes.** It counts the Sentry's
   host threads: 800 guest processes held `pids.current` at 38 on vora-mini. A fork
-  bomb is bounded only by `memory.max`. Reaching `pids` ends the whole sandbox, and
-  a limit under about 48 can kill it during ordinary work
+  bomb is bounded only by `memory.max`. Reaching `pids` ends the whole sandbox. A
+  limit of 26 or less can't start, and 28 to 36 died under load
   ([ADR 028](docs/adr/028-warm-pools.md)).
 - **Sandboxes outlive a dead runner briefly**, then exit; orphans are cleaned
   up at the next start.
