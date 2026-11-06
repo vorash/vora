@@ -355,7 +355,7 @@ func (a *agent) Exec(ctx context.Context, req *v1.ExecRequest, send func(*v1.Exe
 		_ = sendChunk(&v1.ExecChunk{Payload: &v1.ExecChunk_Stderr{Stderr: []byte("vora-init: " + err.Error() + "\n")}})
 		_ = sendChunk(&v1.ExecChunk{Payload: &v1.ExecChunk_Exit{Exit: &v1.ExecExit{
 			ExitCode: 127,
-			Reason:   v1.ExitReason_RUNTIME_FAILURE,
+			Reason:   startFailureReason(err),
 		}}})
 		return nil
 	}

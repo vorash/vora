@@ -93,6 +93,39 @@ func TestExecFailureIsAuditedAndNeverSilent(t *testing.T) {
 var failedRunUsage = runtime.Usage{CPUMillis: 42, MemoryPeak: 3 << 20, PeakScope: runtime.PeakWindow}
 
 // endedStream yields chunks and then EOF, with no exit chunk.
+// vora_exec_failed_total says the sandbox failed, so a program's own failure stays out of it,
+// whatever its exit code. A command that could not start reaches the runner as one of those.
+func TestOnlyASandboxFailureCountsAsAFailedExec(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		exit     runtime.ExecResult
+		wantFail float64
+	}{
+		{"the sandbox died under the command", runtime.ExecResult{ExitCode: 128, Reason: runtime.ReasonRuntimeFailure}, 1},
+		{"the command could not start on bwrap", runtime.ExecResult{ExitCode: 127, Reason: runtime.ReasonExited}, 0},
+		{"the command could not start on gVisor", runtime.ExecResult{ExitCode: 128, Reason: runtime.ReasonExited}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, id := startFakeSandbox(t, &fakeExecBackend{stream: endedStream(runtime.ExecChunk{Exit: &tc.exit})})
+			failed := s.metrics.ExecFailedTotal.WithLabelValues(string(runtime.ReasonRuntimeFailure))
+			ok := s.metrics.ExecTotal.WithLabelValues("ok")
+			failedBefore, okBefore := counterValue(t, failed), counterValue(t, ok)
+
+			err := s.ExecSandbox(&v1.ExecSandboxRequest{SandboxId: id, Exec: &v1.ExecRequest{Command: "true"}},
+				&execServerStream{got: make(chan struct{}, 8)})
+			if err != nil {
+				t.Fatalf("ExecSandbox: %v", err)
+			}
+			if got := counterValue(t, failed) - failedBefore; got != tc.wantFail {
+				t.Errorf("vora_exec_failed_total grew by %v, want %v", got, tc.wantFail)
+			}
+			if got := counterValue(t, ok) - okBefore; got != 1-tc.wantFail {
+				t.Errorf("vora_exec_total{ok} grew by %v, want %v", got, 1-tc.wantFail)
+			}
+		})
+	}
+}
+
 func endedStream(chunks ...runtime.ExecChunk) *fakeExecStream {
 	f := &fakeExecStream{chunks: chunks, release: make(chan struct{})}
 	f.once.Do(func() { close(f.release) })
