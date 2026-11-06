@@ -14,6 +14,10 @@ var ErrNotFound = errors.New("api: not found")
 // ErrPoolRouteExists is returned when a tenant already has a pool of that name.
 var ErrPoolRouteExists = errors.New("api: pool route exists")
 
+// ErrPoolRouteChanged is returned when a route no longer names the pool a declare
+// read it with.
+var ErrPoolRouteChanged = errors.New("api: pool route changed")
+
 // MemStore is an in-memory Store used for development and tests.
 type MemStore struct {
 	mu         sync.RWMutex
@@ -207,10 +211,15 @@ func (m *MemStore) InsertPoolRoute(_ context.Context, route PoolRoute) error {
 	return nil
 }
 
-func (m *MemStore) SetPoolRoute(_ context.Context, route PoolRoute) error {
+func (m *MemStore) SetPoolRoute(_ context.Context, route PoolRoute, expectPoolID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.poolRoutes[poolRouteKey{route.TenantID, route.Name}] = route
+	key := poolRouteKey{route.TenantID, route.Name}
+	current, ok := m.poolRoutes[key]
+	if !ok || (current.PoolID != expectPoolID && current.PoolID != route.PoolID) {
+		return ErrPoolRouteChanged
+	}
+	m.poolRoutes[key] = route
 	return nil
 }
 

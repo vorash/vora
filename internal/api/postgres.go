@@ -333,15 +333,18 @@ func (s *PostgresStore) InsertPoolRoute(ctx context.Context, route PoolRoute) er
 	return nil
 }
 
-func (s *PostgresStore) SetPoolRoute(ctx context.Context, route PoolRoute) error {
-	_, err := s.pool.Exec(ctx,
-		`insert into pool_routes (tenant_id, name, pool_id, runner_id, agent_id, max_size, cpu_millis, memory_bytes)
-		 values ($1,$2,$3,$4,$5,$6,$7,$8)
-		 on conflict (tenant_id, name) do update set pool_id = excluded.pool_id, runner_id = excluded.runner_id,
-		   agent_id = excluded.agent_id, max_size = excluded.max_size, cpu_millis = excluded.cpu_millis,
-		   memory_bytes = excluded.memory_bytes`,
-		route.TenantID, route.Name, route.PoolID, route.RunnerID, route.AgentID, route.MaxSize, route.CPUMillis, route.MemoryBytes)
-	return err
+func (s *PostgresStore) SetPoolRoute(ctx context.Context, route PoolRoute, expectPoolID string) error {
+	tag, err := s.pool.Exec(ctx,
+		`update pool_routes set pool_id = $3, runner_id = $4, agent_id = $5, max_size = $6, cpu_millis = $7, memory_bytes = $8
+		 where tenant_id = $1 and name = $2 and (pool_id = $9 or pool_id = $3)`,
+		route.TenantID, route.Name, route.PoolID, route.RunnerID, route.AgentID, route.MaxSize, route.CPUMillis, route.MemoryBytes, expectPoolID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrPoolRouteChanged
+	}
+	return nil
 }
 
 func (s *PostgresStore) PoolRoute(ctx context.Context, tenant, name string) (PoolRoute, error) {

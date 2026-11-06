@@ -24,6 +24,7 @@ import (
 	"github.com/vorash/vora/internal/api"
 	"github.com/vorash/vora/internal/client"
 	"github.com/vorash/vora/internal/config"
+	"github.com/vorash/vora/internal/pool"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/sandbox"
 	"github.com/vorash/vora/internal/ulid"
@@ -505,6 +506,38 @@ func TestAPIRunnerRestartKeepsTheRoute(t *testing.T) {
 	got := p.call(http.MethodGet, "/v1/pools/py", p.key, nil)
 	if got.code != http.StatusOK || decodePlanePool(t, got.body).GetId() != created.GetId() {
 		t.Fatalf("get after restart = %+v", got)
+	}
+	p.waitIdle("py", 1)
+	p.run("py", 5).mustComplete(t)
+}
+
+// A runner that comes back without a pool's record leaves a route the runner cannot
+// back. The API must say so, keep the reservation until the tenant acts, and let a
+// declare bring the pool back on that runner.
+func TestAPIRunnerRestartThatLostThePool(t *testing.T) {
+	h := newWarmHarness(t)
+	p := newAPIPlane(t, h.s)
+	created := p.declare("py", planeShape(1, 1))
+	p.waitIdle("py", 1)
+	if err := h.s.deletePoolRecord(pool.ID(created.GetId())); err != nil {
+		t.Fatal(err)
+	}
+	next := h.restart(nil, reusableBackend{newPoolBackend(t)})
+	p.serve(next.s)
+
+	got := p.call(http.MethodGet, "/v1/pools/py", p.key, nil)
+	if got.code != http.StatusOK || decodePlanePool(t, got.body).GetState() != v1.PoolState_POOL_NOT_ON_RUNNER {
+		t.Fatalf("get after losing the record = %+v, want 200 POOL_NOT_ON_RUNNER", got)
+	}
+	if res := p.run("py", 5); res.code != http.StatusConflict || !strings.Contains(res.body, "declare it again") {
+		t.Fatalf("run after losing the record = %d %s, want 409", res.code, res.body)
+	}
+	if route, err := p.store.PoolRoute(context.Background(), testTenant, "py"); err != nil || route.PoolID != created.GetId() {
+		t.Fatalf("reads changed the route: %+v, %v", route, err)
+	}
+	again := p.call(http.MethodPut, "/v1/pools/py", p.key, planeShape(1, 1))
+	if again.code != http.StatusOK || decodePlanePool(t, again.body).GetId() == created.GetId() {
+		t.Fatalf("redeclare = %+v, want 200 and a new id", again)
 	}
 	p.waitIdle("py", 1)
 	p.run("py", 5).mustComplete(t)

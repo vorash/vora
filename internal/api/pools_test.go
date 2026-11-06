@@ -594,11 +594,11 @@ func (f *failingPoolRouteStore) InsertPoolRoute(ctx context.Context, route PoolR
 	return f.Store.InsertPoolRoute(ctx, route)
 }
 
-func (f *failingPoolRouteStore) SetPoolRoute(ctx context.Context, route PoolRoute) error {
+func (f *failingPoolRouteStore) SetPoolRoute(ctx context.Context, route PoolRoute, expectPoolID string) error {
 	if f.setErr != nil {
 		return f.setErr
 	}
-	return f.Store.SetPoolRoute(ctx, route)
+	return f.Store.SetPoolRoute(ctx, route, expectPoolID)
 }
 
 // leavingStore signals when the insert is done, which is when a client that leaves
@@ -730,32 +730,94 @@ func TestPoolDeleteKeepsItsRouteUntilTheRunnerSaysGone(t *testing.T) {
 		}
 		gone(t, s)
 	})
-	t.Run("only NotFound drops a route on a read", func(t *testing.T) {
+	t.Run("no read drops a route", func(t *testing.T) {
 		fr, s, ts, key, p := setup(t)
 		for _, err := range []error{
 			status.Error(codes.Unavailable, "pools are not loaded yet"),
 			status.Error(codes.Internal, "boom"),
 			status.Error(codes.DeadlineExceeded, "slow"),
+			status.Error(codes.NotFound, "pool not found"),
 		} {
 			fr.getErr = err
 			call(t, http.MethodGet, ts.URL+"/v1/pools/py", key, nil)
 			call(t, http.MethodGet, ts.URL+"/v1/pools", key, nil)
 			kept(t, s, p)
 		}
-		fr.getErr = nil
-		delete(fr.pools, p.GetId())
-		if got := call(t, http.MethodGet, ts.URL+"/v1/pools/py", key, nil); got.code != http.StatusNotFound {
-			t.Fatalf("get = %d %s, want 404", got.code, got.body)
-		}
-		gone(t, s)
 	})
-	t.Run("a listing clears what the runner no longer has", func(t *testing.T) {
-		fr, s, ts, key, p := setup(t)
+}
+
+// A runner that lost a pool's record leaves a route holding a reservation and a
+// name. A tenant must be able to see that, and either way out must converge.
+func TestPoolTheRunnerLost(t *testing.T) {
+	setup := func(t *testing.T) (*fakeRunner, *Server, *httptest.Server, string, *v1.Pool) {
+		t.Helper()
+		fr := &fakeRunner{}
+		s, ts := newTestServer(t, fr)
+		key := tenantKey(t, s, "tenant-a")
+		p := declare(t, ts, key, "py", poolBody(1, 2))
 		delete(fr.pools, p.GetId())
-		if got := call(t, http.MethodGet, ts.URL+"/v1/pools", key, nil); got.code != http.StatusOK || strings.Contains(got.body, p.GetId()) {
-			t.Fatalf("list = %d %s", got.code, got.body)
+		return fr, s, ts, key, p
+	}
+	t.Run("a read says so and holds on to the reservation", func(t *testing.T) {
+		_, s, ts, key, p := setup(t)
+		got := call(t, http.MethodGet, ts.URL+"/v1/pools/py", key, nil)
+		if got.code != http.StatusOK {
+			t.Fatalf("get = %d %s, want 200", got.code, got.body)
 		}
-		gone(t, s)
+		read := decodePool(t, got.body)
+		if read.GetState() != v1.PoolState_POOL_NOT_ON_RUNNER || read.GetId() != p.GetId() || read.GetSpec().GetName() != "py" || read.GetRunnerId() != "" {
+			t.Fatalf("get = %v, want POOL_NOT_ON_RUNNER, this pool and no runner", read)
+		}
+		list := call(t, http.MethodGet, ts.URL+"/v1/pools", key, nil)
+		if list.code != http.StatusOK || !strings.Contains(list.body, p.GetId()) || !strings.Contains(list.body, "POOL_NOT_ON_RUNNER") {
+			t.Fatalf("list = %d %s, want the pool as POOL_NOT_ON_RUNNER", list.code, list.body)
+		}
+		if route, ok := routeNamed(t, s, "tenant-a", "py"); !ok || route.PoolID != p.GetId() || committed(s).count != 2 {
+			t.Fatalf("route %+v, %v, committed %+v: want both kept", route, ok, committed(s))
+		}
+	})
+	t.Run("a stranger still sees nothing", func(t *testing.T) {
+		_, s, ts, _, p := setup(t)
+		stranger := tenantKey(t, s, "tenant-b")
+		if got := call(t, http.MethodGet, ts.URL+"/v1/pools/py", stranger, nil); got.code != http.StatusNotFound || strings.Contains(got.body, p.GetId()) {
+			t.Fatalf("get by a stranger = %d %s, want 404", got.code, got.body)
+		}
+	})
+	t.Run("a run says what to do", func(t *testing.T) {
+		_, s, ts, key, p := setup(t)
+		got := call(t, http.MethodPost, ts.URL+"/v1/pools/py/run", key, map[string]any{"command": "true", "timeoutSeconds": "5"})
+		if got.code != http.StatusConflict || !strings.Contains(got.body, "declare it again") {
+			t.Fatalf("run = %d %s, want 409 saying to declare it again", got.code, got.body)
+		}
+		if route, ok := routeNamed(t, s, "tenant-a", "py"); !ok || route.PoolID != p.GetId() {
+			t.Fatalf("route = %+v, %v after a run", route, ok)
+		}
+	})
+	t.Run("a declare brings it back", func(t *testing.T) {
+		fr, s, ts, key, p := setup(t)
+		got := call(t, http.MethodPut, ts.URL+"/v1/pools/py", key, poolBody(1, 2))
+		if got.code != http.StatusOK {
+			t.Fatalf("declare = %d %s, want 200", got.code, got.body)
+		}
+		id := decodePool(t, got.body).GetId()
+		if route, ok := routeNamed(t, s, "tenant-a", "py"); id == p.GetId() || !ok || route.PoolID != id || fr.pool(id) == nil {
+			t.Fatalf("new pool %s, old %s, route %+v, %v", id, p.GetId(), route, ok)
+		}
+		if read := call(t, http.MethodGet, ts.URL+"/v1/pools/py", key, nil); decodePool(t, read.body).GetState() != v1.PoolState_POOL_ACTIVE {
+			t.Fatalf("get after declare = %d %s", read.code, read.body)
+		}
+	})
+	t.Run("a delete releases it", func(t *testing.T) {
+		_, s, ts, key, _ := setup(t)
+		if got := call(t, http.MethodDelete, ts.URL+"/v1/pools/py", key, nil); got.code != http.StatusNoContent {
+			t.Fatalf("delete = %d %s, want 204", got.code, got.body)
+		}
+		if _, ok := routeNamed(t, s, "tenant-a", "py"); ok || committed(s).count != 0 {
+			t.Fatalf("committed %+v: want the route and its reservation gone", committed(s))
+		}
+		if got := call(t, http.MethodGet, ts.URL+"/v1/pools/py", key, nil); got.code != http.StatusNotFound {
+			t.Fatalf("get after delete = %d %s, want 404", got.code, got.body)
+		}
 	})
 }
 
@@ -854,9 +916,9 @@ func TestRunStatusMapping(t *testing.T) {
 	}
 }
 
-// A NotFound out of a run may come from inside it. Only the pool's own absence
-// drops the route.
-func TestRunNotFoundDropsTheRouteOnlyIfThePoolIsGone(t *testing.T) {
+// A NotFound out of a run may come from inside it. Only the pool's own absence is
+// answered as a lost pool, and neither drops the route.
+func TestRunNotFoundIsALostPoolOnlyIfThePoolIsGone(t *testing.T) {
 	fr := &fakeRunner{}
 	s, ts := newTestServer(t, fr)
 	key := tenantKey(t, s, "tenant-a")
@@ -873,11 +935,11 @@ func TestRunNotFoundDropsTheRouteOnlyIfThePoolIsGone(t *testing.T) {
 
 	fr.runErr = nil
 	delete(fr.pools, p.GetId())
-	if got := call(t, http.MethodPost, ts.URL+"/v1/pools/py/run", key, run); got.code != http.StatusNotFound {
-		t.Fatalf("run = %d %s", got.code, got.body)
+	if got := call(t, http.MethodPost, ts.URL+"/v1/pools/py/run", key, run); got.code != http.StatusConflict {
+		t.Fatalf("run = %d %s, want 409", got.code, got.body)
 	}
-	if _, ok := routeNamed(t, s, "tenant-a", "py"); ok {
-		t.Fatal("a route to a pool the runner lost survived")
+	if _, ok := routeNamed(t, s, "tenant-a", "py"); !ok {
+		t.Fatal("a run on a pool the runner lost dropped the route")
 	}
 }
 

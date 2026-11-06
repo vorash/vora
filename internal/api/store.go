@@ -151,8 +151,10 @@ type Store interface {
 
 	// InsertPoolRoute fails with ErrPoolRouteExists when (tenant, name) is taken.
 	InsertPoolRoute(ctx context.Context, route PoolRoute) error
-	// SetPoolRoute writes a route whether or not (tenant, name) exists.
-	SetPoolRoute(ctx context.Context, route PoolRoute) error
+	// SetPoolRoute rewrites a route only while it names expectPoolID or already
+	// names route.PoolID, and otherwise fails with ErrPoolRouteChanged, including
+	// when the route is gone. Two declares answered with one pool both succeed.
+	SetPoolRoute(ctx context.Context, route PoolRoute, expectPoolID string) error
 	PoolRoute(ctx context.Context, tenant, name string) (PoolRoute, error)
 	// ListPoolRoutes lists one tenant's routes, or every route for an empty
 	// tenant, sorted by tenant and name.

@@ -200,8 +200,18 @@ func TestPostgresAPIStore(t *testing.T) {
 	}
 	moved := pr
 	moved.PoolID, moved.MaxSize = "pool_pg_3", 4
-	if err := store.SetPoolRoute(ctx, moved); err != nil {
+	if err := store.SetPoolRoute(ctx, moved, "pool_pg_elsewhere"); !errors.Is(err, api.ErrPoolRouteChanged) {
+		t.Fatalf("set expecting another pool = %v, want ErrPoolRouteChanged", err)
+	}
+	if got, err := store.PoolRoute(ctx, "tenant_pg", "py"); err != nil || got != pr {
+		t.Fatalf("pool route after a refused set = %+v, %v", got, err)
+	}
+	if err := store.SetPoolRoute(ctx, moved, pr.PoolID); err != nil {
 		t.Fatalf("set pool route: %v", err)
+	}
+	// Two declares answered with one pool: the second finds the row already naming it.
+	if err := store.SetPoolRoute(ctx, moved, pr.PoolID); err != nil {
+		t.Fatalf("set of the pool the route already names: %v", err)
 	}
 	if got, err := store.PoolRoute(ctx, "tenant_pg", "py"); err != nil || got != moved {
 		t.Fatalf("pool route after set = %+v, %v", got, err)
@@ -219,7 +229,11 @@ func TestPostgresAPIStore(t *testing.T) {
 	if _, err := store.PoolRoute(ctx, "tenant_pg", "py"); !errors.Is(err, api.ErrNotFound) {
 		t.Fatalf("pool route after delete = %v, want ErrNotFound", err)
 	}
-	if err := store.SetPoolRoute(ctx, pr); err != nil {
-		t.Fatalf("set of a missing pool route, which a create in flight restores: %v", err)
+	// A create that finishes after its route was released must not bring it back.
+	if err := store.SetPoolRoute(ctx, pr, pr.PoolID); !errors.Is(err, api.ErrPoolRouteChanged) {
+		t.Fatalf("set of a missing pool route = %v, want ErrPoolRouteChanged", err)
+	}
+	if _, err := store.PoolRoute(ctx, "tenant_pg", "py"); !errors.Is(err, api.ErrNotFound) {
+		t.Fatalf("a refused set brought the route back: %v", err)
 	}
 }

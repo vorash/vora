@@ -65,6 +65,12 @@ enum PoolState {
   // boot: it has no members and no reservation, runs are FAILED_PRECONDITION, and
   // a boot that can honour it loads it again. not_loaded_reason says why.
   POOL_NOT_LOADED = 3;
+  // Set by the API, never by a runner. A pool route exists, so its reservation is
+  // held and its name is taken, but the runner answered that it has no such pool:
+  // a declare is still in flight, or the runner lost the record. It does not come
+  // back on its own. A PUT creates the pool again under a new id, and a DELETE
+  // releases the reservation.
+  POOL_NOT_ON_RUNNER = 4;
 }
 
 message Pool {
