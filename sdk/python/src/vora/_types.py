@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence, cast
 
 from ._errors import VoraError
 from ._units import parse_cpu, parse_duration, parse_size
@@ -34,6 +34,18 @@ ExitReason = Literal[
     "RUNTIME_FAILURE",
     "DISK_QUOTA_EXCEEDED",
 ]
+
+
+PoolReuse = Literal["POOL_REUSE_RESET", "POOL_REUSE_UNSAFE_NO_RESET"]
+PoolState = Literal["POOL_ACTIVE", "POOL_DRAINING", "POOL_NOT_LOADED", "POOL_NOT_ON_RUNNER"]
+PoolResetOutcome = Literal["POOL_RESET_OK", "POOL_RESET_FAILED", "POOL_RESET_SKIPPED", "POOL_RESET_RETIRED"]
+
+_STATES_WITH_STATS: frozenset[str | None] = frozenset({"POOL_ACTIVE", "POOL_DRAINING"})
+
+REUSE_SHORTHANDS: dict[str, str] = {
+    "reset": "POOL_REUSE_RESET",
+    "unsafe_no_reset": "POOL_REUSE_UNSAFE_NO_RESET",
+}
 
 
 @dataclass(frozen=True)
@@ -74,6 +86,7 @@ class SandboxInfo:
     created_at_unix_ms: int | None = None
     updated_at_unix_ms: int | None = None
     image_rootfs: str | None = None
+    pool_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +133,8 @@ class SandboxExec:
     memory_peak_scope: str | None = None
     oom_kills: int | None = None
     pids_limit_hits: int | None = None
+    pool_id: str | None = None
+    sandbox_run: int | None = None
 
 
 @dataclass(frozen=True)
@@ -183,6 +198,161 @@ class ExecResult:
     stderr: str
     exit_code: int
     reason: str | None = None
+
+
+@dataclass(frozen=True)
+class PoolSpec:
+    """A pool's definition. Unset limits are None until the runner fills in defaults."""
+
+    name: str | None = None
+    tenant_id: str | None = None
+    agent_id: str | None = None
+    sandbox: SandboxSpec | None = None
+    size: int | None = None
+    max_size: int | None = None
+    max_runs: int | None = None
+    max_age_seconds: int | None = None
+    max_run_seconds: int | None = None
+    borrow_timeout_ms: int | None = None
+    idle_expiry_seconds: int | None = None
+    reuse: PoolReuse | None = None
+
+
+@dataclass(frozen=True)
+class PoolStats:
+    """A runner's snapshot of one pool. Counters reset when the runner restarts.
+
+    These are ints, not ``int | None``: ``PoolInfo.stats`` is set only for a pool the
+    runner has live, and the runner fills all of them from memory on every such answer,
+    so a key protojson left out is a zero the runner did report.
+    """
+
+    starting: int = 0
+    idle: int = 0
+    busy: int = 0
+    resetting: int = 0
+    retiring: int = 0
+    runs_total: int = 0
+    warm_runs_total: int = 0
+    resets_total: int = 0
+    reset_failures_total: int = 0
+    destroyed_total: int = 0
+    exhausted_total: int = 0
+    start_failed_total: int = 0
+    last_start_error: str | None = None
+    dormant: bool = False
+
+
+@dataclass(frozen=True)
+class PoolInfo:
+    """A pool's record.
+
+    Read ``state`` before ``stats``. ``stats`` is set for ``POOL_ACTIVE`` and
+    ``POOL_DRAINING`` only, and is None, never zeros, when nothing was measured:
+
+    - ``POOL_NOT_ON_RUNNER``: the route holds the reservation and the name, and the
+      runner has no such pool. ``declare`` creates it again under a new id, and
+      ``delete`` releases the reservation.
+    - ``POOL_NOT_LOADED``: the runner refused it at boot. ``not_loaded_reason`` says why.
+    - ``state`` None, in a listing: the runner did not answer.
+
+    In the first and last case ``spec`` holds only what the route knows: the name,
+    tenant, agent and reuse. ``reuse`` None is treated as a reset. ``id`` changes when a
+    lost pool is declared again, so don't keep it across a declare.
+    """
+
+    id: str
+    spec: PoolSpec | None = None
+    state: PoolState | None = None
+    runner_id: str | None = None
+    stats: PoolStats | None = None
+    created_at_unix_ms: int | None = None
+    not_loaded_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class PoolRun:
+    """How a run got its sandbox: the first frame of every pool run.
+
+    protojson leaves out zeros, so a None duration is either not measured or under
+    a millisecond, and the API does not say which. ``reset_ms`` here is the reset
+    that prepared this sandbox, None on its first run. This run's own reset is
+    ``PoolRunDone.reset_ms``.
+    """
+
+    pool_id: str | None = None
+    sandbox_id: str | None = None
+    execution_id: str | None = None
+    warm: bool = False
+    startup_ms: int | None = None
+    reset_ms: int | None = None
+    sandbox_run: int | None = None
+    reuse: PoolReuse | None = None
+
+
+@dataclass(frozen=True)
+class RunExit:
+    """How the command ended. ``usage`` fields stay None when not reported."""
+
+    exit_code: int = 0
+    reason: str | None = None
+    execution_id: str | None = None
+    usage: ExecUsage | None = None
+
+
+@dataclass(frozen=True)
+class PoolRunDone:
+    """What happened to the sandbox after the run.
+
+    ``outcome`` is ``POOL_RESET_FAILED`` when a reset could not prove the sandbox
+    clean, and ``POOL_RESET_SKIPPED`` on an unsafe pool, where nothing was cleaned.
+    ``retire_cause`` is set when the sandbox is being destroyed.
+    """
+
+    outcome: PoolResetOutcome | None = None
+    reset_ms: int | None = None
+    retire_cause: str | None = None
+
+
+@dataclass(frozen=True)
+class RunStreamError:
+    """Why a stream ended after ``exit`` with no ``run_done``."""
+
+    code: str
+    message: str
+
+
+@dataclass(frozen=True)
+class RunChunk:
+    """One unit of a pool run: ``run``, output, ``exit``, then ``run_done``.
+
+    ``stream_error`` comes only after ``exit``, in place of ``run_done``: the run's
+    result stands, and the reset's outcome is unknown. A failure before ``exit``
+    raises ``PoolRunError`` instead.
+    """
+
+    kind: Literal["run", "stdout", "stderr", "exit", "run_done", "stream_error"]
+    data: bytes = b""
+    run: PoolRun | None = None
+    exit: RunExit | None = None
+    done: PoolRunDone | None = None
+    error: RunStreamError | None = None
+
+
+@dataclass(frozen=True)
+class PoolRunResult:
+    """A finished pool run.
+
+    ``done`` is None when the stream ended before the reset's outcome arrived, and
+    ``stream_error`` says why. The result is still valid: the command had finished.
+    """
+
+    run: PoolRun
+    exit: RunExit
+    stdout: str
+    stderr: str
+    done: PoolRunDone | None = None
+    stream_error: RunStreamError | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +435,31 @@ def encode_exec_request(options: Mapping[str, Any]) -> Json:
     if options.get("stdin") is not None:
         request["stdin"] = encode_base64(options["stdin"])
     return request
+
+
+def encode_pool_spec(name: str, options: Mapping[str, Any]) -> Json:
+    """The ``uint32`` limits go as JSON numbers, the ``int64`` ones as strings."""
+    # The pool owns its members' identity, so the template must not name one.
+    template = {key: value for key, value in options.items() if key not in ("tenant_id", "agent_id")}
+    spec: Json = {"name": name, "sandbox": encode_sandbox_spec(template)}
+    for wire, key in (("tenantId", "tenant_id"), ("agentId", "agent_id")):
+        if options.get(key) is not None:
+            spec[wire] = options[key]
+    for wire, key in (("size", "size"), ("maxSize", "max_size"), ("maxRuns", "max_runs")):
+        if options.get(key) is not None:
+            spec[wire] = int(options[key])
+    for wire, key in (
+        ("maxAgeSeconds", "max_age_seconds"),
+        ("maxRunSeconds", "max_run_seconds"),
+        ("borrowTimeoutMs", "borrow_timeout_ms"),
+        ("idleExpirySeconds", "idle_expiry_seconds"),
+    ):
+        if options.get(key) is not None:
+            spec[wire] = str(int(options[key]))
+    reuse = options.get("reuse")
+    if reuse is not None:
+        spec["reuse"] = REUSE_SHORTHANDS.get(reuse, reuse)
+    return spec
 
 
 def encode_base64(value: str | bytes) -> str:
@@ -353,6 +548,7 @@ def decode_sandbox_info(raw: Any) -> SandboxInfo:
         created_at_unix_ms=_int(source.get("createdAtUnixMs")),
         updated_at_unix_ms=_int(source.get("updatedAtUnixMs")),
         image_rootfs=_string(source.get("imageRootfs")),
+        pool_id=_string(source.get("poolId")),
     )
 
 
@@ -400,6 +596,8 @@ def decode_sandbox_exec(raw: Any) -> SandboxExec:
         memory_peak_scope=_string(source.get("memoryPeakScope")),
         oom_kills=_int(source.get("oomKills")),
         pids_limit_hits=_int(source.get("pidsLimitHits")),
+        pool_id=_string(source.get("poolId")),
+        sandbox_run=_int(source.get("sandboxRun")),
     )
 
 
@@ -461,4 +659,126 @@ def decode_exec_usage(raw: Any) -> ExecUsage | None:
         memory_peak_scope=_string(source.get("memoryPeakScope")),
         oom_kills=_int(source.get("oomKills")),
         pids_limit_hits=_int(source.get("pidsLimitHits")),
+    )
+
+
+def decode_pool_spec(raw: Any) -> PoolSpec | None:
+    source = _object(raw)
+    if source is None:
+        return None
+    return PoolSpec(
+        name=_string(source.get("name")),
+        tenant_id=_string(source.get("tenantId")),
+        agent_id=_string(source.get("agentId")),
+        sandbox=decode_sandbox_spec(source.get("sandbox")),
+        size=_int(source.get("size")),
+        max_size=_int(source.get("maxSize")),
+        max_runs=_int(source.get("maxRuns")),
+        max_age_seconds=_int(source.get("maxAgeSeconds")),
+        max_run_seconds=_int(source.get("maxRunSeconds")),
+        borrow_timeout_ms=_int(source.get("borrowTimeoutMs")),
+        idle_expiry_seconds=_int(source.get("idleExpirySeconds")),
+        reuse=cast("PoolReuse | None", _string(source.get("reuse"))),
+    )
+
+
+def decode_pool_stats(raw: Any) -> PoolStats | None:
+    source = _object(raw)
+    if source is None:
+        return None
+    return PoolStats(
+        starting=_int(source.get("starting")) or 0,
+        idle=_int(source.get("idle")) or 0,
+        busy=_int(source.get("busy")) or 0,
+        resetting=_int(source.get("resetting")) or 0,
+        retiring=_int(source.get("retiring")) or 0,
+        runs_total=_int(source.get("runsTotal")) or 0,
+        warm_runs_total=_int(source.get("warmRunsTotal")) or 0,
+        resets_total=_int(source.get("resetsTotal")) or 0,
+        reset_failures_total=_int(source.get("resetFailuresTotal")) or 0,
+        destroyed_total=_int(source.get("destroyedTotal")) or 0,
+        exhausted_total=_int(source.get("exhaustedTotal")) or 0,
+        start_failed_total=_int(source.get("startFailedTotal")) or 0,
+        last_start_error=_string(source.get("lastStartError")),
+        dormant=_bool(source.get("dormant")) or False,
+    )
+
+
+def decode_pool_info(raw: Any) -> PoolInfo:
+    source = _object(raw) or {}
+    state = cast("PoolState | None", _string(source.get("state")))
+    return PoolInfo(
+        id=_string(source.get("id")) or "",
+        spec=decode_pool_spec(source.get("spec")),
+        state=state,
+        runner_id=_string(source.get("runnerId")),
+        # A POOL_NOT_LOADED answer carries an empty ``stats`` that no pool filled, and
+        # its zeros must not read as measured.
+        stats=decode_pool_stats(source.get("stats")) if state in _STATES_WITH_STATS else None,
+        created_at_unix_ms=_int(source.get("createdAtUnixMs")),
+        not_loaded_reason=_string(source.get("notLoadedReason")),
+    )
+
+
+def decode_pool_run(source: Json) -> PoolRun:
+    return PoolRun(
+        pool_id=_string(source.get("poolId")),
+        sandbox_id=_string(source.get("sandboxId")),
+        execution_id=_string(source.get("executionId")),
+        warm=source.get("warm") is True,
+        startup_ms=_int(source.get("startupMs")),
+        reset_ms=_int(source.get("resetMs")),
+        sandbox_run=_int(source.get("sandboxRun")),
+        reuse=cast("PoolReuse | None", _string(source.get("reuse"))),
+    )
+
+
+def decode_run_chunk(raw: Any) -> RunChunk | None:
+    """One frame of a run stream. The ``{"error": ...}`` last line is not a frame."""
+    source = _object(raw)
+    if source is None:
+        return None
+    run = _object(source.get("run"))
+    if run is not None:
+        return RunChunk("run", run=decode_pool_run(run))
+    stdout = _string(source.get("stdout"))
+    if stdout is not None:
+        return RunChunk("stdout", data=decode_base64(stdout))
+    stderr = _string(source.get("stderr"))
+    if stderr is not None:
+        return RunChunk("stderr", data=decode_base64(stderr))
+    exit_ = _object(source.get("exit"))
+    if exit_ is not None:
+        return RunChunk(
+            "exit",
+            exit=RunExit(
+                # An exit frame's code is always real: protojson leaves out only a zero.
+                exit_code=_int(exit_.get("exitCode")) or 0,
+                reason=_string(exit_.get("reason")),
+                execution_id=_string(exit_.get("executionId")),
+                usage=decode_exec_usage(exit_.get("usage")),
+            ),
+        )
+    done = _object(source.get("runDone"))
+    if done is not None:
+        return RunChunk(
+            "run_done",
+            done=PoolRunDone(
+                outcome=cast("PoolResetOutcome | None", _string(done.get("outcome"))),
+                reset_ms=_int(done.get("resetMs")),
+                retire_cause=_string(done.get("retireCause")),
+            ),
+        )
+    return None
+
+
+def decode_run_error(raw: Any) -> RunStreamError | None:
+    """The API's last line for a run that failed after its first frame."""
+    source = _object(raw)
+    error = _object(source.get("error")) if source is not None else None
+    if error is None:
+        return None
+    return RunStreamError(
+        code=_string(error.get("code")) or "run_failed",
+        message=_string(error.get("message")) or "the run ended without a result",
     )

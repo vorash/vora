@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ._types import PoolRun
 
 
 class VoraError(Exception):
@@ -20,3 +23,97 @@ class VoraError(Exception):
         """HTTP status, when the failure came from the API."""
         self.body = body
         """Parsed response body (``{"error": "..."}``), when the API returned one."""
+
+
+class RetryLaterError(VoraError):
+    """The API refused for now and may name a wait (``Retry-After``)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        body: Any = None,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(message, status=status, body=body)
+        self.retry_after = retry_after
+        """Seconds to wait, when the API said."""
+
+
+class RateLimitedError(RetryLaterError):
+    """429: a pool with no free sandbox, or capacity reached. Nothing ran."""
+
+
+class UnavailableError(RetryLaterError):
+    """503: no sandbox could start, or a runner is down or still starting.
+
+    On a run, probably nothing ran, but it isn't certain: the runner may have been lost
+    after the program started.
+    """
+
+
+class GatewayTimeoutError(RetryLaterError):
+    """504: the runner did not answer in time. It is not known whether anything ran."""
+
+
+class ConflictError(VoraError):
+    """409: the resource's state refuses this call."""
+
+
+class PoolDrainingError(ConflictError):
+    """The pool is being deleted. Retry later, or declare it again once it is gone.
+
+    ``delete()`` also raises this, with status 202, when its wait runs out.
+    """
+
+
+class PoolNotLoadedError(ConflictError):
+    """The runner refused to load this pool at its last boot. Retrying won't help."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        body: Any = None,
+        reason: str | None = None,
+    ) -> None:
+        super().__init__(message, status=status, body=body)
+        self.reason = reason
+        """``not_loaded_reason`` from the pool's record, for example ``backend_missing``."""
+
+
+class PoolNotOnRunnerError(ConflictError):
+    """The pool's route holds its reservation and name, and its runner has no such pool.
+
+    It does not come back on its own, so retrying won't help. ``declare`` creates it
+    again under a new id, and ``delete`` releases the reservation.
+    """
+
+
+class PoolSpecConflictError(ConflictError):
+    """A live pool of this name has a different spec. Specs are immutable."""
+
+
+class RequestTooLargeError(VoraError):
+    """A run's encoded body is over the API's 1 MiB limit. It was not sent."""
+
+
+class PoolRunError(VoraError):
+    """A pool run that started and ended without an ``exit`` frame.
+
+    The command may have run, so retrying is the caller's decision. ``code`` is
+    ``client_stalled``, ``runner_unavailable`` or ``run_failed`` from the API's last
+    line, or ``stream_ended`` when the connection ended with no such line.
+    """
+
+    def __init__(self, code: str, message: str, *, run: "PoolRun | None" = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.run = run
+        """The run's ``PoolRun`` frame, when one arrived."""
+        self.stdout = ""
+        """Output received before the failure. ``Pool.run`` fills it in."""
+        self.stderr = ""
+        """Output received before the failure. ``Pool.run`` fills it in."""

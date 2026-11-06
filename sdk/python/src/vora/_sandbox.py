@@ -24,6 +24,26 @@ from ._types import (
     encode_exec_request,
 )
 
+
+def exec_request(
+    command: str,
+    args: Sequence[str] | None,
+    cwd: str | None,
+    env: Sequence[str] | None,
+    stdin: str | bytes | None,
+    timeout_seconds: int | None,
+) -> dict[str, Any]:
+    # A bare command is a shell command line; `/bin/sh` exists in every
+    # Vora base image and keeps pipelines and quoting working the way
+    # callers expect.
+    if args is None:
+        options: dict[str, Any] = {"command": "sh", "args": ["-c", command]}
+    else:
+        options = {"command": command, "args": list(args)}
+    options.update(cwd=cwd, env=list(env) if env else None, stdin=stdin, timeout_seconds=timeout_seconds)
+    return encode_exec_request(options)
+
+
 class Sandbox:
     """A handle to one sandbox. Reached through ``vora.sandboxes``."""
 
@@ -61,14 +81,19 @@ class Sandbox:
 
         With ``args=None`` the command is a shell line run via ``/bin/sh -c``;
         pass ``args`` (even empty) to run ``command`` literally.
+
+        ``timeout_seconds`` also bounds the wait for output, at that plus 30 s, past which
+        this raises ``httpx.ReadTimeout``. Without it, a client you passed keeps its own read
+        timeout, and a client the SDK built has none, so a background process holding the
+        pipes (``exec("server &")``) or a dead connection waits indefinitely.
         """
         stdout = bytearray()
         stderr = bytearray()
         exit_code = 0
         reason: str | None = None
         saw_exit = False
-        request = self._exec_request(command, args, cwd, env, stdin, timeout_seconds)
-        async for chunk in self._stream(request):
+        request = exec_request(command, args, cwd, env, stdin, timeout_seconds)
+        async for chunk in self._stream(request, timeout_seconds):
             if chunk.kind == "stdout":
                 stdout += chunk.data
             elif chunk.kind == "stderr":
@@ -101,32 +126,16 @@ class Sandbox:
         stdin: str | bytes | None = None,
         timeout_seconds: int | None = None,
     ) -> AsyncGenerator[ExecChunk, None]:
-        """Stream exec output as chunks, ending with an ``exit`` chunk."""
-        request = self._exec_request(command, args, cwd, env, stdin, timeout_seconds)
-        async for chunk in self._stream(request):
+        """Stream exec output as chunks, ending with an ``exit`` chunk.
+
+        ``timeout_seconds`` bounds the wait for output as it does in ``exec``.
+        """
+        request = exec_request(command, args, cwd, env, stdin, timeout_seconds)
+        async for chunk in self._stream(request, timeout_seconds):
             yield chunk
 
-    def _exec_request(
-        self,
-        command: str,
-        args: Sequence[str] | None,
-        cwd: str | None,
-        env: Sequence[str] | None,
-        stdin: str | bytes | None,
-        timeout_seconds: int | None,
-    ) -> dict[str, Any]:
-        # A bare command is a shell command line; `/bin/sh` exists in every
-        # Vora base image and keeps pipelines and quoting working the way
-        # callers expect.
-        if args is None:
-            options: dict[str, Any] = {"command": "sh", "args": ["-c", command]}
-        else:
-            options = {"command": command, "args": list(args)}
-        options.update(cwd=cwd, env=list(env) if env else None, stdin=stdin, timeout_seconds=timeout_seconds)
-        return encode_exec_request(options)
-
-    async def _stream(self, request: dict[str, Any]) -> AsyncGenerator[ExecChunk, None]:
-        async for raw in self._transport.ndjson(self._path("/exec"), json_body=request):
+    async def _stream(self, request: dict[str, Any], timeout_seconds: int | None) -> AsyncGenerator[ExecChunk, None]:
+        async for raw in self._transport.ndjson(self._path("/exec"), json_body=request, timeout_seconds=timeout_seconds):
             chunk = decode_exec_chunk(raw)
             if chunk is not None:
                 yield chunk
