@@ -12,6 +12,7 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/api"
 )
 
@@ -159,5 +160,81 @@ func TestPostgresAPIStore(t *testing.T) {
 	}
 	if _, err := store.Route(ctx, "sbx_pg_test"); !errors.Is(err, api.ErrNotFound) {
 		t.Fatalf("route after delete = %v, want ErrNotFound", err)
+	}
+
+	// --- Pool routes ---
+	pr := api.PoolRoute{
+		TenantID: "tenant_pg", Name: "py", PoolID: "pool_pg_1", RunnerID: "run_pg_test", AgentID: "agent_pg",
+		MaxSize: 8, CPUMillis: 1000, MemoryBytes: 256 << 20, Reuse: v1.PoolReuse_POOL_REUSE_UNSAFE_NO_RESET,
+	}
+	if err := store.InsertPoolRoute(ctx, pr); err != nil {
+		t.Fatalf("insert pool route: %v", err)
+	}
+	// Two racing declares must meet here: the loser finds the winner's route.
+	if err := store.InsertPoolRoute(ctx, pr); !errors.Is(err, api.ErrPoolRouteExists) {
+		t.Fatalf("second insert = %v, want ErrPoolRouteExists", err)
+	}
+	other := pr
+	other.TenantID, other.PoolID = "another_tenant", "pool_pg_2"
+	if err := store.InsertPoolRoute(ctx, other); err != nil {
+		t.Fatalf("the same name in another tenant: %v", err)
+	}
+	// A route must survive a vora-api restart, or its reservation is forgotten.
+	reopened, err := api.OpenPostgres(ctx, dsn)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+	if got, err := reopened.PoolRoute(ctx, "tenant_pg", "py"); err != nil || got != pr {
+		t.Fatalf("pool route after reopen = %+v, %v, want %+v", got, err, pr)
+	}
+	if _, err := store.PoolRoute(ctx, "tenant_pg", "missing"); !errors.Is(err, api.ErrNotFound) {
+		t.Fatalf("missing pool route = %v, want ErrNotFound", err)
+	}
+	mine, err := store.ListPoolRoutes(ctx, "tenant_pg")
+	if err != nil || len(mine) != 1 || mine[0] != pr {
+		t.Fatalf("one tenant's pool routes = %+v, %v", mine, err)
+	}
+	all, err := store.ListPoolRoutes(ctx, "")
+	if err != nil || len(all) != 2 || all[0] != other || all[1] != pr {
+		t.Fatalf("all pool routes = %+v, %v, want them sorted by tenant", all, err)
+	}
+	moved := pr
+	moved.PoolID, moved.MaxSize, moved.Reuse = "pool_pg_3", 4, v1.PoolReuse_POOL_REUSE_RESET
+	if err := store.SetPoolRoute(ctx, moved, "pool_pg_elsewhere"); !errors.Is(err, api.ErrPoolRouteChanged) {
+		t.Fatalf("set expecting another pool = %v, want ErrPoolRouteChanged", err)
+	}
+	if got, err := store.PoolRoute(ctx, "tenant_pg", "py"); err != nil || got != pr {
+		t.Fatalf("pool route after a refused set = %+v, %v", got, err)
+	}
+	if err := store.SetPoolRoute(ctx, moved, pr.PoolID); err != nil {
+		t.Fatalf("set pool route: %v", err)
+	}
+	// Two declares answered with one pool: the second finds the row already naming it.
+	if err := store.SetPoolRoute(ctx, moved, pr.PoolID); err != nil {
+		t.Fatalf("set of the pool the route already names: %v", err)
+	}
+	if got, err := store.PoolRoute(ctx, "tenant_pg", "py"); err != nil || got != moved {
+		t.Fatalf("pool route after set = %+v, %v", got, err)
+	}
+	// A delete of the pool it replaced must not remove this route.
+	if err := store.DeletePoolRoute(ctx, "tenant_pg", "py", pr.PoolID); err != nil {
+		t.Fatalf("delete of the old pool: %v", err)
+	}
+	if _, err := store.PoolRoute(ctx, "tenant_pg", "py"); err != nil {
+		t.Fatalf("a delete of the old pool removed the route: %v", err)
+	}
+	if err := store.DeletePoolRoute(ctx, "tenant_pg", "py", moved.PoolID); err != nil {
+		t.Fatalf("delete pool route: %v", err)
+	}
+	if _, err := store.PoolRoute(ctx, "tenant_pg", "py"); !errors.Is(err, api.ErrNotFound) {
+		t.Fatalf("pool route after delete = %v, want ErrNotFound", err)
+	}
+	// A create that finishes after its route was released must not bring it back.
+	if err := store.SetPoolRoute(ctx, pr, pr.PoolID); !errors.Is(err, api.ErrPoolRouteChanged) {
+		t.Fatalf("set of a missing pool route = %v, want ErrPoolRouteChanged", err)
+	}
+	if _, err := store.PoolRoute(ctx, "tenant_pg", "py"); !errors.Is(err, api.ErrNotFound) {
+		t.Fatalf("a refused set brought the route back: %v", err)
 	}
 }

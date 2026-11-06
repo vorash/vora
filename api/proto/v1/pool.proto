@@ -30,7 +30,7 @@ message PoolSpec {
   optional uint32 max_runs = 7;          // runs per member before it is replaced; default 100
   optional int64 max_age_seconds = 8;    // member age limit; default 1800
   optional int64 max_run_seconds = 9;    // cap on a run's timeout_seconds; default 300
-  optional int64 borrow_timeout_ms = 10; // wait for an idle member; default 2000
+  optional int64 borrow_timeout_ms = 10; // wait for an idle member; default 2000, at most 300000
   optional int64 idle_expiry_seconds = 11; // no run for this long drains to size 0; default 3600
   PoolReuse reuse = 12;
 }
@@ -57,6 +57,7 @@ message PoolStats {
 }
 
 enum PoolState {
+  // In an API listing, a pool whose runner did not answer.
   POOL_STATE_UNSPECIFIED = 0;
   POOL_ACTIVE = 1;
   POOL_DRAINING = 2;
@@ -64,10 +65,16 @@ enum PoolState {
   // boot: it has no members and no reservation, runs are FAILED_PRECONDITION, and
   // a boot that can honour it loads it again. not_loaded_reason says why.
   POOL_NOT_LOADED = 3;
+  // Set by the API, never by a runner. A pool route exists, so its reservation is
+  // held and its name is taken, but the runner answered that it has no such pool:
+  // a declare is still in flight, or the runner lost the record. It does not come
+  // back on its own. A PUT creates the pool again under a new id, and a DELETE
+  // releases the reservation.
+  POOL_NOT_ON_RUNNER = 4;
 }
 
 message Pool {
-  string id = 1;        // pool_<ulid>, minted by the runner
+  string id = 1;        // pool_<ulid>
   PoolSpec spec = 2;    // with defaults filled in
   PoolState state = 3;
   string runner_id = 4;
@@ -78,9 +85,19 @@ message Pool {
   string not_loaded_reason = 7;
 }
 
+// ListPoolsResponse is GET /v1/pools.
+message ListPoolsResponse {
+  repeated Pool pools = 1;
+}
+
 message CreatePoolRequest {
   PoolSpec spec = 1;
   Actor actor = 2;
+  // pool_id is the id for a new pool, chosen by the caller so it can record
+  // the pool before asking for it: a create whose answer is lost is then still
+  // addressable. Empty means the runner mints one. Ignored when a pool of this
+  // (tenant, name) already exists: the answer carries that pool's id.
+  string pool_id = 3;
 }
 
 // tenant_id is required on every pool lookup. A pool owned by another tenant
