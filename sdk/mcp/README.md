@@ -1,18 +1,18 @@
 # @vorash/mcp
 
 An [MCP](https://modelcontextprotocol.io) server that lets coding agents and
-assistants provision and drive [Vora](../typescript) sandboxes directly.
+assistants create and control [Vora](../typescript) sandboxes directly.
 
-It wraps the same HTTP API as [`@vorash/sdk`](../typescript) — no separate auth
-path, no new privileges. Point it at a `vora-api` and an API key, and the host
+It wraps the same HTTP API as [`@vorash/sdk`](../typescript), with no separate
+auth path and no new privileges. Point it at a `vora-api` and an API key, and the host
 gets six tools.
 
 ## Tools
 
 | Tool | Purpose |
 | --- | --- |
-| `sandbox_create` | Create and start a sandbox; returns the `sandbox_id` |
-| `sandbox_exec` | Run a command (via `/bin/sh -c`) and return stdout, stderr, exit code |
+| `sandbox_create` | Create and start a sandbox, and return the `sandbox_id` |
+| `sandbox_exec` | Run a command (through `/bin/sh -c`) and return stdout, stderr, exit code |
 | `sandbox_read_file` | Read a file (UTF-8, or base64 for binary) |
 | `sandbox_write_file` | Write a file, creating parent directories |
 | `sandbox_stats` | Read memory, CPU, PID and OOM usage |
@@ -35,18 +35,17 @@ The server reads these environment variables:
 
 | Variable | Meaning |
 | --- | --- |
-| `VORA_API_URL` | Base URL of `vora-api`, e.g. `http://127.0.0.1:9300` (defaults to that) |
+| `VORA_API_URL` | Base URL of `vora-api`. Defaults to `http://127.0.0.1:9300` |
 | `VORA_API_KEY` | Bearer API key. Use an agent-bound sandbox-scope key, never an admin key |
 
-Sandbox creation is restricted **before** contacting the API. By default it
-allows only `network: none`, images `vora/base,vora/python,vora/node`, and caps
-memory at 1Gi, CPU at 2 cores, PIDs at 128, disk at 2Gi, and TTL at 1h.
-Unspecified resources get bounded defaults (512Mi, 1 core, 64 PIDs, 1Gi disk,
-1h TTL). Operators can override the comma-separated
-`VORA_MCP_ALLOWED_NETWORKS`, `VORA_MCP_ALLOWED_IMAGES`, and limits
-`VORA_MCP_MAX_MEMORY`, `VORA_MCP_MAX_CPU`, `VORA_MCP_MAX_PIDS`,
-`VORA_MCP_MAX_DISK`, `VORA_MCP_MAX_TTL`. Granting `full` networking lets a
-prompt-injected agent send data to arbitrary public hosts; do not enable it for
+The server restricts sandbox creation **before** it contacts the API. By default it allows only `network: none` and the images
+`vora/base,vora/python,vora/node`. It caps memory at 1Gi, CPU at 2 cores, PIDs at
+128, disk at 2Gi, and TTL at 1h. Unspecified resources get bounded defaults
+(512Mi, 1 core, 64 PIDs, 1Gi disk, 1h TTL). Operators can override the
+comma-separated lists `VORA_MCP_ALLOWED_NETWORKS` and `VORA_MCP_ALLOWED_IMAGES`,
+and the limits `VORA_MCP_MAX_MEMORY`, `VORA_MCP_MAX_CPU`, `VORA_MCP_MAX_PIDS`,
+`VORA_MCP_MAX_DISK`, and `VORA_MCP_MAX_TTL`. Granting `full` networking lets a
+prompt-injected agent send data to arbitrary public hosts. Do not enable it for
 untrusted inputs.
 
 ### Claude Code
@@ -60,7 +59,7 @@ claude mcp add vora --scope user \
 
 ### Claude Desktop
 
-Add to `claude_desktop_config.json` (`~/Library/Application Support/Claude/` on
+Add this to `claude_desktop_config.json` (`~/Library/Application Support/Claude/` on
 macOS, `~/.config/Claude/` on Linux):
 
 ```json
@@ -104,10 +103,10 @@ sandbox_destroy { "sandbox_id": "sbx_01…" }
 - **Failures are returned, not thrown.** An API error comes back as a tool
   result with `isError: true` and the message, so the agent can react to it.
 - **stdout is the protocol.** The server writes JSON-RPC to stdout and any
-  diagnostics to stderr; never log to stdout in this package.
-- **`sandbox_exec` runs through a shell.** The command string is passed to
-  `/bin/sh -c`, so quoting and pipes work, and the sandbox's own isolation is
-  what constrains it.
+  diagnostics to stderr. Never log to stdout in this package.
+- **`sandbox_exec` runs through a shell.** The server passes the command string
+  to `/bin/sh -c`, so quoting and pipes work. The sandbox's own isolation
+  constrains the command.
 - **Publishing is pending.** The package is not on npm yet, so hosts point at
   the built path. Once `@vorash/sdk` and `@vorash/mcp` are published, the same
   config works with `npx -y @vorash/mcp`.
@@ -121,5 +120,5 @@ npm test --workspace @vorash/mcp
 ```
 
 The tests drive a real MCP client over an in-memory transport against a
-stand-in `vora-api`, so tool schemas, argument encoding and error mapping are
-all exercised without a live control plane.
+stand-in `vora-api`, so they exercise tool schemas, argument encoding, and error
+mapping without a live control plane.

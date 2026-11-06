@@ -1,17 +1,18 @@
 # Vora
 
-Vora runs code you don't trust — AI agents, generated scripts, user uploads — in
-isolated Linux sandboxes, and keeps a record of everything it did.
+Vora runs code you don't trust, such as AI agents, generated scripts, and user
+uploads, in isolated Linux sandboxes. It keeps a record of everything that code
+did.
 
-You ask for a sandbox from an OCI image with memory, CPU, PID, disk and TTL
-limits; run commands in it; move files in and out; and read back every
-lifecycle event, execution and network decision. Networking is off unless you
-turn it on. Each sandbox is isolated by Bubblewrap (namespaces + cgroup v2) or
-gVisor. Vora is written in Go and does not need Kubernetes.
+You ask for a sandbox from an OCI image and set memory, CPU, PID, disk, and TTL
+limits. You run commands in it, move files in and out, and read back every
+lifecycle event, execution, and network decision. Networking is off unless you
+turn it on. Bubblewrap (namespaces and cgroup v2) or gVisor isolates each
+sandbox. Vora is written in Go and does not need Kubernetes.
 
 > **Status: v0.10, a proof of concept.** Everything below is implemented and
 > tested, but it has not been independently audited. Don't trust it with
-> anything that matters yet — see [Limitations](#limitations).
+> anything that matters yet. See [Limitations](#limitations).
 
 ## Contents
 
@@ -27,8 +28,8 @@ gVisor. Vora is written in Go and does not need Kubernetes.
 
 ## Quick start
 
-On a single machine, the `vora` CLI talks straight to the runner over a Unix
-socket. With a [development checkout](#development):
+On a single machine, the `vora` CLI talks directly to the runner over a Unix
+socket. From a [development checkout](#development), run:
 
 ```bash
 make binaries images pull-images   # build bin/*, the rootfs images, import them into containerd
@@ -61,9 +62,10 @@ $ vora sandbox destroy sbx_01M2NVHE1KRD8JT3D6QG6R0EW3
 Destroyed sbx_01M2NVHE1KRD8JT3D6QG6R0EW3
 ```
 
-Use `vora/python`, not `python`: a bare name resolves to Docker Hub. The images
-`vora/base`, `vora/python` and `vora/node` (Debian 13, Python 3.13, Node 22)
-are published to GHCR; [Images](#images) covers pulling them on a server.
+Use `vora/python`, not `python`, because a bare name resolves to Docker Hub. The
+images `vora/base`, `vora/python`, and `vora/node` (Debian 13, Python 3.13,
+Node 22) are published to GHCR. [Images](#images) covers pulling them on a
+server.
 
 ## Using the HTTP API
 
@@ -73,10 +75,10 @@ runner. Runners dial out to it and register themselves.
 
 ### 1. Start the API and a runner
 
-For local development, both on loopback. The runner started by
-`make install-rootless` lives in its own rootlesskit network namespace and
-can't reach the host's loopback, so stop it and run the binary directly (bwrap
-only; this runner has no gVisor):
+For local development, run both on loopback. The runner that
+`make install-rootless` starts lives in its own rootlesskit network namespace
+and can't reach the host's loopback. Stop it and run the binary directly. This
+runner supports bwrap only and has no gVisor:
 
 ```bash
 systemctl --user stop vora-runner                         # frees its socket and :9101
@@ -90,15 +92,15 @@ VORA_RUNNER_INSECURE=1 \
   bin/vora-runner &                                       # registers, then heartbeats
 ```
 
-`VORA_RUNNER_INSECURE=1` is accepted on a loopback address only. Anything
-reachable from another host needs TLS and a join token — see
+The runner accepts `VORA_RUNNER_INSECURE=1` only on a loopback address. Anything
+reachable from another host needs TLS and a join token. See
 [docs/configuration.md](docs/configuration.md#tls). On a server, the system
 install runs both as services.
 
 ### 2. Create a tenant key
 
-The bootstrap key is a global admin. Use it to mint a sandbox-scoped key for a
-tenant, and use that key from then on:
+The bootstrap key is a global admin. Use it to create a sandbox-scoped key for
+a tenant, and use that key from then on:
 
 ```bash
 API=http://127.0.0.1:9300
@@ -157,17 +159,17 @@ curl -s -X DELETE "$API/v1/sandboxes/$SBX" -H "$AUTH"
 
 ### Wire format
 
-The sandbox, exec, snapshot and audit routes speak
+The sandbox, exec, snapshot and audit routes use
 [protojson](https://protobuf.dev/programming-guides/json/):
 
-- **Field names** are camelCase in responses; requests accept camelCase or
+- **Field names** are camelCase in responses. Requests accept camelCase or
   snake_case.
 - **Enums use their full names**: `NETWORK_NONE`, `RUNNING`, `OOM_KILLED`. The
-  SDKs accept `"none"`; the raw API does not.
-- **`bytes` fields are base64**: exec `stdout`/`stderr`, and `stdin` on the
+  SDKs accept `"none"`. The raw API does not.
+- **`bytes` fields are base64**: exec `stdout` and `stderr`, and `stdin` on the
   exec request.
 - **int64 values come back as strings** (`"createdAtUnixMs": "1790000000000"`),
-  and fields at their zero value are left out. A successful exit has no
+  and the API leaves out fields at their zero value. A successful exit has no
   `exitCode`, and a usage counter that stayed at zero (`oomKills`) is absent.
 - **`command` runs as is**, without a shell. Use `"command": "/bin/sh", "args":
   ["-c", "…"]` for pipes and redirects.
@@ -215,30 +217,30 @@ vora --api http://127.0.0.1:9300 --api-key "$VORA_API_KEY" sandbox create --imag
 
 | Field | Meaning |
 | ----- | ------- |
-| `image` | OCI reference, e.g. `vora/python` or `ghcr.io/vorash/vora-python@sha256:…` |
-| `backend` | `bwrap` or `gvisor`; empty picks one automatically |
-| `resources` | `cpuMillis`, `memoryBytes`, `pids`, `diskBytes` — capped by the runner's ceilings |
+| `image` | OCI reference, for example `vora/python` or `ghcr.io/vorash/vora-python@sha256:…` |
+| `backend` | `bwrap` or `gvisor`. An empty value picks one automatically |
+| `resources` | `cpuMillis`, `memoryBytes`, `pids`, `diskBytes`. The runner's ceilings cap these |
 | `network.mode` | `NETWORK_NONE` (default), `NETWORK_RESTRICTED`, `NETWORK_FULL`, `NETWORK_PRIVATE` |
 | `network.allowedDomains` | Hosts a restricted sandbox may reach over TLS |
 | `network.brokerAliases` | Credentials the sandbox may use through the broker |
 | `env` | `["KEY=value", …]` |
-| `ttlSeconds` | Destroyed automatically after this long |
+| `ttlSeconds` | Vora destroys the sandbox after this long |
 
 | Network mode | What the sandbox gets |
 | ------------ | --------------------- |
 | `NETWORK_NONE` | No interfaces, no routes |
 | `NETWORK_RESTRICTED` | TLS to allowlisted hosts only (checked by SNI), allowlist-only DNS, every decision audited ([ADR 012](docs/adr/012-egress-gateway.md)) |
 | `NETWORK_FULL` | Public internet. Private ranges, cloud metadata and other sandboxes stay blocked (bwrap only) |
-| `NETWORK_PRIVATE` | A `/24` shared with the tenant's other private sandboxes, no public egress (bwrap only; needs a tenant) |
+| `NETWORK_PRIVATE` | A `/24` shared with the tenant's other private sandboxes, no public egress (bwrap only, needs a tenant) |
 
-The last three need the system install (root or a delegated cgroup subtree); a
+The last three need the system install (root or a delegated cgroup subtree). A
 rootless development runner refuses them.
 
 ## SDKs and agents
 
 The SDKs wrap the HTTP API and handle the wire format for you: sizes like
 `"512Mi"`, durations like `"10m"`, shell command strings, and base64. They read
-`VORA_API_URL` and `VORA_API_KEY`. Neither is on a package registry yet;
+`VORA_API_URL` and `VORA_API_KEY`. Neither SDK is on a package registry yet, so
 install from this repository.
 
 **TypeScript** ([`sdk/typescript`](sdk/typescript)), Node 18+ or any runtime
@@ -276,8 +278,8 @@ with Vora() as client:
 
 **Coding agents.** [`sdk/mcp`](sdk/mcp) is an MCP server that gives an agent
 six sandbox tools: create, exec, read and write files, stats, and destroy. It
-has its own policy, off-by-default networking and resource caps included, and
-should use an agent-bound key:
+has its own policy, which includes off-by-default networking and resource caps.
+Give it an agent-bound key:
 
 ```bash
 claude mcp add vora --env VORA_API_URL=http://127.0.0.1:9300 --env VORA_API_KEY=vora_… \
@@ -301,11 +303,11 @@ for await (const chunk of sandbox.streamExec("for i in 1 2 3; do echo step $i; s
 ```
 
 `reason` explains how the run ended: `EXITED`, `OOM_KILLED`,
-`PIDS_LIMIT_EXCEEDED`, `TIMEOUT_EXCEEDED`, `DISK_QUOTA_EXCEEDED` or
-`RUNTIME_FAILURE`, which means the sandbox failed rather than the program: it died
-under the command, or couldn't start a process for it. A command that doesn't exist
-is the command's own failure: `EXITED`, with exit code 127 on `bwrap` and 128 on
-`gvisor`.
+`PIDS_LIMIT_EXCEEDED`, `TIMEOUT_EXCEEDED`, `DISK_QUOTA_EXCEEDED`, or
+`RUNTIME_FAILURE`. That last one means the sandbox failed rather than the program:
+the sandbox died under the command, or couldn't start a process for it. A command
+that doesn't exist counts as the command's own failure. It reports `EXITED`, with
+exit code 127 on `bwrap` and 128 on `gvisor`.
 
 ### What an exec used
 
@@ -316,19 +318,19 @@ exec ran:
 | Field | Meaning |
 | ----- | ------- |
 | `cpuMillis` | CPU time consumed during the exec |
-| `memoryPeakBytes` | memory high-water mark during the exec, including the sandbox's resident baseline (its init; on gVisor also the sentry and gofer) |
+| `memoryPeakBytes` | peak memory during the exec, including the sandbox's resident baseline: its init and, on gVisor, the sentry and gofer |
 | `memoryPeakScope` | `PEAK_SCOPE_WINDOW`: the peak covers only this exec. `PEAK_SCOPE_LIFETIME`: the kernel (before Linux 6.12) could not reset the peak, so it is the sandbox's lifetime peak. Absent: not measured |
 | `oomKills` | OOM kills during the exec |
 | `pidsLimitHits` | forks refused by the sandbox's pids limit during the exec. On gVisor these are the Sentry's own threads, not the guest's forks |
 
-The counters are per-exec deltas, not lifetime totals. They are measured on
+The counters are per-exec deltas, not lifetime totals. Vora measures them on
 the sandbox's cgroup, so execs that run at the same time in one sandbox have
 overlapping windows and count each other's usage.
 
-The reason is derived from that usage: an exec whose window counted an OOM
-kill reports `OOM_KILLED`, even though the process itself only saw a kill
-signal, and one that failed after hitting the pids limit reports
-`PIDS_LIMIT_EXCEEDED`. `TIMEOUT_EXCEEDED` is never overridden. Exec records
+Vora derives the reason from that usage. An exec whose window counted an OOM
+kill reports `OOM_KILLED`, even though the process itself saw only a kill
+signal. An exec that failed after hitting the pids limit reports
+`PIDS_LIMIT_EXCEEDED`. Nothing overrides `TIMEOUT_EXCEEDED`. Exec records
 carry the same reason and fields (`memoryPeakScope`, `oomKills`,
 `pidsLimitHits`).
 
@@ -441,7 +443,7 @@ What a client sees when something goes wrong:
 
 `GET /v1/pools/{name}/sandboxes/{id}/execs` and `.../events` read a member's audit
 trail. `run.sandboxRun` marks run boundaries in it. Every plain `/v1/sandboxes/{id}`
-route refuses a member with 409, reads included, so those two are how to read one.
+route refuses a member with 409, reads included, so use those two to read a member.
 `GET /v1/sandboxes` still lists it, with its pool. Behind the API, the runner's own
 RPCs refuse what would change a member: start, exec, signal, destroy, snapshot and
 files. Its RPCs for a sandbox's record, stats, events and execs stay open.
@@ -473,9 +475,9 @@ curl -s "$API/v1/sandboxes/$SBX/egress" -H "$AUTH" \
 # {"host":"files.pythonhosted.org","allowed":true,…}
 ```
 
-A connection to anything else, including another sandbox, the host or
-`169.254.169.254`, is dropped. It is recorded with a `reason`, and without
-`allowed`, since protojson omits `false`.
+Vora drops a connection to anything else, including another sandbox, the host,
+or `169.254.169.254`. The record has a `reason` and no `allowed`, because
+protojson omits `false`.
 
 ### Try N fixes from one starting point
 
@@ -521,8 +523,8 @@ Over HTTP the same steps are `POST /v1/sandboxes/{id}/snapshot`, then
 ### Give a sandbox a token it can't read
 
 With `VORA_MASTER_KEY` set on `vora-api`, an admin stores a credential bound to
-one host. The sandbox calls it through the broker, and the gateway adds the
-token on the way out:
+one host. The sandbox calls that host through the broker, and the gateway adds
+the token on the way out:
 
 ```bash
 vora --api "$API" --api-key "$VORA_API_BOOTSTRAP_KEY" \
@@ -579,12 +581,12 @@ autograder, a plugin runner, an agent `run_code` tool, patch fan-out, and more.
 - **`vora-init`**: Vora's own static PID 1 inside the sandbox, so shell-less
   (distroless) images work.
 - **Audit**: lifecycle events, executions and egress decisions go to local
-  JSONL or PostgreSQL/Supabase. Destroying a sandbox doesn't delete its trail;
-  only `VORA_AUDIT_RETENTION` does ([ADR 026](docs/adr/026-audit-retention.md)).
+  JSONL or PostgreSQL/Supabase. Destroying a sandbox doesn't delete its trail.
+  Only `VORA_AUDIT_RETENTION` does ([ADR 026](docs/adr/026-audit-retention.md)).
 - **Observability**: Prometheus metrics at `127.0.0.1:9101/metrics`, and
   OpenTelemetry traces from API to runtime.
-- **Control plane** (`vora-api`): scoped, hashed API keys; strict tenant
-  isolation; keys bound to agent identities; capacity-aware placement
+- **Control plane** (`vora-api`): scoped, hashed API keys, strict tenant
+  isolation, keys bound to agent identities, and capacity-aware placement
   ([ADR 021](docs/adr/021-capacity-placement.md)). Runners behind NAT connect
   through a reverse tunnel ([ADR 022](docs/adr/022-reverse-tunnel.md)).
 - **CLI plugins**: `vora <name>` runs `vora-<name>` from `$PATH`, the way `git`
@@ -598,18 +600,18 @@ The design decisions are in [docs/adr](docs/adr), and the architecture in
 
 Vora assumes all sandboxed code is malicious. The
 [threat model](docs/architecture/threat-model.md) lists the exact boundaries.
-Each row below is enforced by a test, and each test was checked to fail when
-its flag is removed:
+A test enforces each row below, and each test was checked to fail when its
+flag is removed:
 
 | Boundary | Mechanism | Test |
 | -------- | --------- | ---- |
-| Host filesystem | read-only image rootfs; host paths never mounted | `TestFilesystemIsolation` |
+| Host filesystem | read-only image rootfs, host paths never mounted | `TestFilesystemIsolation` |
 | Rootfs writes | only `/workspace`, `/root`, `/tmp` writable | `TestFilesystemIsolation` |
 | Cross-sandbox files | distinct mount namespaces | `TestCrossSandboxFilesystemIsolation` |
-| Processes / signals | PID namespace | `TestPIDNamespaceIsolation`, `TestCannotSignalHost` |
-| IPC / UTS | IPC namespace, private hostname | `TestIPCNamespaceIsolation`, `TestUTSNamespaceIsolation` |
+| Processes and signals | PID namespace | `TestPIDNamespaceIsolation`, `TestCannotSignalHost` |
+| IPC and UTS | IPC namespace, private hostname | `TestIPCNamespaceIsolation`, `TestUTSNamespaceIsolation` |
 | Privilege | unprivileged user namespace (bwrap) | `TestUnprivilegedUserNamespace` |
-| Memory / PIDs / CPU | `memory.max` (no swap), `pids.max` (bwrap only for a fork bomb, see [Limitations](#limitations)), `cpu.max` | `TestMemoryBombKilled`, `TestForkBombContained`, `TestSystemdUnitLimitsAndTeardown` |
+| Memory, PIDs, and CPU | `memory.max` (no swap), `pids.max` (bwrap only for a fork bomb, see [Limitations](#limitations)), `cpu.max` | `TestMemoryBombKilled`, `TestForkBombContained`, `TestSystemdUnitLimitsAndTeardown` |
 | Control socket | per-sandbox bind | `TestControlSocketIsolation` |
 | Network | no interfaces by default | `TestNetworkNone` |
 | Secrets | runner credentials never injected | `TestNoSecretsLeak` |
@@ -627,16 +629,16 @@ its flag is removed:
   ports other than 443 are denied. The runner's resolver answers only
   allowlisted names, but it sees which ones were asked for.
 - **The broker is a route, not a transparent proxy.** Workloads call
-  `$VORA_BROKER_URL/creds/<alias>/…`; a plain `curl https://api.github.com`
+  `$VORA_BROKER_URL/creds/<alias>/…`. A plain `curl https://api.github.com`
   gets no credential. The hop inside the sandbox's network namespace is
   plaintext, so a workload that logs broker responses sees what the API
   returned.
-- **The bwrap seccomp filter is a deny-list** — hardening, not the isolation
+- **The bwrap seccomp filter is a deny-list.** It is hardening, not the isolation
   boundary ([ADR 018](docs/adr/018-bwrap-seccomp.md)).
 - **Disk limits are hard only with an enforcing project quota.** That means XFS
   with `prjquota`, and a runner with `CAP_SYS_ADMIN` whose startup probe passes.
-  Otherwise a periodic scan catches overuse, but a burst between scans can land
-  first ([ADR 015](docs/adr/015-disk-quota.md)).
+  Otherwise a periodic scan catches overuse, but a burst between scans can be
+  written before the next scan catches it ([ADR 015](docs/adr/015-disk-quota.md)).
 - **Images are trusted unless `VORA_IMAGE_POLICY=enforce`**, which requires
   digest-pinned, `cosign`-verified images
   ([ADR 020](docs/adr/020-image-signing.md)). Custom images must contain
@@ -652,8 +654,8 @@ its flag is removed:
 - **Warm pools are new.** Through a runner, the leak suite has passed on `bwrap` and
   gVisor on vora-mini, and on `bwrap` in CI. CI can't run the gVisor rows. No logged
   run has measured a pool under load.
-- **Sandboxes outlive a dead runner briefly**, then exit; orphans are cleaned
-  up at the next start.
+- **Sandboxes outlive a dead runner briefly**, then exit. The runner cleans up
+  orphans at its next start.
 - **The API store is in memory by default.** Set `VORA_API_DSN` for anything
   durable.
 
@@ -675,7 +677,7 @@ sudo ./scripts/install-system.sh --from "$PWD" --api
 The system runner runs as a dedicated `vora` user with a lingering user
 manager and its own rootless containerd. [docs/release.md](docs/release.md)
 covers the host prerequisites and migrating an existing root install.
-[vora-ansible](https://github.com/vorash/vora-ansible) sets real hosts up end
+[vora-ansible](https://github.com/vorash/vora-ansible) sets up real hosts end
 to end.
 
 ### Images
@@ -690,7 +692,7 @@ ctr --address /run/user/<vora-uid>/containerd/containerd.sock \
   ghcr.io/vorash/vora-python@sha256:<digest from the release>
 ```
 
-Don't pass `--snapshotter`; the runner unpacks images itself. If a create fails
+Don't pass `--snapshotter`, because the runner unpacks images itself. If a create fails
 with `image not found in cache` for a registry reference, the *pull* failed
 (credentials or digest), not a local build. [docs/release.md](docs/release.md)
 has the details.
@@ -704,7 +706,7 @@ You need:
 - Docker, to build images
 - Bubblewrap, and `runsc` for gVisor
 - `rootlesskit`, `slirp4netns` and `fuse-overlayfs`
-- a systemd user session, systemd ≥ 254
+- a systemd user session, systemd 254 or later
 
 ```bash
 make binaries          # bin/{vora,vora-runner,vora-init,vora-api} (static)
@@ -730,4 +732,4 @@ tests/          integration, security, bench docs/      ADRs, architecture, benc
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
