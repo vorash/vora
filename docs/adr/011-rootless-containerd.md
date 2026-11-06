@@ -14,7 +14,7 @@ dedicated `vora` user with only ambient `CAP_SYS_ADMIN`/`CAP_NET_ADMIN`
 (`CAP_NET_BIND_SERVICE` was later added for the port-53 resolver), and must
 not reach the host-root containerd socket, which would restore host-root
 authority. It therefore uses the `vora` user's rootless containerd too. That
-unit shipped without ever booting; `#102` records what it needed to work.
+unit shipped without ever booting. `#102` records what it needed to work.
 
 ## Decision
 
@@ -26,7 +26,7 @@ unit shipped without ever booting; `#102` records what it needed to work.
 - **Production (system unit, `deploy/systemd/vora-runner.system.service`):**
   - `vora-runner` runs as the `vora` user with ambient `CAP_SYS_ADMIN`,
     `CAP_NET_ADMIN` and `CAP_NET_BIND_SERVICE` (restricted sandboxes' resolver
-    listens on port 53 of their gateway); bwrap is launched with those cleared
+    listens on port 53 of their gateway), and bwrap is launched with those cleared
     (V-31);
   - images come from `vora`'s rootless containerd at
     `/run/user/<vora-uid>/containerd/containerd.sock`;
@@ -41,7 +41,7 @@ unit shipped without ever booting; `#102` records what it needed to work.
     because sandboxes start in two mount namespaces: `none` through the user
     manager, the netns modes as runner children. A bind mount in the unit would
     only exist in the second;
-  - **gVisor is not offered.** `runsc` needs Method 2 or host root; the backend
+  - **gVisor is not offered.** `runsc` needs Method 2 or host root, and the backend
     refuses to register when the runner is not uid 0;
   - project quotas follow `CAP_SYS_ADMIN`, not uid 0 (ADR 015).
 - The same runner binary and config keys (`VORA_CONTAINERD_ADDRESS`,
@@ -50,16 +50,15 @@ unit shipped without ever booting; `#102` records what it needed to work.
 
 ## Consequences
 
-- Two process topologies to test. `scripts/test-system-unit.sh` boots the system
+- There are two process topologies to test. `scripts/test-system-unit.sh` boots the system
   unit on Ubuntu 26.04 in CI (the `System unit` workflow): a sandbox from each
   released image in each network mode, a kernel-enforced disk limit, and a
   restart that keeps subordinate-id file ownership.
-- The system containerd's `660 root:root` socket is never used by the system
-  runner.
+- The system runner never uses the system containerd's `660 root:root` socket.
 - Rootless containerd keeps its store under `/var/lib/vora`, the unit's
   `StateDirectory=`. systemd chowns that tree recursively whenever its top
   directory is not owned by `vora`, which would rewrite the subordinate-id
   owners of unpacked image files. Hosts must chown `/var/lib/vora` to `vora`
   before setting up containerd (docs/release.md, Pitfalls).
-- gVisor on a production host needs a root runner or a rootlesskit-wrapped one;
-  neither is the shipped system unit.
+- gVisor on a production host needs a root runner or a rootlesskit-wrapped one.
+  Neither is the shipped system unit.

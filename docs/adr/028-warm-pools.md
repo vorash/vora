@@ -24,7 +24,7 @@ what it leaves open on purpose.
 runs one command and streams `run`, output, `exit`, then `run_done`. A client
 never holds a member, so a client that crashes can't strand one. Members are
 ordinary sandbox records with a `pool_id`. Which ones are idle is kept in memory
-only, as a runner restart destroys them anyway.
+only, because a runner restart destroys them anyway.
 
 **2. A reset trusts nothing inside the sandbox until the host has cleared it.**
 Three steps, in order:
@@ -58,7 +58,7 @@ the agent or to `runsc`. What covers that gap differs by backend:
 - On bwrap the agent holds `execMu` while an exec runs, its restore waits for `execMu`,
   and an exec whose cancel has arrived by the time it gets `execMu` doesn't start. The
   host proves the process set after the restore as well as before it.
-- On gVisor a reset waits for each `runsc exec` client to answer, as a killed client's
+- On gVisor a reset waits for each `runsc exec` client to answer, because a killed client's
   request can still reach the Sentry later.
 
 **4. What a reset closes, and how:**
@@ -121,7 +121,7 @@ floor is 64, with a margin above the lowest that passed.
 **8. An exec that didn't start costs the member, not the client.** `Exec` fails
 when nothing ran: a dead agent on bwrap, a stopped sandbox on gVisor. The pool
 retires that member and retries the run once on another, before the client sees
-a frame. A sandbox that dies under a running command is different, as the program
+a frame. A sandbox that dies under a running command is different, because the program
 may have run. The client sees a `RUNTIME_FAILURE` exit or an error line, and the
 member's reset fails.
 

@@ -6,9 +6,9 @@
 ## Context
 
 A runner dials **out** to `vora-api` to register and heartbeat, so it can sit
-behind NAT for registration — but the API then has to **dial back** to operate a
+behind NAT for registration. But the API then has to **dial back** to operate a
 sandbox (create/exec/destroy). A runner behind NAT therefore cannot be driven at
-all. This is part B of issue #25; ADR 021 covers placement.
+all. This is part B of issue #25. ADR 021 covers placement.
 
 ## Decision
 
@@ -19,9 +19,9 @@ The runner opens one long-lived TCP connection to the API's tunnel endpoint
 token). Public tunnel listeners require `VORA_API_TUNNEL_TLS_{CERT,KEY,CA}`:
 TLS handshakes complete before the hello, the runner validates the API server
 certificate, and the API binds `runner_id` to the runner certificate's DNS SAN.
-Plaintext needs `VORA_TUNNEL_INSECURE=1` and a loopback bind. The API terminates it
-and multiplexes with **yamux**: the API is the yamux client and the runner is
-the yamux server, one stream per API→runner gRPC connection.
+Plaintext needs `VORA_TUNNEL_INSECURE=1` and a loopback bind. The API terminates the
+connection and multiplexes with yamux. The API is the yamux client and the runner is
+the yamux server, with one stream per API-to-runner gRPC connection.
 
 **2. Transparent to the existing dial path.**
 The API's `dialRunner` returns a `client.DialTunnel` over a virtual connection
@@ -32,26 +32,26 @@ real gRPC connection (HTTP/2) over the multiplexed link.
 **3. A tunnelled runner registers with no address.**
 When `VORA_API_TUNNEL_ADDR` is set the runner registers `address=""` and the
 API marks it `tunneled`. Registration with an empty address is refused unless a
-tunnel is configured, so an unroutable runner is never registered. One live
-session per runner; a new session with the same certificate identity supersedes
-the old. Registry registration still uses a shared token and must be bound to
+tunnel is configured, so an unroutable runner is never registered. Each runner
+has one live session, and a new session with the same certificate identity
+supersedes the old one. Registry registration still uses a shared token and must be bound to
 that identity separately.
 
 **4. Only the RunnerService is tunnelled.**
-The registry (`Register`/`Heartbeat`) and metrics already flow runner→API and
-need no tunnel. The tunnel carries the API→runner direction only.
+The registry (`Register`/`Heartbeat`) and metrics already flow from runner to API and
+need no tunnel. The tunnel carries the API-to-runner direction only.
 
 ## Consequences
 
 - A runner behind NAT can be placed and driven end-to-end, closing the v0.3
   "reverse tunnel is a follow-up" note in ADR 014.
-- `hashicorp/yamux` is a new (small, pure-Go) dependency; the alternative — a
-  custom command stream — was rejected because it re-implements gRPC streaming,
+- `hashicorp/yamux` is a new (small, pure-Go) dependency. The alternative, a
+  custom command stream, was rejected because it re-implements gRPC streaming,
   backpressure and cancellation and duplicates the generated `RunnerService`.
 - The tunnel connection is not yet re-established automatically if it drops:
   the runner serves the streams of its one session, and a drop ends that
   session. Reconnection is a follow-up.
-- The reverse tunnel is mTLS-protected by default on a public listener; the
+- The reverse tunnel is mTLS-protected by default on a public listener. The
   local development plaintext override must never be exposed on a public bind.
 
 ## Refs

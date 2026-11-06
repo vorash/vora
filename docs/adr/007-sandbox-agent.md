@@ -24,18 +24,18 @@ design:
   which is bound read-write at `/vora`. This avoids a separate file bind (which
   a read-only root cannot create) and keeps the root fs genuinely read-only.
 - Build all `cmd/*` binaries with `CGO_ENABLED=0`.
-- Require images to contain `/workspace` and `/vora`; `make images` builds them
+- Require images to contain `/workspace` and `/vora`. `make images` builds them
   in for `vora/base`, `python`, and `node`.
 - Replace `--die-with-parent` with an agent watchdog that exits when the runner
-  stops contacting it, preserving teardown when the runner dies.
+  stops contacting it, so the sandbox is still torn down when the runner dies.
 
 ## Consequences
 
 - Repeated `Exec` sees live process state and a persistent workspace.
 - A sandbox is a real unit that can survive runner restarts briefly, then
-  self-terminates; startup reconciliation cleans up remaining units.
+  self-terminates. Startup reconciliation cleans up remaining units.
 - The agent binary lives in a writable directory, so a sandbox could tamper
   with it. This grants no capability the sandbox does not already have, since it
-  fully controls its own processes; gVisor (v0.2) removes the agent entirely.
+  fully controls its own processes. gVisor (v0.2) removes the agent entirely.
 - Arbitrary images are still supported, but must pre-create the mount points.
   This is documented in the README and image Dockerfiles.

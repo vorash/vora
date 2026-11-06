@@ -21,10 +21,10 @@ nothing in Vora depends on. It exposes JEV's three primitives (`choice`,
 
 **The official `@typesafe-ai/sdk` is the transport**, pinned to an exact version
 (the SDK is pre-1.0). The probe's hand-rolled Go client exists because Go has no
-official SDK; in TypeScript, owning an HTTP client would duplicate typed
+official SDK. In TypeScript, owning an HTTP client would duplicate typed
 questions, retries, and error classes for no gain.
 
-**The probe's semantics contract is part of the tool surface.** The
+**The probe's semantics contract is part of the tool's interface.** The
 confidence caveat ships verbatim in the tool description and README, `state` is
 documented as data, and a response that drops or invents answers is rejected by
 name. The probe's relation-labeling use case ships as an example recipe
@@ -33,8 +33,8 @@ name. The probe's relation-labeling use case ships as an example recipe
 ## Consequences
 
 - Agents get calibrated structured decisions without Vora core gaining a model
-  dependency or a TypeSafe credential path; keys stay run configuration
+  dependency or a TypeSafe credential path. Keys stay run configuration
   (`TYPESAFE_API_KEY`).
 - A breaking SDK release is absorbed at a reviewed version bump, not silently.
-- The probe keeps its own Go arm; the TS example is pinned to parity by tests,
+- The probe keeps its own Go arm. The TS example is pinned to parity by tests,
   so drift between the two is visible.

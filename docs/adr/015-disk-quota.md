@@ -17,11 +17,11 @@ gVisor) binds the same pair, so a host-side limit covers both.
 ## Decision
 
 **1. Prefer an ext4/xfs project quota (hard limit).**
-When the sandboxes filesystem is mounted with `prjquota` and the runner holds
-`CAP_SYS_ADMIN` (root, or the `vora` user of the system unit, which has it
-ambient; gating on uid 0 silently disabled this in production, `#102`) with
-`chattr` and `setquota` available, each sandbox's writable directories are
-assigned a project ID with a byte limit. Writes past the limit fail with
+Each sandbox's writable directories are assigned a project ID with a byte limit
+when three things hold: the sandboxes filesystem is mounted with `prjquota`, the
+runner holds `CAP_SYS_ADMIN`, and `chattr` and `setquota` are available. That
+capability means root, or the `vora` user of the system unit, which has it
+ambient. Gating on uid 0 silently disabled this in production (`#102`). Writes past the limit fail with
 `EDQUOT` at the kernel boundary, so a sandbox that ignores the error still cannot
 overrun the host. The project ID is derived deterministically from the sandbox
 id (`fnv32a`, 31 bits), so a runner restart reapplies the same limit without
@@ -36,14 +36,14 @@ write to fail. The file is created **before** the limit is applied, because XFS
 charges the inode and directory entry to the project, so a create under a 1 KiB
 limit fails with `ENOSPC` for the wrong reason and would look like
 non-enforcement. Some kernels mount `prjquota` and account the quota but do not
-enforce it (observed on ext4, kernel 7.0.0); a mount option alone cannot tell
-the two apart. If the probe does not bite, the runner falls back to accounting
+enforce it (observed on ext4, kernel 7.0.0). A mount option alone cannot tell
+the two apart. If the probe's write does not fail, the runner falls back to accounting
 rather than claiming a hard guarantee it does not have. XFS is the verified
 hard-limit filesystem.
 
 **2. Fall back to a periodic usage scan (best-effort).**
-When project quotas are unavailable — a runner without `CAP_SYS_ADMIN`, a filesystem
-without `prjquota`, or a missing tool — the runner's `EnforceDiskQuota` loop
+When project quotas are unavailable (a runner without `CAP_SYS_ADMIN`, a filesystem
+without `prjquota`, or a missing tool), the runner's `EnforceDiskQuota` loop
 sums the writable bytes and stops a sandbox over its limit. This path runs on
 every host and also supplies the semantic reason when hard quotas are active.
 
@@ -61,16 +61,16 @@ and logs at error level. Enforcement is never silently skipped.
 ## Consequences
 
 - The "host unaffected" guarantee holds only in project-quota mode. The soft
-  scan bounds the sandbox but not a burst that lands between scans; this is
+  scan bounds the sandbox but not a burst that lands between scans. This is
   documented as a limitation rather than hidden.
 - Host convergence must mount the sandboxes filesystem with `prjquota` and
   install `chattr`/`setquota` for the hard path. **XFS** is the verified
-  filesystem; ext4 may account without enforcing (see 1a) and will then be
+  filesystem. ext4 may account without enforcing (see 1a) and will then be
   reported as accounting mode. This is a deployment change owned by the Ansible
-  repository; the runner degrades safely without it.
-- Project IDs collide with probability ~2⁻³¹ per pair on one filesystem; two
-  colliding sandboxes would share a quota. Acceptable for v0.x and noted in the
-  package.
+  repository. The runner degrades safely without it.
+- Project IDs collide with probability ~2⁻³¹ per pair on one filesystem, and two
+  colliding sandboxes would share a quota. This is acceptable for v0.x and noted
+  in the package.
 
 ## Refs
 
