@@ -279,6 +279,9 @@ func TestSDKWireGolden(t *testing.T) {
 
 	got := wireGolden{
 		Limits: map[string]int64{
+			// The longest of a plain call and a listing, which waits on each pool's runner.
+			"callSeconds":          int64(max(poolCallTimeout, defaultPoolListDeadline) / time.Second),
+			"runBodyBytes":         sdkRunBodyLimit,
 			"runFirstFrameSeconds": int64(defaultRunFirstFrameTimeout / time.Second),
 			"runTailSeconds":       int64(runTailGrace / time.Second),
 			"deleteSeconds":        int64(poolDeleteDeadline / time.Second),
@@ -306,7 +309,9 @@ func TestSDKWireGolden(t *testing.T) {
 			"runner_lost_after_exit":   captureRun(t, []*v1.RunChunk{runFrame(warmRun), outFrame("done\n"), exitFrame(okExit)}, status.Error(codes.Unavailable, "dial tcp 10.0.0.5:9200")),
 			"ended_after_exit_no_done": captureRun(t, []*v1.RunChunk{runFrame(warmRun), exitFrame(okExit)}, nil),
 			"ended_before_exit":        captureRun(t, []*v1.RunChunk{runFrame(warmRun), outFrame("partial\n")}, nil),
-			// Refused before the first frame: a real status, with nothing run.
+			// Refused before the first frame, so a real status. The API can't tell from
+			// these that nothing ran: a runner lost after the program started also lands
+			// here, so a 503 or 504 on a run doesn't prove it.
 			"pool_full":       captureRun(t, nil, status.Error(codes.ResourceExhausted, "pool: no sandbox free within the borrow timeout")),
 			"runner_loading":  captureRun(t, nil, status.Error(codes.Unavailable, "pools are not loaded yet")),
 			"draining":        captureRun(t, nil, status.Error(codes.FailedPrecondition, "pool: draining")),

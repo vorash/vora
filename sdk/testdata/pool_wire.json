@@ -1,8 +1,10 @@
 {
   "limits": {
     "borrowTimeoutMaxMs": 300000,
+    "callSeconds": 20,
     "declareSeconds": 40,
     "deleteSeconds": 30,
+    "runBodyBytes": 1048576,
     "runFirstFrameSeconds": 420,
     "runTailSeconds": 60
   },
