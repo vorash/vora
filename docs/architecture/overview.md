@@ -1,6 +1,6 @@
 # Architecture overview
 
-Status: draft · Applies to: v0.2
+Status: draft · Written for v0.2 and updated since. Where this document and the code differ, the code is right.
 
 ## Purpose
 
@@ -43,7 +43,7 @@ snapshots, SDKs, multi-runner scheduling, Kubernetes.
 | --------- | -------------- |
 | `vora` | CLI: create/inspect/exec/copy/logs/stats/destroy |
 | `vora-runner` | daemon: lifecycle, state, TTL, reconciliation, exposes `RunnerService` |
-| `vora-init` | PID 1 inside the sandbox; serves `AgentService` for exec/signal/shutdown |
+| `vora-init` | PID 2 inside a bwrap sandbox, where bwrap stays PID 1, and PID 1 inside a gVisor sandbox. It serves `AgentService` for exec/signal/shutdown |
 | `runtime.Backend` | isolation-technology interface (`bwrap`, `gvisor`) |
 | `cgroup.Manager` / `cgroup.Subtree` | bwrap: transient systemd units. gVisor: delegated cgroup v2 subtree |
 | `images` | read-only rootfs cache shared by all sandboxes |
@@ -92,7 +92,7 @@ Auto-select prefers gVisor only when UID is 0 and limits are enforced.
 | Mode | cgroup target | Root required | Use |
 | ---- | ------------- | ------------- | --- |
 | local (default) | `systemd-run --user` | no | development, CI, benchmarks |
-| system | `systemd-run --system` | yes | hosted runner (Hetzner) |
+| system | `systemd-run --system` | bwrap: no, a dedicated `vora` user with ambient capabilities (ADR 011). gVisor: yes, `runsc` needs uid 0 | hosted runner (Hetzner) |
 
 Both use the same `cgroup.Manager`. The mode is a single config switch.
 

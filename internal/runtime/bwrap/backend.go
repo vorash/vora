@@ -1,7 +1,7 @@
 // Package bwrap implements the runtime.Backend for Bubblewrap.
 //
 // A sandbox is launched as a transient systemd unit (for cgroup limits) whose
-// command is bubblewrap, and vora-init runs as PID 1 inside. The runner talks
+// command is bubblewrap, which stays PID 1, with vora-init as PID 2. The runner talks
 // to the agent over a per-sandbox Unix socket for exec, stats and shutdown.
 package bwrap
 

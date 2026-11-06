@@ -35,8 +35,8 @@ grade.sh
 
 ## What to notice
 
-- **The fixture is writeable but the grader is not.** The expected output is
-  piped in over stdin. The submission only ever sees `/workspace` and `/root`.
+- **The grader stays outside the sandbox.** `grade.sh` pipes the fixture in over
+  stdin and keeps the expected answer on the host, so the submission can't read the answer or the grader.
 - **`--disk 64m`** makes disk exhaustion a graded outcome (`DiskQuotaExceeded`)
   rather than a stuck host. Try a submission that writes forever.
 - **The sandbox's `/etc/shadow` is the image's**, not the host's: mallory can
