@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -490,6 +491,123 @@ func TestClientDisconnectMidRunResetsTheMember(t *testing.T) {
 	}
 	if !h.backend.box(id).started || h.backend.isGone(id) {
 		t.Fatal("the member was destroyed; a disconnect needs a reset, not a replacement")
+	}
+}
+
+// The reset's proof holds only for an exec that is over from the runner's side, so the exec's
+// stream must be closed, and its context done, before the reset starts. The hook reads both as
+// the reset begins, so this pins the order without a timing window. A disconnect cancels the
+// context whether or not the stream was closed, which is why the stream is read as well.
+func TestDisconnectEndsTheExecBeforeTheResetStarts(t *testing.T) {
+	h := newWarmHarness(t)
+	type atReset struct {
+		ctxErr error
+		closed bool
+	}
+	var (
+		mu      sync.Mutex
+		execCtx context.Context
+		exec    *ctxStream
+	)
+	seen := make(chan atReset, 1)
+	h.backend.set(func(b *poolBackend) {
+		b.execHook = func(ctx context.Context, _ string, _ runtime.ExecRequest) (runtime.ExecStream, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			execCtx, exec = ctx, newCtxStream(ctx, false, runtime.ExecChunk{Stdout: []byte("partial")})
+			return exec, nil
+		}
+		b.resetHook = func(context.Context, string) error {
+			mu.Lock()
+			defer mu.Unlock()
+			closed := false
+			select {
+			case <-exec.closed:
+				closed = true
+			default:
+			}
+			seen <- atReset{ctxErr: execCtx.Err(), closed: closed}
+			return nil
+		}
+	})
+	p := h.create(poolSpec(1, 1))
+	h.waitIdle(p.GetId(), 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream, err := h.client.RunInPool(ctx, &v1.RunInPoolRequest{PoolId: p.GetId(), TenantId: h.tenant, Exec: &v1.ExecRequest{Command: "true", TimeoutSeconds: 5}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first, err := stream.Recv(); err != nil || first.GetRun() == nil {
+		t.Fatalf("first frame = %v, %v", first, err)
+	}
+	cancel()
+
+	select {
+	case got := <-seen:
+		if got.ctxErr == nil {
+			t.Error("the reset started with the exec's context still live")
+		}
+		if !got.closed {
+			t.Error("the reset started with the exec's stream still open")
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the member was never reset")
+	}
+}
+
+// A missing command is an ordinary exit from each backend, 127 on bwrap and 128 on gVisor. It
+// must cost neither a member nor a retry: retiring the member would replace a sandbox for
+// every typo, and a retry would run the typo twice.
+func TestMissingCommandCostsNoMember(t *testing.T) {
+	for _, code := range []int{127, 128} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			h := newWarmHarness(t)
+			h.backend.set(func(b *poolBackend) {
+				b.execHook = func(ctx context.Context, _ string, _ runtime.ExecRequest) (runtime.ExecStream, error) {
+					return newCtxStream(ctx, false,
+						runtime.ExecChunk{Stderr: []byte("no such command")},
+						runtime.ExecChunk{Exit: &runtime.ExecResult{ExitCode: code, Reason: runtime.ReasonExited}}), nil
+				}
+			})
+			p := h.create(poolSpec(1, 1))
+			h.waitIdle(p.GetId(), 1)
+
+			member := ""
+			for run := 1; run <= 2; run++ {
+				frames, err := h.run(h.ctx(), p.GetId(), 5)
+				if err != nil {
+					t.Fatalf("run %d: %v", run, err)
+				}
+				if got, want := kinds(frames), []string{"run", "stderr", "exit", "run_done"}; !slices.Equal(got, want) {
+					t.Fatalf("run %d: frames = %v, want %v", run, got, want)
+				}
+				info, exit, done := frames[0].GetRun(), frames[2].GetExit(), frames[3].GetRunDone()
+				if exit.GetExitCode() != int32(code) || exit.GetReason() != v1.ExitReason_EXITED {
+					t.Fatalf("run %d: exit = %v, want %d with EXITED", run, exit, code)
+				}
+				if done.GetOutcome() != v1.PoolResetOutcome_POOL_RESET_OK {
+					t.Fatalf("run %d: run_done = %v, want a passing reset", run, done)
+				}
+				if member != "" && info.GetSandboxId() != member {
+					t.Fatalf("run %d landed on %s, not on %s", run, info.GetSandboxId(), member)
+				}
+				member = info.GetSandboxId()
+				if !info.GetWarm() || int(info.GetSandboxRun()) != run {
+					t.Fatalf("run %d: run frame = %v, want warm and its own number", run, info)
+				}
+			}
+			if got := h.backend.box(member).runs; got != 2 {
+				t.Fatalf("the member ran %d execs for 2 runs, so a run was retried", got)
+			}
+			if failed := h.metricFamily("vora_exec_failed_total"); failed != nil {
+				t.Fatalf("vora_exec_failed_total = %v, want nothing counted", failed)
+			}
+			if st := h.get(p.GetId()).GetStats(); st.GetDestroyedTotal() != 0 {
+				t.Fatalf("stats %v, want no member lost", st)
+			}
+		})
 	}
 }
 
