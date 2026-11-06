@@ -134,8 +134,10 @@ func TestMemberDestroyedOutsideThePoolIsRetiredOnBorrow(t *testing.T) {
 		t.Fatalf("RunInPool: %v", err)
 	}
 	run := frames[0].GetRun()
-	if got := kinds(frames); got[0] != "run" || run.GetSandboxId() == victim || run.GetWarm() {
-		t.Fatalf("frames = %v, run = %v; want a run frame on a cold member other than the destroyed %s", got, run, victim)
+	// Not asserting its warmth: the retry cold-starts, unless the victim's destroy
+	// got in first and a refill is on its way, which the borrow rule prefers.
+	if got := kinds(frames); got[0] != "run" || run.GetSandboxId() == victim {
+		t.Fatalf("frames = %v, run = %v; want a run frame on a member other than the destroyed %s", got, run, victim)
 	}
 	waitFor(t, func() bool {
 		st := h.get(p.GetId()).GetStats()
@@ -391,15 +393,20 @@ func TestClientDisconnectMidColdStartLeaksNoSandbox(t *testing.T) {
 		t.Fatalf("stream after cancel: %v, want Canceled", err)
 	}
 
-	waitFor(t, func() bool { return len(h.backend.live()) == 0 }, "the half-started sandbox to be destroyed; live: %v", h.backend.live())
+	// The slot frees last: the backend is gone, then the record says so, and only
+	// then does the failed start return to the pool.
+	waitFor(t, func() bool {
+		st := h.get(p.GetId()).GetStats()
+		return st.GetStarting()+st.GetBusy()+st.GetIdle()+st.GetRetiring() == 0
+	}, "the pool to give up the slot")
+	if live := h.backend.live(); len(live) != 0 {
+		t.Fatalf("the backend still holds the half-started %v", live)
+	}
 	recs, _ := h.s.store.List()
 	for _, rec := range recs {
 		if rec.State != sandbox.StateDestroyed {
 			t.Fatalf("record %s is %s, want DESTROYED", rec.ID, rec.State)
 		}
-	}
-	if st := h.get(p.GetId()).GetStats(); st.GetStarting()+st.GetBusy()+st.GetIdle()+st.GetRetiring() != 0 {
-		t.Fatalf("pool still holds a member: %v", st)
 	}
 }
 
@@ -533,10 +540,17 @@ func TestReaperHandsAnExpiredMemberToItsPool(t *testing.T) {
 	if err := h.s.ReapExpired(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, func() bool { return h.backend.isGone(member.ID) }, "the pool to retire the expired member")
+	// The backend is gone before the record says so, so wait for the record itself.
+	waitFor(t, func() bool {
+		rec, err := h.s.store.Load(member.ID)
+		return err == nil && rec.State.Terminal()
+	}, "the pool to retire the expired member")
 	rec, _ := h.s.store.Load(member.ID)
 	if rec.State != sandbox.StateDestroyed {
 		t.Fatalf("expired member is %s, want DESTROYED through its pool, not EXPIRED by the reaper", rec.State)
+	}
+	if !h.backend.isGone(member.ID) {
+		t.Fatal("the record says DESTROYED, but the backend still has the sandbox")
 	}
 	waitFor(t, func() bool {
 		st := h.get(p.GetId()).GetStats()
@@ -641,6 +655,8 @@ func TestRestartFailsOldMembersAndReloadsPools(t *testing.T) {
 	unsafe.Reuse = v1.PoolReuse_POOL_REUSE_UNSAFE_NO_RESET
 	h.s.cfg.PoolUnsafeReuse = true
 	granted := h.create(unsafe)
+	// Close on a member mid-start would undo it, and only a settled one is old.
+	h.waitIdle(granted.GetId(), 1)
 	oldIDs := h.backend.live()
 
 	// The old process stops: pools close, nothing is destroyed.

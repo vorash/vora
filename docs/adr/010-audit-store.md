@@ -37,6 +37,13 @@ type Store interface {
 - Tests use `testcontainers-go` (`postgres:16-alpine`) for hermetic coverage,
   plus an env-gated test against a real Supabase project that skips by default.
 
+Schema changes are additive `ADD COLUMN IF NOT EXISTS` statements in
+`schema.sql`, applied at every runner start, with `schemaVersion` bumped. Runners
+sharing a database migrate one at a time under an advisory lock. A column for a
+measurement is nullable with no default, because NULL means not measured and zero
+is a measurement. The suite in `internal/audit/postgres/postgrestest` upgrades a
+database from the last released schema, kept in its `testdata`, with rows in it.
+
 ## Consequences
 
 - Local development and CI need no database.

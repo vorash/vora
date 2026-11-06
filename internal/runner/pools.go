@@ -528,6 +528,28 @@ func (s *Server) DeletePool(ctx context.Context, req *v1.DeletePoolRequest) (*v1
 	return &v1.DeletePoolResponse{Drained: true}, nil
 }
 
+// GetPoolEvents returns a pool's own audit trail. It answers from the trail, not
+// the registry, because the event that matters most, pool_delete, is written once
+// the pool is gone. Each row names its tenant, so a pool of another tenant reads
+// as not found, and these rows hold pool names, not a member's raw backend text.
+func (s *Server) GetPoolEvents(ctx context.Context, req *v1.GetPoolEventsRequest) (*v1.GetSandboxEventsResponse, error) {
+	if !validPoolID(req.GetPoolId()) {
+		return nil, status.Error(codes.InvalidArgument, "invalid pool_id")
+	}
+	if req.GetTenantId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "tenant_id is required")
+	}
+	events, err := s.audit.Events(ctx, req.GetPoolId())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "read events: %v", err)
+	}
+	events = slices.DeleteFunc(events, func(e sandbox.Event) bool { return e.Actor.TenantID != req.GetTenantId() })
+	if len(events) == 0 {
+		return nil, status.Errorf(codes.NotFound, "pool %s not found", req.GetPoolId())
+	}
+	return &v1.GetSandboxEventsResponse{Events: eventsToProto(events)}, nil
+}
+
 // auditPool puts who declared or deleted a pool on the audit trail, under the
 // pool's id. A pool has no workspace, so the local store's directory is made here;
 // the Postgres store takes any id.
@@ -827,8 +849,8 @@ func (a poolSandboxes) Destroy(ctx context.Context, sandboxID string) error {
 }
 
 // Event records a pool event on the member's trail. Reason repeats kind and
-// detail, because the Postgres audit store has no columns for them until
-// step 17 and would otherwise store an empty row per reset.
+// detail because reason is all the wire's SandboxEvent carries, and because a
+// row written before the store had those columns has nothing else.
 func (a poolSandboxes) Event(sandboxID, kind, detail string) {
 	a.s.events.append(sandbox.Event{
 		SandboxID: sandboxID,

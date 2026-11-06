@@ -325,6 +325,10 @@ signal, and one that failed after hitting the pids limit reports
 carry the same reason and fields (`memoryPeakScope`, `oomKills`,
 `pidsLimitHits`).
 
+In an exec record a usage field is absent when it was not measured, and a
+measured zero is `"0"`. The exec may have run unmetered, its sandbox may have
+died before the window closed, or the record may be older than the field.
+
 On Bubblewrap an OOM kill ends the exec, not the sandbox. The processes an
 exec starts are always the OOM killer's first choice, ahead of the sandbox's
 init, so the kernel kills one of them. The exec still ends with an exit chunk

@@ -108,6 +108,8 @@ class SandboxExec:
     reason: str | None = None
     stdout_bytes: int | None = None
     stderr_bytes: int | None = None
+    # None when not measured, as are the other usage fields here. A measured
+    # zero is 0.
     cpu_millis: int | None = None
     # The peak during this exec's window; memory_peak_scope says whether the
     # kernel scoped it to the window ("PEAK_SCOPE_WINDOW") or it is the

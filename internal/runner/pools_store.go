@@ -120,6 +120,43 @@ func (s *Server) loadPoolRecords() ([]poolRecord, error) {
 	return recs, nil
 }
 
+// prunePoolTrails removes the directory of each pool that has no record left and
+// whose last event is older than cutoff. store.List finds sandbox records only, so
+// these need their own walk. A pool's record is written before its first event and
+// removed before its last, so a pool still declared, loaded or refused has one.
+func (s *Server) prunePoolTrails(cutoff time.Time) error {
+	entries, err := os.ReadDir(s.workspaces.Root())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !validPoolID(e.Name()) {
+			continue
+		}
+		id := e.Name()
+		if _, err := os.Stat(s.poolPath(pool.ID(id))); !os.IsNotExist(err) {
+			continue
+		}
+		last, err := os.Stat(filepath.Join(s.workspaces.LogsDir(id), sandbox.EventsFile))
+		if os.IsNotExist(err) {
+			// The directory was made and its first event never landed.
+			last, err = os.Stat(s.workspaces.LogsDir(id))
+		}
+		if err != nil || !last.ModTime().Before(cutoff) {
+			continue
+		}
+		if err := s.workspaces.Destroy(id); err != nil {
+			s.logger.Warn("prune pool audit failed", "pool_id", id, "error", err)
+			continue
+		}
+		s.logger.Info("pool audit trail pruned", "pool_id", id, "retention", s.cfg.AuditRetention.String())
+	}
+	return nil
+}
+
 // poolEvents writes pool lifecycle events (reset, retire, alive, destroy) off
 // the pool's own path. A reset's check-in holds the run's trailer, and with a
 // Postgres audit store an append is a network round trip, so events queue to one

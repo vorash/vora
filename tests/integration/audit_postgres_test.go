@@ -4,6 +4,7 @@ package integration
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -13,17 +14,16 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/vorash/vora/internal/audit/postgres"
+	"github.com/vorash/vora/internal/audit/postgres/postgrestest"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/sandbox"
 	"github.com/vorash/vora/internal/ulid"
 )
 
-// TestPostgresAuditStore runs the audit store against a real PostgreSQL started
-// with testcontainers; this is the same code path used against Supabase.
-func TestPostgresAuditStore(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-
+// startAuditPostgres starts a PostgreSQL for one test. CI is the only place the
+// audit schema's upgrade is proven, so losing Docker there has to fail the run.
+func startAuditPostgres(ctx context.Context, t *testing.T) string {
+	t.Helper()
 	ctr, err := tcpostgres.Run(ctx, "postgres:16-alpine",
 		tcpostgres.WithDatabase("vora"),
 		tcpostgres.WithUsername("vora"),
@@ -33,6 +33,9 @@ func TestPostgresAuditStore(t *testing.T) {
 				WithOccurrence(2).WithStartupTimeout(90*time.Second)),
 	)
 	if err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatalf("testcontainers unavailable: %v", err)
+		}
 		t.Skipf("testcontainers unavailable: %v", err)
 	}
 	t.Cleanup(func() { _ = ctr.Terminate(context.Background()) })
@@ -41,6 +44,24 @@ func TestPostgresAuditStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connection string: %v", err)
 	}
+	return dsn
+}
+
+// TestPostgresAuditSuite runs the store's contract and its upgrade from the last
+// released schema.
+func TestPostgresAuditSuite(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	postgrestest.Run(t, startAuditPostgres(ctx, t))
+}
+
+// TestPostgresAuditStore runs the audit store against a real PostgreSQL started
+// with testcontainers; this is the same code path used against Supabase.
+func TestPostgresAuditStore(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	dsn := startAuditPostgres(ctx, t)
 
 	store, err := postgres.Open(ctx, dsn)
 	if err != nil {
