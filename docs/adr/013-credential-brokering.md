@@ -8,7 +8,7 @@
 Master plan §18 sets the goal: a sandbox must be able to call a third-party API
 without its token ever existing in the sandbox's environment, filesystem, or
 `/proc`. ADR 004 decided credentials are **brokered, not injected**, and
-sketched a broker route `http://egress/creds/<alias>/…`; v0.3 deferred the
+sketched a broker route `http://egress/creds/<alias>/…`. v0.3 deferred the
 implementation.
 
 The blocker was mechanical. The v0.3 egress gateway (ADR 012) is a **passthrough
@@ -32,15 +32,14 @@ http://<gateway>:8080/creds/<alias>/<path>
 
 The broker resolves `<alias>` to a bound upstream `{host, scheme, secret}`,
 drops the sandbox's own `Authorization`/`Cookie`/`Host` headers, attaches the
-credential, and re-originates to the upstream **over TLS**. The
-sandbox→gateway hop never leaves the netns; the gateway→upstream hop is
-TLS. `VORA_BROKER_URL` (non-secret) is injected into the sandbox environment so
+credential, and re-originates to the upstream **over TLS**. The hop from sandbox
+to gateway never leaves the netns, and the hop from gateway to upstream is TLS. `VORA_BROKER_URL` (non-secret) is injected into the sandbox environment so
 the workload does not guess the address.
 
 **2. Aliases are bound to a host and a secret.**
 An alias maps to exactly one upstream host and one credential. A brokered
-request is only served when the bound host is also on the sandbox's
-`AllowedDomains`; otherwise it is denied (`broker_host_not_allowed`) and
+request is served only when the bound host is also on the sandbox's
+`AllowedDomains`. Otherwise it is denied (`broker_host_not_allowed`) and
 audited. A granted alias can never be used to reach an unlisted host.
 
 **3. No credential is ever forwarded across a redirect.**
@@ -49,7 +48,7 @@ the sandbox verbatim and the sandbox follows it through the normal SNI proxy,
 where the allowlist applies. This satisfies the master-plan criterion
 "redirect handling does not leak credentials".
 
-**4. `vora-api` owns secrets; the runner never does.**
+**4. `vora-api` owns secrets, and the runner never does.**
 Secrets live in Postgres (`vora_secrets`,
 `id, tenant_id, alias, host, scheme, header, nonce, ciphertext, key_version,
 created_at, updated_at`) encrypted with AES-256-GCM under `VORA_MASTER_KEY`,
@@ -63,7 +62,7 @@ on first reveal and persisted before returning the value. Storage and CRUD mirro
 At sandbox creation the API resolves each requested alias for the caller's
 tenant and rejects unknown aliases or aliases whose host is not allowlisted
 *before* it dials a runner. The resolved secrets travel in a dedicated,
-non-persisted field of the create request and are consumed by the runner to
+non-persisted field of the create request, and the runner consumes them to
 build the broker. They are **not** part of `SandboxSpec`: the runner's
 persisted record (`state/sandboxes/<id>/config.json`) stores only the granted
 aliases.
@@ -74,14 +73,14 @@ aliases.
   silently creating an unbrokered sandbox.
 - The API→runner create call carries plaintext secrets. The runner refuses to
   accept them unless TLS is configured on that channel (`VORA_RUNNER_TLS_*`,
-  via `internal/tlsutil`), unless an explicit insecure override is set; the
+  through `internal/tlsutil`) or an explicit insecure override is set. The
   insecure case is logged loudly at startup.
 
 **6. Audit.**
 Every brokered decision is an `EgressRecord` carrying the **alias**, the bound
-host, the decision, and a reason — never the secret. Allowed decisions are
-persisted before any upstream byte is forwarded; a persistence failure denies
-the connection (`audit_failed`). Records flow through the existing
+host, the decision, and a reason. It never carries the secret. Allowed decisions
+are persisted before any upstream byte is forwarded, and a persistence failure
+denies the connection (`audit_failed`). Records flow through the existing
 JSONL/Postgres stores, `GetSandboxEgress`,
 `GET /v1/sandboxes/{id}/egress`, and `vora logs --egress`.
 
@@ -94,11 +93,11 @@ JSONL/Postgres stores, `GetSandboxEgress`,
   directly. The master-plan demo becomes
   `curl http://$VORA_BROKER_URL/creds/github/user` instead of
   `curl https://api.github.com/user`.
-- Brokering is **bwrap-only**, because it rides the `NetworkRestricted` path;
+- Brokering is **bwrap-only**, because it uses the `NetworkRestricted` path.
   gVisor sandboxes have neither restricted egress nor brokering.
 - No CA distribution, no image trust-store changes, no pinning breakage.
 - The broker is HTTP-only by design: non-HTTP protocols through the broker
   route are out of scope, and direct non-TLS egress remains denied.
 - A future "transparent" variant that terminates TLS for aliased hosts (so
-  unmodified `curl https://api.github.com` works) remains possible; it would
+  unmodified `curl https://api.github.com` works) remains possible. It would
   supersede this ADR and reintroduce CA lifecycle concerns.

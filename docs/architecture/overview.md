@@ -1,4 +1,4 @@
-# Architecture Overview
+# Architecture overview
 
 Status: draft · Applies to: v0.2
 
@@ -56,7 +56,7 @@ snapshots, SDKs, multi-runner scheduling, Kubernetes.
 ## Design principles
 
 1. **Isolation is behind an interface.** Control-plane code depends only on
-   `runtime.Backend`; backend specifics stay in `internal/runtime/<backend>`.
+   `runtime.Backend`. Backend specifics stay in `internal/runtime/<backend>`.
 2. **Read-only shared rootfs.** Mutable state lives only in `/workspace`,
    `/root` and `/tmp`, so rootfs can be shared and need not be copied.
 3. **Long-lived sandboxes.** A sandbox keeps its process state between execs, so
@@ -83,7 +83,8 @@ type Backend interface {
 ```
 
 `Capabilities` declares native exec, cgroup ownership, whether resource limits
-actually bite (`EnforcesResourceLimits`), and which network modes it supports.
+are actually enforced (`EnforcesResourceLimits`), and which network modes the
+backend supports.
 Auto-select prefers gVisor only when UID is 0 and limits are enforced.
 
 ## Deployment modes
@@ -93,7 +94,7 @@ Auto-select prefers gVisor only when UID is 0 and limits are enforced.
 | local (default) | `systemd-run --user` | no | development, CI, benchmarks |
 | system | `systemd-run --system` | yes | hosted runner (Hetzner) |
 
-Both use the same `cgroup.Manager`; the mode is a single config switch.
+Both use the same `cgroup.Manager`. The mode is a single config switch.
 
 ## Related documents
 

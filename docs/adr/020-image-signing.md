@@ -20,15 +20,15 @@ must be possible to turn off for local development without that being silent.
 - `enforce`: an image whose signature cannot be verified is refused with a
   clear error, before any pull.
 
-The default is `off` for v0.6 because the mini-pc/CI images are not yet signed;
-turning enforcement on by default would break every existing deployment. The
+The default is `off` for v0.6 because the mini-pc/CI images are not yet signed.
+Turning enforcement on by default would break every existing deployment. The
 gap is closed by configuration, and is stated in the README.
 
 **2. Verification via cosign, key-based.**
 In `enforce` mode the runner verifies with `cosign verify --key <pubkey> <ref>`
-and treats a non-zero exit as untrusted; the command output is included in the
+and treats a non-zero exit as untrusted. The command output is included in the
 error. `VORA_COSIGN_KEY` (a cosign public key path) is **required** in enforce
-mode — without it the runner refuses every image, so enforcement is never
+mode. Without it the runner refuses every image, so enforcement is never
 silently absent. `VORA_COSIGN_PATH` overrides the cosign binary.
 
 Shelling out to cosign (rather than linking the sigstore libraries) keeps the
@@ -45,10 +45,10 @@ before submitting them. A misconfigured policy refuses every image.
 ## Consequences
 
 - With enforcement on, mutable tags and local-cache-only deployments fail
-  closed; unsigned or tampered digest-pinned images fail at start.
-- Enforcement needs a registry round-trip and the cosign binary on the runner;
-  it is off by default so this is opt-in.
-- Keyless (Fulcio/Rekor) verification and notation are not implemented; the
+  closed. Unsigned or tampered digest-pinned images fail at start.
+- Enforcement needs a registry round-trip and the cosign binary on the runner.
+  It is off by default, so this is opt-in.
+- Keyless (Fulcio/Rekor) verification and notation are not implemented. The
   policy interface (`images.Verifier`) leaves room for them.
 - The end-to-end signed/tampered test lives in `tests/integration` and is
   skipped unless cosign plus signed/unsigned image references are provided,

@@ -15,7 +15,7 @@ CLI.
 
 Define a single `runtime.Backend` interface that all isolation technologies
 implement. The control plane depends only on this interface and on the
-`SandboxSpec` / `Stats` / `ExecRequest` types.
+`SandboxSpec`, `Stats`, and `ExecRequest` types.
 
 ```go
 type Backend interface {
@@ -36,14 +36,14 @@ Backends report `Capabilities` so the runner can adapt without special-casing:
 and the supported `NetworkModes`. Backends that do not own cgroups receive a
 `cgroup.Manager` and use it to launch their workload.
 
-`SandboxSpec` is the policy input and carries tenant/agent IDs from day one so
-identity can be added later without a breaking change.
+`SandboxSpec` is the policy input and carries tenant and agent IDs from day one,
+so identity can be added later without a breaking change.
 
 ## Consequences
 
 - Adding a backend is additive: implement the interface and register it.
 - Capability negotiation is explicit rather than inferred from backend names.
-- The interface is deliberately small; features that only one backend can serve
+- The interface is deliberately small. Features that only one backend can serve
   (snapshots, fork) are deferred until a second implementation justifies them.
-- `runtime` stays in `internal/` for now; it can be promoted to `pkg/` if an
+- `runtime` stays in `internal/` for now. It can be promoted to `pkg/` if an
   external consumer appears.

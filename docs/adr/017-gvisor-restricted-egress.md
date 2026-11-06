@@ -14,14 +14,14 @@ names, or use brokered credentials.
 
 Two spikes (issue #18) established the boundary precisely:
 
-- `runsc --network host` is not the deprecated host-kernel hostinet; gVisor
+- `runsc --network host` is not the deprecated host-kernel hostinet. gVisor
   still terminates TCP/IP in its userspace netstack. Commands it runs are
   netstack flows, not host sockets, so **kernel netfilter on the sandbox's
-  output path never sees them** — the original ADR 012 finding.
+  output path never sees them**, which was the original ADR 012 finding.
 - But netstack does emit real frames out the sandbox's veth, so they arrive in
   the **runner** netns and traverse its **prerouting** hook. A DNAT rule there
   captures them (verified locally under `rootlesskit` with a real `runsc`).
-  This is the mirror of the bwrap rule, one hook over.
+  This mirrors the bwrap rule at a different hook.
 
 ## Decision
 
@@ -40,15 +40,15 @@ cannot affect another's traffic (the same reasoning as ADR 016).
 **2. The sandbox runs in its own netns via `--network host`.**
 The gVisor backend launches `runsc create`/`start` inside the sandbox's network
 namespace (`nsenter -t <holder> -n runsc --network host …`). `--network host`
-then means "this netns" — the sandbox gets its own loopback and the veth, and
-its only path out is the veth the runner's rules police. It does not share the
+then means "this netns". The sandbox gets its own loopback and the veth, and
+its only path out is the veth that the runner's rules police. It does not share the
 runner's loopback.
 
 **3. Reuse the egress components unchanged.**
 The SNI proxy, allowlist resolver and credential broker listen on the gateway
-address exactly as for bwrap; audit, metrics, allowlist and broker logic are
+address exactly as for bwrap. Audit, metrics, allowlist and broker logic are
 shared. A host `resolv.conf` pointing at the gateway is bound over
-`/etc/resolv.conf` in the OCI bundle; the broker base URL is injected when
+`/etc/resolv.conf` in the OCI bundle. The broker base URL is injected when
 aliases are granted.
 
 **4. `--net-raw` stays off** (gVisor's default), so the sandbox cannot craft
@@ -58,14 +58,14 @@ packets to bypass the runner rules.
 
 - gVisor `NetworkRestricted` reaches allowlisted hosts, resolves only
   allowlisted names, refuses private/metadata answers, and supports brokered
-  credentials — parity with bwrap, closing ADR 012's limitation.
-- Still gVisor-only gaps: `NetworkFull`/`NetworkPrivate` are not implemented for
+  credentials. That gives parity with bwrap and closes ADR 012's limitation.
+- gVisor-only gaps remain: `NetworkFull` and `NetworkPrivate` are not implemented for
   gVisor (only `NetworkRestricted` is in scope here).
 - The runner-side policy is keyed by the sandbox veth, so it must be re-applied
-  if the veth is recreated; the manager persists the enforcement mode with the
+  if the veth is recreated. The manager persists the enforcement mode with the
   net state and cleans the runner tables on teardown and startup reap.
 - Verification of the datapath belongs on a real gVisor host (the isolation
-  suite runs under `rootlesskit`/root); the unit tests cover rule generation
+  suite runs under `rootlesskit`/root). The unit tests cover rule generation
   and the manager's enforcement selection.
 
 ## Refs

@@ -1,4 +1,4 @@
-# Sandbox Lifecycle
+# Sandbox lifecycle
 
 Status: draft · Applies to: v0.2
 
@@ -13,13 +13,13 @@ REQUESTED → SCHEDULING → CREATING → STARTING → RUNNING
 
 `SCHEDULING` is a no-op in v0.1 (single runner) but exists so multi-runner
 scheduling does not change the state machine. `FAILED`, `EXPIRED` and
-`DESTROYED` are terminal; `DESTROYED` is retained as a tombstone record.
+`DESTROYED` are terminal. `DESTROYED` is retained as a tombstone record.
 
 ## Transitions
 
 | From | To | Trigger | Side effects |
 | ---- | -- | ------- | ------------ |
-| — | REQUESTED | `CreateSandbox` | allocate ID, persist config, create dirs |
+| none | REQUESTED | `CreateSandbox` | allocate ID, persist config, create dirs |
 | REQUESTED | SCHEDULING | runner accepts | select backend (single runner: itself) |
 | SCHEDULING | CREATING | backend selected | materialise mounts, reserve unit |
 | CREATING | STARTING | resources ready | start `vora-init` under a cgroup service |
@@ -64,13 +64,13 @@ change is observable. The store is the source of truth across runner restarts.
 
 ## Exec model
 
-A sandbox is long-lived and holds a `vora-init` process as PID 1. Exec is
-mediated by an in-sandbox agent rather than re-launching Bubblewrap:
+A sandbox is long-lived and holds a `vora-init` process as PID 1. Exec goes
+through an in-sandbox agent rather than re-launching Bubblewrap:
 
-1. Runner binds `<sandbox>/ipc` to `/run/vora` inside the sandbox.
+1. The runner binds `<sandbox>/ipc` to `/run/vora` inside the sandbox.
 2. `vora-init` creates `control.sock` and serves `AgentService`
    (`Ping`, `Exec`, `Signal`, `Shutdown`).
-3. Runner dials the socket (AF_UNIX filesystem sockets cross network
+3. The runner dials the socket (AF_UNIX filesystem sockets cross network
    namespaces, so this works in `NetworkNone`).
 4. `Exec` streams stdout/stderr and returns the exit code and reason.
 
@@ -88,7 +88,7 @@ sandbox's parent is systemd rather than the runner.
 
 ## Resource limits and termination reasons
 
-Limits are applied by `cgroup.Manager` on a transient systemd service. Stats and
+`cgroup.Manager` applies limits on a transient systemd service. Stats and
 termination reasons are read from the sandbox cgroup:
 
 | Reason | Source |
@@ -109,27 +109,27 @@ counters for `stats`, and the sandbox accepts the next exec.
 
 ## TTL and reconciliation
 
-- A reaper goroutine expires RUNNING sandboxes whose TTL elapsed → `EXPIRED`,
+- A reaper goroutine moves RUNNING sandboxes whose TTL elapsed to `EXPIRED`,
   then destroys them.
 - On runner start the reconciler **fail-closes**. It does not reattach live
   sandboxes:
   1. every store record in `CREATING`/`STARTING`/`RUNNING`/`STOPPING` is
      reaped (`Sweeper.Reap`) and marked `FAILED`, workspace cleaned;
-  2. leftover backend containers (e.g. `runsc list`) not in the store are reaped;
+  2. leftover backend containers (for example, `runsc list`) not in the store are reaped;
   3. leftover `vora-sbx_*` systemd units are stopped and reset.
-- Handles are in-memory; exec after a restart requires a new sandbox.
+- Handles are in-memory. Exec after a restart requires a new sandbox.
 
 ## Snapshots and forks
 
 A snapshot captures a RUNNING or stopped sandbox's writable state
-(crash-consistent; ADR 023) and a fork is an ordinary create whose workspace
+(crash-consistent, ADR 023) and a fork is an ordinary create whose workspace
 is restored from that copy instead of starting empty. The fork goes through
-the same `REQUESTED → … → RUNNING` path and gets a fresh TTL; the snapshot
+the same `REQUESTED → … → RUNNING` path and gets a fresh TTL. The snapshot
 record outlives the source sandbox, so forking after the source is gone is
 valid.
 
 ## Cleanup guarantees
 
-Destroying a sandbox must: stop the unit, kill the process tree, remove the
+Destroying a sandbox must stop the unit, kill the process tree, remove the
 cgroup, and delete the sandbox directory. `make test-security` asserts no
 `vora-sbx_*.service` units and no `vora-*` processes remain after the suite runs.

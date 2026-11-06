@@ -6,8 +6,8 @@
 ## Context
 
 The audit trail is what makes executed code attributable. The default JSONL
-store kept it under `<sandbox>/logs`, and `workspace.Clean` — run by destroy,
-TTL expiry, disk-quota enforcement and reconcile — removed that directory with
+store kept it under `<sandbox>/logs`, and `workspace.Clean`, run by destroy,
+TTL expiry, disk-quota enforcement and reconcile, removed that directory with
 the workspace. A key with the `sandbox` scope, including an agent-bound
 workload key, could therefore erase the record of what its sandbox ran and
 which hosts it contacted by destroying the sandbox, which is also how every
@@ -24,7 +24,7 @@ tombstone: `config.json` and `logs/` (events, exec records, egress decisions).
 Everything else goes, including backend leftovers such as a gVisor `bundle/`
 or a bound `resolv.conf`, which are not audit data. `logs/` is not mounted into
 either backend, so the workload cannot write to it. The failed-create rollback
-still removes the whole directory; nothing has run by then.
+still removes the whole directory, because nothing has run by then.
 
 **The API keeps the route.** A trail the API cannot reach is as hidden as a
 deleted one, and every audit read (`events`, `execs`, `egress`) finds its runner
@@ -42,7 +42,7 @@ a default. There is no size-based limit. Pruning runs every 10 minutes, apart
 from the 30-second reaper, and re-checks each record under the same
 per-sandbox lock destroy holds, so it never deletes a tombstone a concurrent
 destroy is rewriting. A sandbox that failed without being destroyed may still
-hold a project quota; pruning releases it before deleting the directory.
+hold a project quota. Pruning releases it before deleting the directory.
 
 Retention applies only to the runner's own JSONL trail. That is recorded when
 the store is configured (installing another store with `SetAudit` turns it
@@ -50,7 +50,7 @@ off), not inferred from the store's type. With a Postgres audit store the rows
 live in the database, and the runner only serves them for a sandbox whose
 tombstone it still has, so the reaper leaves the tombstone alone and the rows
 are the operator's to retain. `VORA_AUDIT_RETENTION` is read by the runner
-only; the CLI never parses it, so a bad value cannot break CLI commands.
+only. The CLI never parses it, so a bad value cannot break CLI commands.
 
 **A configured Postgres audit store is required, not preferred.** With
 `VORA_AUDIT_DSN` set, failing to connect or migrate is a startup error. The
@@ -61,12 +61,12 @@ starts.
 **Lost audit writes are metered.** A failed exec-record or lifecycle-event
 write (including the `DESTROYED` transition) increments
 `vora_audit_write_failed_total`, the counter egress write failures already use.
-It still does not fail the caller's command; a fail-closed option for execs, as
+It still does not fail the caller's command. A fail-closed option for execs, as
 egress has, is left for a later decision.
 
 ## Consequences
 
-- Disk use per finished sandbox is no longer bounded to `config.json`; operators
+- Disk use per finished sandbox is no longer bounded to `config.json`. Operators
   who do not set `VORA_AUDIT_RETENTION` keep every trail.
 - **Accepted residual risk: caller-driven disk growth.** The egress log is
   capped at 1 MiB per sandbox. An exec record carries the caller's command,
@@ -74,14 +74,14 @@ egress has, is left for a later decision.
   sandbox count limits apply to active sandboxes, not tombstones. A tenant key
   looping create, exec, destroy can therefore grow the runner's disk until the
   operator sets `VORA_AUDIT_RETENTION` or the disk is full. Keeping evidence is
-  still the right default; operators exposed to untrusted tenants should set a
+  still the right default. Operators exposed to untrusted tenants should set a
   retention limit and alert on runner disk.
 - A runner with `VORA_AUDIT_DSN` set does not start until the database is up.
 - The API's route table keeps one row per destroyed sandbox until a later
   destroy finds the runner's tombstone pruned.
 - A sandbox that failed without being destroyed (for example after a runner
   restart) still counts toward placement until someone destroys it. That
-  predates this ADR; pruning its tombstone does not strand the route, because
+  predates this ADR. Pruning its tombstone does not strand the route, because
   the next destroy gets `NotFound` and drops it.
 - Regression tests: `TestAuditSurvivesDestroy`, `…TTLExpiry`,
   `…DiskQuotaEnforcement`, `…Reconcile`, `TestPruneAudit*`,

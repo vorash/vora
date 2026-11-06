@@ -10,15 +10,15 @@ returned the **first healthy runner**. A runner's declared `backends`, its
 capacity, and its current load were recorded but never used, so a second runner
 was never chosen and a full runner kept receiving sandboxes.
 
-This is part A of issue #25; the NAT reverse tunnel (part B) is separate.
+This is part A of issue #25. The NAT reverse tunnel (part B) is separate.
 
 ## Decision
 
 **1. Filter, then pick the least-loaded.**
 `placeRunner` filters healthy runners (heartbeat within TTL, already done by
 `runners`) by:
-- **backend**: `Runner.SupportsBackend(spec.Backend)` — a named backend must be
-  advertised; an empty backend (auto-select) needs any backend;
+- **backend**: `Runner.SupportsBackend(spec.Backend)`, where a named backend must
+  be advertised and an empty backend (auto-select) needs any backend;
 - **network mode**: `Runner.SupportsNetwork` against the runner's advertised
   `network_modes` (a new `RegisterRunnerRequest.network_modes` field, the union
   of its backends' `Capabilities.NetworkModes`);
@@ -32,18 +32,18 @@ is logged when nothing fits.
 
 **2. Committed capacity is the API's own, not a heartbeat.**
 The API creates every sandbox, so `SandboxRoute` now carries the requested
-`CPUMillis`/`MemoryBytes`; `committedByRunner` sums them per runner. Placement
+`CPUMillis`/`MemoryBytes`. `committedByRunner` sums them per runner. Placement
 therefore does not depend on heartbeat freshness for accounting, and a
 repository-backed route table makes it survive an API restart. The runner's
 heartbeat `sandboxes_running` is still kept as a cross-check (the larger of the
 two is used for the count). A sandbox created directly on a runner (bypassing
-the API) is only visible through that heartbeat.
+the API) is visible only through that heartbeat.
 
 **3. Observability.**
 `GET /v1/runners` now reports `committed_cpu_millis`,
 `committed_memory_bytes` and `committed_sandboxes`, alongside the existing
 `healthy` flag, so placement is inspectable. The placement reason is logged on
-the API. (The API has no Prometheus endpoint yet; a
+the API. (The API has no Prometheus endpoint yet, so a
 `vora_runner_placements_total{reason}` counter is deferred to when it does.)
 
 ## Consequences
@@ -51,13 +51,13 @@ the API. (The API has no Prometheus endpoint yet; a
 - Adding a second runner now actually distributes load, and an incapable or full
   runner is skipped rather than handed the request.
 - Placement is deterministic and testable without a real runner (unit tests
-  cover the filter and the score; the store backs the accounting).
+  cover the filter and the score, and the store backs the accounting).
 - `network_modes` is a per-runner union across backends, not a per-backend
   matrix: auto-select picks a backend that supports the requested mode, and the
   runner validates the pair at start. A request for a mode only some backends
   support is therefore accepted by placement and settled by the runner.
 - A runner that predates this change advertises no `network_modes`, so it is
-  treated as `none`-only until upgraded; the API and runner ship together.
+  treated as `none`-only until upgraded. The API and runner ship together.
 
 ## Refs
 

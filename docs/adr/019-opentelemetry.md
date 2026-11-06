@@ -24,28 +24,28 @@ processes once a collector exists.
 - `vora-api` wraps its HTTP mux with `otelhttp`, so every request is a server
   span and inbound `traceparent` is honoured. The response carries `X-Trace-Id`
   on every request (including errors), so a caller can quote it.
-- gRPC hops use `otelgrpc` — a server handler on the runner's gRPC server and
-  the API's registry server, a client handler on the API→runner dial and the
-  runner→API registry dial. This is what connects the API span to the runner.
+- gRPC hops use `otelgrpc`: a server handler on the runner's gRPC server and
+  the API's registry server, and a client handler on the API-to-runner dial and
+  the runner-to-API registry dial. This is what connects the API span to the runner.
 - The runner opens child spans for the runtime work it drives
   (`runtime.start`, `runtime.exec`), so the trace reaches the runtime layer.
 
 **3. Log correlation.**
 `telemetry.ContextHandler` is a `slog.Handler` that adds `trace_id` and
-`span_id` from the record's context. Callers use the `*Context` log methods; a
+`span_id` from the record's context. Callers use the `*Context` log methods. A
 log line without a span is unchanged.
 
 **4. Metrics are untouched.**
-The `/metrics` endpoint and `telemetry.Metrics` stay as they are; tracing is
+The `/metrics` endpoint and `telemetry.Metrics` stay as they are. Tracing is
 additive.
 
 ## Consequences
 
 - A collector is optional and never on the hot path until configured.
 - The `otelgrpc`/`otelhttp` instrumentation adds small per-call overhead even
-  when disabled; it is bounded and measured against the no-op provider.
+  when disabled. It is bounded and measured against the no-op provider.
 - Configuring an OTLP endpoint is a host concern (collector address, TLS). The
-  runner and API read `OTEL_EXPORTER_OTLP_ENDPOINT` and use plaintext gRPC; TLS
+  runner and API read `OTEL_EXPORTER_OTLP_ENDPOINT` and use plaintext gRPC. TLS
   to the collector is not wired yet.
 
 ## Refs
