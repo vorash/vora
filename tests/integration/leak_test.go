@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/pool"
 	"github.com/vorash/vora/internal/runtime"
 )
@@ -25,6 +26,12 @@ import (
 
 // keepFile is seeded into /workspace before the sandbox starts, the way a template is.
 const keepFile = "keep"
+
+// leakHolderTimeout is the timeout of a run that leaves a process holding its stdout.
+const leakHolderTimeout = time.Second
+
+// leakSecret is a value run A holds and run B must not see.
+const leakSecret = "leak-secret-value"
 
 // leakResetDeadline is the pool's default ResetTimeout.
 const leakResetDeadline = 10 * time.Second
@@ -59,18 +66,141 @@ func (s leakSandbox) mustReset(t *testing.T) runtime.ResetReport {
 	return report
 }
 
-// leakRows is the matrix.
-var leakRows = []struct {
+// leakRow is one row of the matrix, at the two levels it runs at. pool_leak_test.go runs the
+// pool half: a pool resets after every run, so a plant and its control share one program.
+type leakRow struct {
 	name string
 	run  func(t *testing.T, s leakSandbox)
-}{
-	{"L1_scratch_files", leakL1ScratchFiles},
-	{"L2_bind_mount_files", leakL2BindMountFiles},
-	{"L3_vora", leakL3Vora},
-	{"L4_env", leakL4Env},
-	{"L5_background_processes", leakL5BackgroundProcesses},
-	{"L6_holder_of_stdout", leakL6HolderOfStdout},
-	{"L6_holder_of_stdout_past_a_timeout", leakL6HolderPastATimeout},
+	pool leakPoolRow
+}
+
+// leakPoolRow is a row as run A and run B of one pool member.
+type leakPoolRow struct {
+	// runA plants, and prints whatever took needs to see that it did.
+	runA func(s leakSandbox) runtime.ExecRequest
+	took func(t *testing.T, res runResult)
+	// endsAtTimeout is a run A that never exits by itself, so took alone judges how it ended.
+	endsAtTimeout bool
+	// killed and removed say what the reset after run A must report having done.
+	killed, removed bool
+	// clean is what run B checks, given what run A printed. Every row also compares the
+	// writable mounts and the processes with the prepared member.
+	clean func(t *testing.T, s leakSandbox, runA string)
+}
+
+// leakRows is the matrix.
+var leakRows = []leakRow{
+	{"L1_scratch_files", leakL1ScratchFiles, leakPoolRow{runA: poolL1Plant, took: tookOutput("/.dotfile"), removed: true, clean: leakL1Clean}},
+	{"L2_bind_mount_files", leakL2BindMountFiles, leakPoolRow{runA: poolL2Plant, took: tookOutput("True True", "rc=1"), removed: true, clean: leakL2Clean}},
+	{"L3_vora", leakL3Vora, leakPoolRow{runA: poolL3Plant, clean: leakL3Clean}},
+	{"L4_env", leakL4Env, leakPoolRow{runA: poolL4Plant, took: tookOutput(leakSecret + " " + leakSecret), clean: leakL4Clean}},
+	{"L5_background_processes", leakL5BackgroundProcesses, leakPoolRow{runA: poolL5Plant, took: tookOutput("all-beating"), killed: true, removed: true, clean: leakL5Clean}},
+	{"L6_holder_of_stdout", leakL6HolderOfStdout, leakPoolRow{runA: poolHolder(holdStdout), took: tookHolder, endsAtTimeout: true}},
+	{"L6_holder_of_stdout_past_a_timeout", leakL6HolderPastATimeout, leakPoolRow{runA: poolHolder("setsid " + holdStdout), took: tookHolder, endsAtTimeout: true, killed: true}},
+}
+
+// leakProgram runs whole programs one after another in one exec, and stops at the first
+// that fails.
+func leakProgram(steps ...[]string) runtime.ExecRequest {
+	lines := []string{"set -e"}
+	for _, step := range steps {
+		quoted := make([]string, len(step))
+		for i, arg := range step {
+			quoted[i] = "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
+		}
+		lines = append(lines, strings.Join(quoted, " "))
+	}
+	return runtime.ExecRequest{Command: "/bin/sh", Args: []string{"-c", strings.Join(lines, "\n")}}
+}
+
+// tookOutput is the control of a row whose plant says so on stdout.
+func tookOutput(want ...string) func(t *testing.T, res runResult) {
+	return func(t *testing.T, res runResult) {
+		t.Helper()
+		for _, w := range want {
+			if !strings.Contains(string(res.stdout), w) {
+				t.Fatalf("run A did not plant: no %q in its output\nstdout: %s\nstderr: %s", w, res.stdout, res.stderr)
+			}
+		}
+	}
+}
+
+func poolL1Plant(s leakSandbox) runtime.ExecRequest {
+	dirs := s.scratch()
+	return leakProgram(
+		append([]string{"/bin/sh", "-c", planted, "plant"}, dirs...),
+		append([]string{"/usr/bin/python3", "-c", plantedAttrs}, dirs...),
+		[]string{"/bin/sh", "-c", "echo run > /dev/planted"},
+		append([]string{"/usr/bin/python3", "-c", fsSnapshot}, dirs...),
+		append([]string{"/usr/bin/python3", "-c", oddPlants}, dirs...),
+	)
+}
+
+func poolL2Plant(leakSandbox) runtime.ExecRequest {
+	return leakProgram(
+		append([]string{"/bin/sh", "-c", planted, "plant"}, leakBinds...),
+		append([]string{"/usr/bin/python3", "-c", plantedAttrs}, leakBinds...),
+		[]string{"/usr/bin/python3", "-c", userHooks},
+		[]string{"/usr/bin/python3", "-c", hooksLoaded},
+		[]string{"/bin/sh", "-c", profileLoaded},
+		append([]string{"/usr/bin/python3", "-c", oddPlants}, leakBinds...),
+	)
+}
+
+func poolL3Plant(leakSandbox) runtime.ExecRequest {
+	return leakProgram(
+		[]string{"/usr/bin/python3", "-c", hashVoraInit},
+		[]string{"/bin/sh", "-c", voraAttempts},
+	)
+}
+
+func poolL4Plant(leakSandbox) runtime.ExecRequest {
+	return runtime.ExecRequest{
+		Command: "/bin/sh",
+		Args:    []string{"-c", "export LEAK_EXPORTED=" + leakSecret + "; echo \"$LEAK_REQUEST $LEAK_EXPORTED\""},
+		Env:     map[string]string{"LEAK_REQUEST": leakSecret},
+	}
+}
+
+func poolL5Plant(leakSandbox) runtime.ExecRequest {
+	wait := `for name in "$@"; do
+	i=0
+	until [ -e "/tmp/beat-$name" ]; do
+		i=$((i+1))
+		[ "$i" -lt 400 ] || { echo "no beat from $name"; exit 1; }
+		/bin/sleep 0.05
+	done
+done
+echo all-beating`
+	return leakProgram(
+		[]string{"/bin/sh", "-c", survivors},
+		append([]string{"/bin/sh", "-c", wait, "wait"}, survivorNames...),
+	)
+}
+
+// poolHolder runs a program that ends and leaves a process holding its stdout. Only the
+// run's timeout ends a run like that.
+func poolHolder(script string) func(leakSandbox) runtime.ExecRequest {
+	return func(leakSandbox) runtime.ExecRequest {
+		return runtime.ExecRequest{Command: "/bin/sh", Args: []string{"-c", script}, Timeout: leakHolderTimeout}
+	}
+}
+
+// tookHolder checks that something held the run's stdout until the timeout, and that it did
+// not stretch the run past that timeout and the runner's grace on top of it, with a margin for
+// a loaded host.
+func tookHolder(t *testing.T, res runResult) {
+	t.Helper()
+	if !strings.Contains(string(res.stdout), "started") {
+		t.Fatalf("stdout %q, want the output from before the timeout", res.stdout)
+	}
+	if res.toExit < leakHolderTimeout && res.exit.GetReason() != v1.ExitReason_TIMEOUT_EXCEEDED {
+		t.Fatalf("the run ended by itself after %v with %v, so nothing held its stdout", res.toExit, res.exit)
+	}
+	if limit := leakHolderTimeout + 5*time.Second + 3*time.Second; res.toExit > limit {
+		t.Fatalf("the exit came after %v, past %v", res.toExit, limit)
+	}
+	t.Logf("a holder of stdout ended with %v after %v", res.exit, res.toExit)
 }
 
 // testLeakMatrix runs every row twice on one member, as a pool would, so each row also runs
@@ -163,6 +293,11 @@ func leakL1ScratchFiles(t *testing.T, s leakSandbox) {
 	leakFilesRow(t, s, s.scratch(), func(t *testing.T) {
 		mustExec(t, s.backend, s.h, "/bin/sh", "-c", "echo run > /dev/planted")
 	})
+	leakL1Clean(t, s, "")
+}
+
+func leakL1Clean(t *testing.T, s leakSandbox, _ string) {
+	t.Helper()
 	if out := mustExec(t, s.backend, s.h, "/bin/ls", "-A", "/dev"); strings.Contains(out, "planted") {
 		t.Fatalf("/dev still holds what run A planted:\n%s", out)
 	}
@@ -198,6 +333,11 @@ func leakL2BindMountFiles(t *testing.T, s leakSandbox) {
 			t.Fatalf("the planted profile did not load before the reset (%q), so this row proves nothing", got)
 		}
 	})
+	leakL2Clean(t, s, "")
+}
+
+func leakL2Clean(t *testing.T, s leakSandbox, _ string) {
+	t.Helper()
 	if got := strings.TrimSpace(mustExec(t, s.backend, s.h, "/usr/bin/python3", "-c", hooksLoaded)); got != "False False" {
 		t.Fatalf("run A's code ran in run B: usercustomize and .pth loaded = %q", got)
 	}
@@ -215,34 +355,40 @@ done
 exit 0
 `
 
+const hashVoraInit = `import hashlib; print(hashlib.sha256(open("/vora/vora-init", "rb").read()).hexdigest())`
+
 func leakL3Vora(t *testing.T, s leakSandbox) {
-	const hashInit = `import hashlib; print(hashlib.sha256(open("/vora/vora-init", "rb").read()).hexdigest())`
 	dirs := []string{"/vora"}
 	before := snapshot(t, s.backend, s.h, dirs)
-	hash := mustExec(t, s.backend, s.h, "/usr/bin/python3", "-c", hashInit)
+	hash := mustExec(t, s.backend, s.h, "/usr/bin/python3", "-c", hashVoraInit)
 	mustExec(t, s.backend, s.h, "/bin/sh", "-c", voraAttempts)
 	s.mustReset(t)
 	if got := snapshot(t, s.backend, s.h, dirs); got != before {
 		t.Fatalf("/vora differs after the reset:\n%s", lineDiff(before, got))
 	}
-	if got := mustExec(t, s.backend, s.h, "/usr/bin/python3", "-c", hashInit); got != hash {
+	leakL3Clean(t, s, hash)
+}
+
+func leakL3Clean(t *testing.T, s leakSandbox, hash string) {
+	t.Helper()
+	if got := mustExec(t, s.backend, s.h, "/usr/bin/python3", "-c", hashVoraInit); got != hash {
 		t.Fatalf("/vora/vora-init changed: %s, was %s", got, hash)
 	}
 }
 
 func leakL4Env(t *testing.T, s leakSandbox) {
-	const secret = "leak-secret-value"
-	out, _, code := execSandbox(t, s.backend, s.h, runtime.ExecRequest{
-		Command: "/bin/sh",
-		Args:    []string{"-c", "export LEAK_EXPORTED=" + secret + "; echo \"$LEAK_REQUEST $LEAK_EXPORTED\""},
-		Env:     map[string]string{"LEAK_REQUEST": secret},
-	})
-	if code != 0 || out != secret+" "+secret+"\n" {
+	out, _, code := execSandbox(t, s.backend, s.h, poolL4Plant(s))
+	if code != 0 || out != leakSecret+" "+leakSecret+"\n" {
 		t.Fatalf("run A did not hold the values (exit %d): %q", code, out)
 	}
 	s.mustReset(t)
-	out = mustExec(t, s.backend, s.h, "/bin/sh", "-c", "env; cat /proc/self/environ | tr '\\0' '\\n'; cat /proc/1/environ 2>/dev/null | tr '\\0' '\\n'; exit 0")
-	if strings.Contains(out, secret) || strings.Contains(out, "LEAK_") {
+	leakL4Clean(t, s, "")
+}
+
+func leakL4Clean(t *testing.T, s leakSandbox, _ string) {
+	t.Helper()
+	out := mustExec(t, s.backend, s.h, "/bin/sh", "-c", "env; cat /proc/self/environ | tr '\\0' '\\n'; cat /proc/1/environ 2>/dev/null | tr '\\0' '\\n'; exit 0")
+	if strings.Contains(out, leakSecret) || strings.Contains(out, "LEAK_") {
 		t.Fatalf("run B sees run A's environment:\n%s", out)
 	}
 }
@@ -316,11 +462,17 @@ func leakL5BackgroundProcesses(t *testing.T, s leakSandbox) {
 	if report.ProcessesKilled == 0 {
 		t.Errorf("report %+v, want the survivors counted", report)
 	}
-	time.Sleep(300 * time.Millisecond)
+	leakL5Clean(t, s, "")
+}
+
+// The wait is inside the run, so a survivor has time to write within it, and the next reset
+// cannot hide what it wrote.
+func leakL5Clean(t *testing.T, s leakSandbox, _ string) {
+	t.Helper()
 	if got := processes(t, s.backend, s.h); !slices.Equal(got, s.initPIDs) {
 		t.Errorf("run B sees processes %v, want %v", got, s.initPIDs)
 	}
-	if out := mustExec(t, s.backend, s.h, "/bin/sh", "-c", "ls -A /tmp"); strings.Contains(out, "beat-") {
+	if out := mustExec(t, s.backend, s.h, "/bin/sh", "-c", "/bin/sleep 0.3; ls -A /tmp"); strings.Contains(out, "beat-") {
 		t.Errorf("a survivor is still writing: /tmp holds\n%s", out)
 	}
 }

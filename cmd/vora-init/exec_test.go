@@ -222,3 +222,34 @@ func TestClientGoneKillsTheExec(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// A typo is the caller's mistake. As a runtime failure it would count against the sandbox, and
+// read differently on gVisor, where runsc exits 128 for the same mistake.
+func TestCommandThatCannotStartIsTheCommandsFailure(t *testing.T) {
+	for name, req := range map[string]*v1.ExecRequest{
+		"missing binary":  {Command: "/no-such-command", Cwd: t.TempDir()},
+		"not on the PATH": {Command: "no-such-command", Cwd: t.TempDir()},
+		"missing cwd":     {Command: "/bin/true", Cwd: "/no-such-directory"},
+		"not a program":   {Command: t.TempDir()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res := &execResult{}
+			if err := testAgent().Exec(t.Context(), req, res.send); err != nil {
+				t.Fatalf("Exec: %v", err)
+			}
+			if got := res.exit; got.GetExitCode() != 127 || got.GetReason() != v1.ExitReason_EXITED {
+				t.Fatalf("exit = %v, want the command's own exit, 127 with EXITED", got)
+			}
+		})
+	}
+}
+
+// A start the sandbox itself could not do says nothing of the command.
+func TestStartFailureOfTheSandboxStaysARuntimeFailure(t *testing.T) {
+	for _, err := range []error{syscall.EAGAIN, syscall.ENOMEM, syscall.EMFILE, errors.New("anything else")} {
+		wrapped := fmt.Errorf("fork/exec /bin/true: %w", err)
+		if got := startFailureReason(wrapped); got != v1.ExitReason_RUNTIME_FAILURE {
+			t.Errorf("%v reads as %v, want RUNTIME_FAILURE", wrapped, got)
+		}
+	}
+}

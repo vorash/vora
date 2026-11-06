@@ -235,7 +235,9 @@ func orphan(resultFile string) (err error) {
 	if err != nil {
 		return err
 	}
-	if _, err := conn.Write(shutdownCall()); err != nil {
+	// The stop can land after the agent took the connection, and its refusal can beat this
+	// write. The holder still reports the closed connection and whether this process is gone.
+	if _, err := conn.Write(shutdownCall()); err != nil && !errors.Is(err, syscall.EPIPE) {
 		return err
 	}
 	file, err := conn.(*net.UnixConn).File()

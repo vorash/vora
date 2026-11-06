@@ -23,6 +23,7 @@ install writes templates for them to `/etc/vora/*.env`
 | `VORA_IMAGE_POLICY` | `off` (default: trust every image, warn at startup) or `enforce` (digest-pinned, `cosign`-verified; [ADR 020](adr/020-image-signing.md)) |
 | `VORA_AUDIT_DSN` | PostgreSQL/Supabase audit store. Unset → local JSONL; set but unreachable → the runner refuses to start |
 | `VORA_AUDIT_RETENTION` | Duration after which audit trails are pruned. Unset keeps local trails forever ([ADR 026](adr/026-audit-retention.md)) |
+| `VORA_POOL_UNSAFE_REUSE` | `allow` lets this runner host pools that skip the reset between runs; `deny` (default) refuses them, and a persisted one does not load ([ADR 028](adr/028-warm-pools.md)) |
 | `VORA_EGRESS_MAX_CONNECTIONS` | Concurrent restricted-egress connections (default 128) |
 | `VORA_EGRESS_IDLE_TIMEOUT` | Idle timeout for egress connections (default `5m`) |
 | `VORA_EGRESS_BROKER_PORT` | Credential broker port inside the sandbox netns (default 8080) |

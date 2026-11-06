@@ -93,9 +93,9 @@ termination reasons are read from the sandbox cgroup:
 
 | Reason | Source |
 | ------ | ------ |
-| `Exited` | normal process exit |
+| `Exited` | normal process exit, or a command that doesn't exist |
 | `OOMKilled` | `memory.events` `oom_kill > 0` |
-| `PidsLimitExceeded` | `pids.events` `max > 0` |
+| `PidsLimitExceeded` | `pids.events` `max > 0`. On gVisor this counts the Sentry's host threads, and reaching the limit ends the sandbox |
 | `TimeoutExceeded` | runner deadline / TTL |
 | `PolicyViolation` | reserved for v0.3 |
 | `RuntimeFailure` | backend/agent error |

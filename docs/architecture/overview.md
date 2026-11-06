@@ -50,6 +50,7 @@ snapshots, SDKs, multi-runner scheduling, Kubernetes.
 | `workspace` | per-sandbox mutable directories and mount points |
 | `sandbox.Store` | persisted metadata and state machine |
 | `snapshot` | captured writable state and forks (ADR 023) |
+| `pool` | warm sandboxes lent one run at a time, reset between runs (ADR 028) |
 | `telemetry` | structured logs and Prometheus metrics |
 
 ## Design principles

@@ -558,13 +558,17 @@ func TestGvisorDeadSandbox(t *testing.T) {
 			t.Error("Prepare = nil on a dead sandbox")
 		}
 	})
-	// A dead sandbox says so, where a later exec used to read as the program exiting 128.
+	// A dead sandbox says so at Exec, where a later exec used to read as the program exiting
+	// 128. A pool retries the run on another member on this error.
 	t.Run("later exec", func(t *testing.T) {
 		m := mustGvisorMember(t, gvisorMemberOpts{memory: 128 << 20})
 		kill(t, m)
-		got := lastExecExit(t, m, "/bin/echo", "hi")
-		if got.Reason != runtime.ReasonRuntimeFailure {
-			t.Errorf("exec in a dead sandbox: %+v, want %s", got, runtime.ReasonRuntimeFailure)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		stream, err := m.backend.Exec(ctx, m.h, runtime.ExecRequest{Command: "/bin/echo", Args: []string{"hi"}, Cwd: "/workspace"})
+		if err == nil {
+			_ = stream.Close()
+			t.Error("Exec in a dead sandbox returned a stream")
 		}
 	})
 	t.Run("Sentry killed mid-exec", func(t *testing.T) {

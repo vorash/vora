@@ -859,7 +859,11 @@ func (s *Server) runExec(ctx context.Context, sandboxID string, backend runtime.
 			usage := stopMeter()
 			reason := usage.Reason(chunk.Exit.Reason, chunk.Exit.ExitCode)
 			s.recordExec(sandboxID, execReq, started, stdoutBytes, stderrBytes, chunk.Exit.ExitCode, reason, usage, keyID, opts)
-			s.metrics.ExecTotal.WithLabelValues("ok").Inc()
+			if reason == runtime.ReasonRuntimeFailure {
+				s.metrics.ExecFailedTotal.WithLabelValues(string(reason)).Inc()
+			} else {
+				s.metrics.ExecTotal.WithLabelValues("ok").Inc()
+			}
 			return reason, send(execExitToProto(chunk.Exit.ExitCode, reason, usage, execReq.ExecutionID))
 		}
 		if err := send(execChunkToProto(chunk)); err != nil {

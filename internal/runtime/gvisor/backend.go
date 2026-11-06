@@ -554,6 +554,10 @@ func (b *Backend) Exec(ctx context.Context, h runtime.Handle, req runtime.ExecRe
 		_ = os.RemoveAll(pidDir)
 	}()
 	go es.stream(stdout, stderr)
+	if es.refusedByStoppedSandbox() {
+		_ = es.Close()
+		return nil, fmt.Errorf("gvisor: sandbox %s is not running", hd.id)
+	}
 	return es, nil
 }
 
@@ -824,15 +828,7 @@ func (e *execStream) stream(stdout, stderr *os.File) {
 	_ = stderr.Close()
 
 	<-e.client.exited
-	code := 0
-	if err := e.waitErr; err != nil && !errors.Is(err, exec.ErrWaitDelay) {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			code = ee.ExitCode()
-		} else {
-			code = -1
-		}
-	}
+	code := e.clientExit()
 	// The client may have reported what the kill did to the command, which is not the
 	// command's own result.
 	if e.endedByContext {
@@ -852,6 +848,30 @@ func (e *execStream) stream(stdout, stderr *os.File) {
 	case <-e.done:
 	}
 	close(e.ch)
+}
+
+// refusedByStoppedSandbox waits for the client's answer and reports whether a stopped
+// sandbox refused the command, so Exec can say nothing ran before its caller tells anyone
+// the command started. The wait is bounded: a client past it still ends in an exit chunk
+// that says what happened.
+func (e *execStream) refusedByStoppedSandbox() bool {
+	ctx, cancel := context.WithTimeout(e.ctx, execAnswerWait)
+	defer cancel()
+	pid, err := e.client.answer(ctx)
+	return err == nil && pid == 0 && e.sandboxStopped(e.clientExit())
+}
+
+// clientExit is the exit code of the runsc client. Call it after client.exited closes.
+func (e *execStream) clientExit() int {
+	err := e.waitErr
+	if err == nil || errors.Is(err, exec.ErrWaitDelay) {
+		return 0
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	return -1
 }
 
 // sandboxStopped tells a sandbox that died from a program's own exit. runsc exits 128 when

@@ -198,6 +198,9 @@ All routes take `Authorization: Bearer <key>`.
 | `POST /v1/sandboxes/{id}/snapshot` | Capture writable state while it runs | sandbox |
 | `GET /v1/snapshots`, `GET`/`DELETE /v1/snapshots/{id}` | Manage snapshots | sandbox |
 | `POST /v1/snapshots/{id}/fork` | Start a new sandbox from a snapshot | sandbox |
+| `PUT`/`GET`/`DELETE /v1/pools/{name}`, `GET /v1/pools` | Declare, read, delete and list warm pools | sandbox |
+| `POST /v1/pools/{name}/run` | Run a command on a pool member (streams NDJSON) | sandbox |
+| `GET /v1/pools/{name}/sandboxes/{id}/execs`, `.../events` | A member's audit trail | sandbox |
 | `POST`/`GET /v1/keys`, `DELETE /v1/keys/{id}` | API keys | admin |
 | `POST`/`GET /v1/secrets`, `DELETE /v1/secrets/{alias}` | Brokered credentials | admin |
 | `GET /v1/runners` | Runner inventory (global admin only) | admin |
@@ -298,7 +301,11 @@ for await (const chunk of sandbox.streamExec("for i in 1 2 3; do echo step $i; s
 ```
 
 `reason` explains how the run ended: `EXITED`, `OOM_KILLED`,
-`PIDS_LIMIT_EXCEEDED`, `TIMEOUT_EXCEEDED` or `DISK_QUOTA_EXCEEDED`.
+`PIDS_LIMIT_EXCEEDED`, `TIMEOUT_EXCEEDED`, `DISK_QUOTA_EXCEEDED` or
+`RUNTIME_FAILURE`, which means the sandbox failed rather than the program: it died
+under the command, or couldn't start a process for it. A command that doesn't exist
+is the command's own failure: `EXITED`, with exit code 127 on `bwrap` and 128 on
+`gvisor`.
 
 ### What an exec used
 
@@ -312,7 +319,7 @@ exec ran:
 | `memoryPeakBytes` | memory high-water mark during the exec, including the sandbox's resident baseline (its init; on gVisor also the sentry and gofer) |
 | `memoryPeakScope` | `PEAK_SCOPE_WINDOW`: the peak covers only this exec. `PEAK_SCOPE_LIFETIME`: the kernel (before Linux 6.12) could not reset the peak, so it is the sandbox's lifetime peak. Absent: not measured |
 | `oomKills` | OOM kills during the exec |
-| `pidsLimitHits` | forks refused by the sandbox's pids limit during the exec |
+| `pidsLimitHits` | forks refused by the sandbox's pids limit during the exec. On gVisor these are the Sentry's own threads, not the guest's forks |
 
 The counters are per-exec deltas, not lifetime totals. They are measured on
 the sandbox's cgroup, so execs that run at the same time in one sandbox have
@@ -338,6 +345,113 @@ and `stats` keeps reporting memory and CPU.
 `memoryPeakBytes` in an exec record used to be the sandbox's lifetime peak at
 the moment the exec finished. It now means the peak during that exec's window,
 as `memoryPeakScope` states. Records written before this change have no scope.
+
+### Reuse sandboxes with a warm pool
+
+A pool keeps started sandboxes for one tenant and lends one per run. Between two
+runs Vora kills what the run left and restores every writable mount, and it
+destroys a sandbox whose reset it can't prove
+([ADR 028](docs/adr/028-warm-pools.md)).
+
+```bash
+# Declare it. Repeating the same declare is a no-op (200). A different spec is 409.
+curl -s -X PUT "$API/v1/pools/py" -H "$AUTH" -d '{
+  "sandbox": {
+    "image": "vora/python", "backend": "bwrap",
+    "resources": {"cpuMillis": 1000, "memoryBytes": 268435456, "pids": 64},
+    "network": {"mode": "NETWORK_NONE"}
+  },
+  "size": 2, "maxSize": 4
+}'
+
+# Run one command. timeoutSeconds is required.
+curl -sN -X POST "$API/v1/pools/py/run" -H "$AUTH" \
+  -d '{"command": "python3", "args": ["-c", "print(6*7)"], "timeoutSeconds": 30}'
+# {"run":{"poolId":"pool_…","sandboxId":"sbx_…","executionId":"exe_…","warm":true,"sandboxRun":1,"reuse":"POOL_REUSE_RESET"}}
+# {"stdout":"NDIK"}
+# {"exit":{"reason":"EXITED","usage":{…},"executionId":"exe_…"}}
+# {"runDone":{"outcome":"POOL_RESET_OK","resetMs":"2"}}
+
+# Read its state, then delete it. A 202 means runs are still finishing: repeat it.
+curl -s "$API/v1/pools/py" -H "$AUTH"
+curl -s -X DELETE "$API/v1/pools/py" -H "$AUTH"
+```
+
+The `exit` frame comes as soon as the program ends, so a client that needs only
+the result can stop there. `runDone` follows after the reset and says what
+happened to the sandbox.
+
+The spec's fields:
+
+| Field | Meaning | Default |
+| ----- | ------- | ------- |
+| `sandbox` | The template for every member. It must name a `backend` and set `resources`, must leave its id, tenant, agent and TTL empty, and `network.mode` must be `NETWORK_NONE` | |
+| `size` | Members to keep warm. `0` starts every run cold | 8 |
+| `maxSize` | Most members at once, reserved against the runner's capacity even when idle | `max(size, 1)` |
+| `maxRuns` | Runs per member before it is replaced | 100 |
+| `maxAgeSeconds` | Age limit of a member | 1800 |
+| `maxRunSeconds` | Largest `timeoutSeconds` a run may ask for | 300 |
+| `borrowTimeoutMs` | How long a run waits for a member, at most 300000 | 2000 |
+| `idleExpirySeconds` | With no run for this long, the warm target drops to 0 until the next run | 3600 |
+| `reuse` | See below | `POOL_REUSE_RESET` |
+
+`resources.pids` has a floor: 12 on `bwrap` and 64 on `gvisor`.
+
+`reuse` has two modes:
+
+- `POOL_REUSE_RESET` resets a member between runs, and destroys it unless the host
+  can prove two things: no process remains but init's, and every writable mount is
+  back to its listing from when the member was prepared. A later run can still see
+  the traces listed at the end of this section.
+- `POOL_REUSE_UNSAFE_NO_RESET` skips the reset, so a run sees what the last one
+  left. It exists as a baseline for measuring what a reset costs. It needs an
+  admin key and a runner started with `VORA_POOL_UNSAFE_REUSE=allow`.
+
+`GET /v1/pools/{name}` returns `spec`, `state` and `stats`. Counters reset when
+the runner restarts.
+
+| `stats` field | Meaning |
+| ------------- | ------- |
+| `starting`, `idle`, `busy`, `resetting`, `retiring` | Members in each state now |
+| `runsTotal`, `warmRunsTotal` | Runs, and how many found a warm member |
+| `resetsTotal`, `resetFailuresTotal` | Resets, and how many could not prove the member clean |
+| `destroyedTotal` | Members destroyed for any reason |
+| `exhaustedTotal` | Runs refused because no member came free |
+| `startFailedTotal`, `lastStartError` | Member starts that failed, and the kind of the last failure |
+| `dormant` | `idleExpirySeconds` passed with no run, so no member is kept warm |
+
+What a client sees when something goes wrong:
+
+| Event | Client sees | Member |
+| ----- | ----------- | ------ |
+| No member came free in `borrowTimeoutMs` | 429 with `Retry-After`. The program did not run | |
+| The first member's exec could not start | A normal run on another member, or 503 if the retry fails too | Destroyed |
+| The program runs past `timeoutSeconds` | `exit` with `TIMEOUT_EXCEEDED`, within about 5 s more if a process holds its output | Reset |
+| The command doesn't exist | `exit` with `EXITED`, and exit code 127 on bwrap or 128 on gVisor | Reset |
+| The program runs out of memory | bwrap: `exit` with `OOM_KILLED`. gVisor: the sandbox goes down with it, so any `exit` other than `EXITED`, or the error line below | bwrap: reset. gVisor: destroyed |
+| The sandbox dies under the program | `exit` with `RUNTIME_FAILURE`, or a last line `{"error":{"code":"run_failed",…}}` in place of `exit` | Destroyed |
+| The reset can't prove the member clean | `runDone` with `POOL_RESET_FAILED` and a `retireCause` | Destroyed |
+| The client disconnects | Nothing | Reset |
+| The pool is being deleted | 409 | |
+| The runner refused to load the pool at boot | 409, and `state` is `POOL_NOT_LOADED` with a `notLoadedReason` | None |
+| The runner lost its record of the pool | 409, and `state` is `POOL_NOT_ON_RUNNER`. A PUT creates it again and a DELETE releases its reservation | None |
+
+`notLoadedReason` is one of `backend_missing`, `backend_not_reusable`,
+`unsafe_reuse_not_granted`, `spec_refused`, `capacity` or `duplicate_name`.
+
+`GET /v1/pools/{name}/sandboxes/{id}/execs` and `.../events` read a member's audit
+trail. `run.sandboxRun` marks run boundaries in it. Every plain `/v1/sandboxes/{id}`
+route refuses a member with 409, reads included, so those two are how to read one.
+`GET /v1/sandboxes` still lists it, with its pool. Behind the API, the runner's own
+RPCs refuse what would change a member: start, exec, signal, destroy, snapshot and
+files. Its RPCs for a sandbox's record, stats, events and execs stay open.
+
+A later run on a member can still tell that an earlier one happened, through PID
+numbers, file access times and directory inode flags. A pool belongs to one tenant,
+so these stay open ([ADR 028](docs/adr/028-warm-pools.md)).
+
+The [Python](sdk/python/README.md#pools) and
+[TypeScript](sdk/typescript/README.md#pools) SDKs wrap these routes.
 
 ### Allow one API, deny everything else
 
@@ -495,12 +609,13 @@ its flag is removed:
 | Processes / signals | PID namespace | `TestPIDNamespaceIsolation`, `TestCannotSignalHost` |
 | IPC / UTS | IPC namespace, private hostname | `TestIPCNamespaceIsolation`, `TestUTSNamespaceIsolation` |
 | Privilege | unprivileged user namespace (bwrap) | `TestUnprivilegedUserNamespace` |
-| Memory / PIDs / CPU | `memory.max` (no swap), `pids.max`, `cpu.max` | `TestMemoryBombKilled`, `TestForkBombContained`, `TestSystemdUnitLimitsAndTeardown` |
+| Memory / PIDs / CPU | `memory.max` (no swap), `pids.max` (bwrap only for a fork bomb, see [Limitations](#limitations)), `cpu.max` | `TestMemoryBombKilled`, `TestForkBombContained`, `TestSystemdUnitLimitsAndTeardown` |
 | Control socket | per-sandbox bind | `TestControlSocketIsolation` |
 | Network | no interfaces by default | `TestNetworkNone` |
 | Secrets | runner credentials never injected | `TestNoSecretsLeak` |
 
-`make test-security-all` runs the matrix against both bwrap and gVisor.
+`make test-security-all` runs the matrix against both bwrap and gVisor, except
+`TestForkBombContained`, which is bwrap-only.
 
 ## Limitations
 
@@ -529,6 +644,14 @@ its flag is removed:
 - **The production system unit offers no gVisor.** It runs as a non-root `vora`
   user, and `runsc` needs root or a rootlesskit wrapper
   ([ADR 011](docs/adr/011-rootless-containerd.md)).
+- **On gVisor, `pids` doesn't limit guest processes.** It counts the Sentry's
+  host threads: 800 guest processes held `pids.current` at 38 on vora-mini. That
+  leaves `memory.max` to stop a fork bomb, which one logged run saw at a 256 MiB limit.
+  Reaching `pids` ends the whole sandbox. A limit of 26 or less can't start,
+  and 28 to 36 died under load ([ADR 028](docs/adr/028-warm-pools.md)).
+- **Warm pools are new.** Through a runner, the leak suite has passed on `bwrap` and
+  gVisor on vora-mini, and on `bwrap` in CI. CI can't run the gVisor rows. No logged
+  run has measured a pool under load.
 - **Sandboxes outlive a dead runner briefly**, then exit; orphans are cleaned
   up at the next start.
 - **The API store is in memory by default.** Set `VORA_API_DSN` for anything

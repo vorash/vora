@@ -9,7 +9,10 @@ import (
 	"os/exec"
 	goruntime "runtime"
 	"sync"
+	"syscall"
 	"time"
+
+	v1 "github.com/vorash/vora/api/proto/v1"
 )
 
 // workloadOOMScoreAdj makes every workload process the OOM killer's first
@@ -41,6 +44,19 @@ func startWorkload(cmd *exec.Cmd) (startErr, scoreErr error) {
 		return err, nil
 	}
 	return nil, raiseOOMScore(cmd.Process.Pid)
+}
+
+// startFailureReason says who a command that never started is down to. A path or a file
+// the request got wrong is the command's own failure, as gVisor reports it, and says
+// nothing of the sandbox. Anything else, such as a fork the sandbox could not do, does.
+func startFailureReason(err error) v1.ExitReason {
+	switch {
+	case errors.Is(err, exec.ErrNotFound), errors.Is(err, fs.ErrNotExist), errors.Is(err, fs.ErrPermission),
+		errors.Is(err, syscall.ENOTDIR), errors.Is(err, syscall.ENOEXEC):
+		return v1.ExitReason_EXITED
+	default:
+		return v1.ExitReason_RUNTIME_FAILURE
+	}
 }
 
 // raiseOOMScoreWait bounds the wait for a child's exec to finish. A child that stays

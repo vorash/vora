@@ -17,6 +17,9 @@ import (
 // about 9 ms.
 const pidPoll = 2 * time.Millisecond
 
+// execAnswerWait bounds how long Exec waits to learn whether a command started.
+const execAnswerWait = 2 * time.Second
+
 // execClients is what a reset must know about one sandbox's `runsc exec` clients.
 //
 // A client that has not answered is the one thing a host `runsc ps` cannot see. The Sentry

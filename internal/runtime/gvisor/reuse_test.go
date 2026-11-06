@@ -42,6 +42,7 @@ hang() {
   sleep 30 &
   echo $! >> "$FAKE/hung"
   wait
+  exit 137
 }
 sub=""
 prev=""
@@ -646,7 +647,14 @@ func TestAResetWaitsForAnExecStillStarting(t *testing.T) {
 	r := f.prepared()
 	f.restart("[1]")
 	f.write("work.answer-after", "0.3")
-	_ = f.exec("work").Close()
+	ctx, disconnect := context.WithCancel(testCtx(t))
+	defer disconnect()
+	time.AfterFunc(20*time.Millisecond, disconnect)
+	stream, err := f.b.Exec(ctx, f.hd, runtime.ExecRequest{Command: "work"})
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	_ = stream.Close()
 
 	if _, err := r.Reset(testCtx(t)); err != nil {
 		t.Fatal(err)

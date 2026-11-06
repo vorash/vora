@@ -61,7 +61,7 @@ infallible; the design minimises the trusted surface.
 | SysV/POSIX IPC abuse | IPC namespace | IPC |
 | Hostname / domain leakage | UTS namespace | UTS |
 | Privilege escalation | unprivileged user namespace; no capabilities from the host; bwrap disables nested user namespaces and seccomp rejects namespace clone flags, clone3, and x32 ABI calls | user |
-| Fork bomb | `pids.max` via cgroup | cgroup |
+| Fork bomb | bwrap: `pids.max` via cgroup. gVisor: `memory.max`, as `pids.max` counts the Sentry's host threads and not guest tasks | cgroup |
 | Memory bomb / OOM | `memory.max`, `memory.swap.max=0` | cgroup |
 | CPU monopolisation | `cpu.max` quota | cgroup |
 | Disk exhaustion | runner resource ceilings and default `DiskBytes` budget, filesystem project quota with periodic-scan fallback; per-snapshot archive cap and fork restore size bound ([ADR 015](../adr/015-disk-quota.md), [ADR 023](../adr/023-snapshot-fork.md)) | storage |

@@ -179,12 +179,15 @@ func TestNoSecretsLeak(t *testing.T) {
 	})
 }
 
-// TestForkBombContained asserts pids.max contains a fork bomb.
+// TestForkBombContained asserts pids.max contains a fork bomb, on bwrap.
 //
 // Why it matters: an unbounded fork exhausts host PIDs and can make the whole
 // machine unresponsive.
 func TestForkBombContained(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, f *fixture) {
+		if f.backend.Name() == "gvisor" {
+			t.Skip("pids.max counts the Sentry's host threads under gVisor: a sandbox can't start at 16, and guest tasks don't reach it. memory.max bounds a fork bomb there; see TestGvisorPidsLimits and TestPoolWorkloadThatEndsItsMember")
+		}
 		h := f.create("sbx_fork", limits(128, 16))
 		f.exec(h, "sh", "-c", "for i in $(seq 1 100); do sleep 2 & done; wait")
 
