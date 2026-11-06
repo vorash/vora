@@ -572,8 +572,9 @@ func TestPoolWorkloadThatEndsItsMember(t *testing.T) {
 					t.Fatalf("member %s survived this, on run %d", member, next.run.GetSandboxRun())
 				}
 				if ending.leavesProcesses && !gone {
-					if killed, _ := p.resetsOf(pool, member, 2); killed[len(killed)-1] == 0 {
-						t.Fatalf("the member stayed and its reset killed nothing, so the workload left nothing to clear (exit %v, stderr %q)", res.exit, res.stderr)
+					run := int(res.run.GetSandboxRun())
+					if killed, _ := p.resetsOf(pool, member, run); killed[run-1] == 0 {
+						t.Fatalf("the member stayed and the reset after the workload killed nothing, so it left nothing to clear (exit %v, stderr %q)", res.exit, res.stderr)
 					}
 				}
 				if gone && next.run.GetSandboxRun() != 1 {
