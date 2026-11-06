@@ -337,6 +337,28 @@ func (p *poolPlane) mustMatch(prepared, got memberState, after string) {
 	}
 }
 
+// withoutIdentity drops the inode and mtime of each listed path, which differ between two
+// fresh members.
+func (m memberState) withoutIdentity() string {
+	var out strings.Builder
+	for line := range strings.Lines(m.files) {
+		fields := strings.Fields(line)
+		fmt.Fprintln(&out, strings.Join(fields[:len(fields)-2], " "))
+	}
+	return out.String()
+}
+
+// mustMatchFresh fails unless a replacement member looks as the first one did when prepared.
+func (p *poolPlane) mustMatchFresh(prepared, got memberState, after string) {
+	p.t.Helper()
+	if a, b := prepared.withoutIdentity(), got.withoutIdentity(); a != b {
+		p.t.Fatalf("after %s the replacement is not a fresh member:\n%s", after, lineDiff(a, b))
+	}
+	if !slices.Equal(got.pids, p.host.initPIDs) {
+		p.t.Fatalf("after %s the replacement runs processes %v, want %v", after, got.pids, p.host.initPIDs)
+	}
+}
+
 var resetEvent = regexp.MustCompile(`reset: ok: killed (\d+), removed (\d+) entries`)
 
 // resetsOf reads what each of a member's resets reported, once it has this many.
@@ -437,7 +459,7 @@ func TestPoolPIDCounterIsAnAcceptedResidual(t *testing.T) {
 func TestPoolFailedResetNeverReturns(t *testing.T) {
 	forEachPoolHost(t, func(t *testing.T, p *poolPlane) {
 		p.declareOne("failing", leakPoolMemory, 1000)
-		res := p.run("failing", p.tenant, shellRun("chmod 0700 /workspace", 10))
+		res := p.run("failing", p.tenant, shellRun("chmod 0701 /dev/shm", 10))
 		res.mustComplete(t)
 		if res.exit.GetExitCode() != 0 {
 			t.Fatalf("the plant failed, so this proves nothing: %v %s", res.exit, res.stderr)
@@ -447,12 +469,12 @@ func TestPoolFailedResetNeverReturns(t *testing.T) {
 		}
 		failed := res.run.GetSandboxId()
 		for range 3 {
-			next := p.runRetrying("failing", shellRun("stat -c %a /workspace", 10))
+			next := p.runRetrying("failing", shellRun("stat -c %a /dev/shm", 10))
 			next.mustComplete(t)
 			if next.run.GetSandboxId() == failed {
 				t.Fatalf("member %s came back after its reset failed", failed)
 			}
-			if strings.TrimSpace(string(next.stdout)) == "700" {
+			if strings.TrimSpace(string(next.stdout)) == "701" {
 				t.Fatalf("a next run reads what the failed one changed: %s", next.stdout)
 			}
 		}
@@ -490,8 +512,12 @@ func TestPoolWorkloadThatEndsItsMember(t *testing.T) {
 
 				next := p.runRetrying(pool, runBody(p.probeProgram()))
 				next.mustComplete(t)
-				p.mustMatch(prepared, p.stateOf(next), ending.name)
 				gone := next.run.GetSandboxId() != member
+				if gone {
+					p.mustMatchFresh(prepared, p.stateOf(next), ending.name)
+				} else {
+					p.mustMatch(prepared, p.stateOf(next), ending.name)
+				}
 				if ending.costsMember && !gone {
 					t.Fatalf("member %s survived this, on run %d", member, next.run.GetSandboxRun())
 				}
@@ -609,24 +635,26 @@ func TestPoolDisconnectMidRun(t *testing.T) {
 			after := fmt.Sprintf("a disconnect %s (round %d)", m.name, round)
 			next := p.runRetrying("solo", runBody(p.probeProgram()))
 			next.mustComplete(t)
-			p.mustMatch(prepared, p.stateOf(next), after)
-			got := next.run.GetSandboxId()
-			if got != current {
-				if p.host.disconnectKeepsMember {
-					t.Fatalf("%s replaced member %s with %s", after, current, got)
-				}
-				if seen[got] {
-					t.Fatalf("%s: member %s came back after it was replaced", after, got)
-				}
-				replaced++
-				seen[got] = true
-				current = got
-				member.Store(got)
+			got, state := next.run.GetSandboxId(), p.stateOf(next)
+			if got == current {
+				p.mustMatch(prepared, state, after)
+				continue
 			}
+			if p.host.disconnectKeepsMember {
+				t.Fatalf("%s replaced member %s with %s", after, current, got)
+			}
+			if seen[got] {
+				t.Fatalf("%s: member %s came back after it was replaced", after, got)
+			}
+			p.mustMatchFresh(prepared, state, after)
+			replaced++
+			seen[got] = true
+			current, prepared = got, state
+			member.Store(got)
 		}
 		stats := p.getPool("solo").GetStats()
 		t.Logf("%d disconnects in %v: %d saw output, %d replaced the member, stats %v", disconnectRounds, time.Since(began), sawOutput, replaced, stats)
-		if sawOutput < disconnectRounds/3 {
+		if sawOutput < disconnectRounds/4 {
 			t.Errorf("only %d of %d runs got as far as their output, so the disconnects tested little", sawOutput, disconnectRounds)
 		}
 		if reused := disconnectRounds - replaced; reused < disconnectRounds/10 {

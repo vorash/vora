@@ -42,6 +42,7 @@ hang() {
   sleep 30 &
   echo $! >> "$FAKE/hung"
   wait
+  exit 137
 }
 sub=""
 prev=""
