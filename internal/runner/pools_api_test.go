@@ -24,6 +24,7 @@ import (
 	"github.com/vorash/vora/internal/api"
 	"github.com/vorash/vora/internal/client"
 	"github.com/vorash/vora/internal/config"
+	"github.com/vorash/vora/internal/pool"
 	"github.com/vorash/vora/internal/runtime"
 	"github.com/vorash/vora/internal/sandbox"
 	"github.com/vorash/vora/internal/ulid"
@@ -402,6 +403,11 @@ func TestAPIRunnerCapacityAndSpecRefusals(t *testing.T) {
 	if route, err := p.store.PoolRoute(context.Background(), testTenant, "two"); !errors.Is(err, api.ErrNotFound) {
 		t.Fatalf("a refused pool kept its reservation: %+v, %v", route, err)
 	}
+	patient := planeShape(0, 1)
+	patient["borrowTimeoutMs"] = "300001"
+	if got := p.call(http.MethodPut, "/v1/pools/patient", p.key, patient); got.code != http.StatusBadRequest || !strings.Contains(got.body, "borrow_timeout") {
+		t.Fatalf("borrow_timeout_ms past its cap = %+v", got)
+	}
 	if got := p.call(http.MethodPut, "/v1/pools/BAD_NAME", p.key, planeShape(0, 1)); got.code != http.StatusBadRequest {
 		t.Fatalf("a name the runner refuses = %+v", got)
 	}
@@ -508,6 +514,72 @@ func TestAPIRunnerRestartKeepsTheRoute(t *testing.T) {
 	}
 	p.waitIdle("py", 1)
 	p.run("py", 5).mustComplete(t)
+}
+
+// The runner answers every declare with the reuse it filled in, so a route never
+// stays unspecified once the runner has answered.
+func TestAPIRunnerFillsTheRoutesReuse(t *testing.T) {
+	h := newWarmHarness(t)
+	p := newAPIPlane(t, h.s)
+	p.declare("py", planeShape(0, 1))
+	route, err := p.store.PoolRoute(context.Background(), testTenant, "py")
+	if err != nil || route.Reuse != v1.PoolReuse_POOL_REUSE_RESET {
+		t.Fatalf("route = %+v, %v, want POOL_REUSE_RESET", route, err)
+	}
+}
+
+// A runner that comes back without a pool's record leaves a route the runner cannot
+// back. The API must say so, keep the reservation until the tenant acts, and let a
+// declare bring the pool back on that runner.
+func TestAPIRunnerRestartThatLostThePool(t *testing.T) {
+	h := newWarmHarness(t)
+	p := newAPIPlane(t, h.s)
+	created := p.declare("py", planeShape(1, 1))
+	p.waitIdle("py", 1)
+	if err := h.s.deletePoolRecord(pool.ID(created.GetId())); err != nil {
+		t.Fatal(err)
+	}
+	next := h.restart(nil, reusableBackend{newPoolBackend(t)})
+	p.serve(next.s)
+
+	got := p.call(http.MethodGet, "/v1/pools/py", p.key, nil)
+	if got.code != http.StatusOK || decodePlanePool(t, got.body).GetState() != v1.PoolState_POOL_NOT_ON_RUNNER {
+		t.Fatalf("get after losing the record = %+v, want 200 POOL_NOT_ON_RUNNER", got)
+	}
+	if res := p.run("py", 5); res.code != http.StatusConflict || !strings.Contains(res.body, "declare it again") {
+		t.Fatalf("run after losing the record = %d %s, want 409", res.code, res.body)
+	}
+	if route, err := p.store.PoolRoute(context.Background(), testTenant, "py"); err != nil || route.PoolID != created.GetId() {
+		t.Fatalf("reads changed the route: %+v, %v", route, err)
+	}
+	again := p.call(http.MethodPut, "/v1/pools/py", p.key, planeShape(1, 1))
+	if again.code != http.StatusOK || decodePlanePool(t, again.body).GetId() == created.GetId() {
+		t.Fatalf("redeclare = %+v, want 200 and a new id", again)
+	}
+	p.waitIdle("py", 1)
+	p.run("py", 5).mustComplete(t)
+}
+
+// Resources have no default to fill in: Parse refuses a template without them, so
+// no pool can exist that reserved nothing.
+func TestAPIRunnerRefusesATemplateWithNoResources(t *testing.T) {
+	h := newWarmHarness(t)
+	p := newAPIPlane(t, h.s)
+	for name, resources := range map[string]map[string]any{
+		"no-cpu":    {"memoryBytes": "1048576", "pids": "16"},
+		"no-memory": {"cpuMillis": "100", "pids": "16"},
+		"none":      {"pids": "16"},
+	} {
+		shape := planeShape(0, 1)
+		shape["sandbox"].(map[string]any)["resources"] = resources
+		got := p.call(http.MethodPut, "/v1/pools/"+name, p.key, shape)
+		if got.code != http.StatusBadRequest {
+			t.Fatalf("declare %s = %+v, want 400", name, got)
+		}
+		if _, err := p.store.PoolRoute(context.Background(), testTenant, name); !errors.Is(err, api.ErrNotFound) {
+			t.Fatalf("declare %s kept a route: %v", name, err)
+		}
+	}
 }
 
 func TestAPIRunnerRunStatuses(t *testing.T) {

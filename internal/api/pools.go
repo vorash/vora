@@ -9,7 +9,9 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -35,11 +37,20 @@ const (
 	// stopped reading. With 32 KiB of output in a frame, that fails only a client
 	// reading slower than about 1.5 KiB/s.
 	defaultRunWriteTimeout = 30 * time.Second
+	// defaultRunFirstFrameTimeout bounds the wait for a run's first frame, which holds
+	// a goroutine, a connection and a stream. The route does not know this pool's
+	// borrow_timeout, so it allows the largest, and two cold starts at the pool's 60 s
+	// for a start that fails and is retried on another member.
+	defaultRunFirstFrameTimeout = pool.MaxBorrowTimeout + 2*time.Minute
+	// poolListConcurrency and defaultPoolListDeadline bound a listing, which asks a
+	// runner about each pool. The deadline leaves room inside the server's 30 s
+	// WriteTimeout for the answer, and what it cuts off shows as unanswered.
+	poolListConcurrency     = 8
+	defaultPoolListDeadline = 20 * time.Second
 )
 
 var (
 	errPoolNotFound = errors.New("pool not found")
-	errRunnerGone   = errors.New("api: the pool's runner is no longer registered")
 	errRunnerDown   = errors.New("api: the pool's runner is unavailable")
 )
 
@@ -80,9 +91,6 @@ func (s *Server) canAccessPool(key APIKey, route PoolRoute) bool {
 // keepalive notices.
 func (s *Server) poolRunner(ctx context.Context, runnerID string) (RunnerClient, error) {
 	r, err := s.store.Runner(ctx, runnerID)
-	if errors.Is(err, ErrNotFound) {
-		return nil, errRunnerGone
-	}
 	if err != nil {
 		s.logger.Error("read pool runner failed", "runner_id", runnerID, "error", err)
 		return nil, errRunnerDown
@@ -121,8 +129,16 @@ func writePoolError(w http.ResponseWriter, err error) {
 	}
 }
 
-// dropPoolRoute removes a route the runner no longer backs, which releases its
-// reservation. It runs detached, as the client that got the answer may be gone.
+// writeDeclareRaced answers a declare that another request overtook. The same
+// declare again decides afresh from whatever the route says by then.
+func writeDeclareRaced(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "1")
+	writeError(w, http.StatusServiceUnavailable, "the pool changed while this declare ran; retry")
+}
+
+// dropPoolRoute removes a route, which releases its reservation. It runs detached,
+// as the client that got the answer may be gone. Reads never call it: the runner
+// also answers NotFound while a declare's create is still in flight.
 func (s *Server) dropPoolRoute(ctx context.Context, route PoolRoute, cause string) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), poolCallTimeout)
 	defer cancel()
@@ -148,10 +164,22 @@ func createRefused(err error) bool {
 }
 
 // putPool declares a pool. The route goes in first, carrying an id the API
-// minted, and the runner is asked second, so no failure can leave a pool on a
-// runner that no route points at, and racing declares meet at the insert. A
-// declare that finds a route goes to that route's runner, which is idempotent
-// by (tenant, name) and answers with the pool it has, or 409 on a different spec.
+// minted, and the runner is asked second, so racing declares meet at the insert
+// and a create whose answer is lost still has a route that can reach its pool. A
+// declare that finds a route goes to that route's runner, which is idempotent by
+// (tenant, name) and answers with the pool it has, or 409 on a different spec.
+//
+// The last write is a compare-and-set. A DELETE can release the route while the
+// create is in flight, since the runner answers NotFound until it finishes, and a
+// new declare can then place the name elsewhere. A declare that finds its route
+// gone or replaced deletes the pool it created and asks for a retry, so a late
+// loser leaves no pool that no route names. If the runner refuses that delete
+// too, the pool is logged at error level.
+//
+// A declare that gets no answer cannot do this. If a DELETE then overtakes it, a
+// pool can remain with no route: when the runner finishes a create after the
+// declare's deadline, or when a redeclare's new id was created and only the answer
+// was lost, so the route still names the old id.
 func (s *Server) putPool(w http.ResponseWriter, r *http.Request) {
 	spec := &v1.PoolSpec{}
 	if err := decodeProto(r, spec); err != nil {
@@ -178,7 +206,13 @@ func (s *Server) putPool(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "max_size is too large")
 		return
 	}
+	// The runner fills no default for these and would refuse them, but only after the
+	// route had gone in, with a placement check made at zero.
 	res := spec.GetSandbox().GetResources()
+	if res.GetCpuMillis() <= 0 || res.GetMemoryBytes() <= 0 {
+		writeError(w, http.StatusBadRequest, "sandbox.resources must set cpu_millis and memory_bytes above 0")
+		return
+	}
 
 	// Detached: a client that leaves mid-declare must not abandon a half-done create.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), poolCallTimeout)
@@ -201,6 +235,7 @@ func (s *Server) putPool(w http.ResponseWriter, r *http.Request) {
 			MaxSize:     int32(maxSize),
 			CPUMillis:   res.GetCpuMillis(),
 			MemoryBytes: res.GetMemoryBytes(),
+			Reuse:       spec.GetReuse(),
 		}
 		err = s.store.InsertPoolRoute(ctx, route)
 		switch {
@@ -209,10 +244,20 @@ func (s *Server) putPool(w http.ResponseWriter, r *http.Request) {
 			s.logger.Info("pool placed", "pool_id", route.PoolID, "runner_id", runner.ID, "reason", reason)
 		case errors.Is(err, ErrPoolRouteExists):
 			route, err = s.store.PoolRoute(ctx, spec.GetTenantId(), name)
+			if errors.Is(err, ErrNotFound) {
+				writeDeclareRaced(w)
+				return
+			}
 		}
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// Names are per tenant, so a declare can find another agent's pool. Every other
+	// route answers that with this same 404, and the runner would name the pool.
+	if !inserted && !s.canAccessPool(key, route) {
+		writeError(w, http.StatusNotFound, errPoolNotFound.Error())
 		return
 	}
 
@@ -239,13 +284,23 @@ func (s *Server) putPool(w http.ResponseWriter, r *http.Request) {
 		writePoolError(w, err)
 		return
 	}
-	// Always written: besides the runner's filled-in defaults and id, this restores
-	// the route if a read saw NotFound and dropped it while this create was in flight.
+	readPoolID := route.PoolID
 	route.PoolID = created.GetId()
 	route.MaxSize = int32(created.GetSpec().GetMaxSize())
 	route.CPUMillis = created.GetSpec().GetSandbox().GetResources().GetCpuMillis()
 	route.MemoryBytes = created.GetSpec().GetSandbox().GetResources().GetMemoryBytes()
-	if err := s.store.SetPoolRoute(ctx, route); err != nil {
+	route.Reuse = created.GetSpec().GetReuse()
+	err = s.store.SetPoolRoute(ctx, route, readPoolID)
+	if errors.Is(err, ErrPoolRouteChanged) {
+		// A pool the runner already had is not this declare's to remove: its own
+		// declare owns it, and may be about to name it.
+		if created.GetId() == mint {
+			s.deleteUnroutedPool(ctx, w, rc, route, key)
+		}
+		writeDeclareRaced(w)
+		return
+	}
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -255,6 +310,40 @@ func (s *Server) putPool(w http.ResponseWriter, r *http.Request) {
 		code = http.StatusCreated
 	}
 	writeProto(w, code, created)
+}
+
+// deleteUnroutedPool removes a pool whose declare lost its route. It gets a deadline
+// of its own, as the declare has spent part of its deadline on the create. A pool
+// left draining holds its reservation on the runner until the runner's next boot,
+// which removes draining records.
+func (s *Server) deleteUnroutedPool(ctx context.Context, w http.ResponseWriter, rc RunnerClient, route PoolRoute, key APIKey) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), poolDeleteDeadline)
+	defer cancel()
+	extendPoolDeleteWrite(w, s.logger)
+	drained, err := rc.DeletePool(ctx, &v1.DeletePoolRequest{
+		PoolId:   route.PoolID,
+		TenantId: route.TenantID,
+		Actor:    actorFromKey(key),
+		WaitMs:   poolDeleteWait.Milliseconds(),
+	})
+	if status.Code(err) == codes.NotFound {
+		return
+	}
+	if err != nil || !drained {
+		s.logger.Error("a pool no route names was not removed", "pool_id", route.PoolID, "runner_id", route.RunnerID,
+			"tenant_id", route.TenantID, "name", route.Name, "drained", drained, "error", err)
+		return
+	}
+	s.logger.Info("pool removed: its declare lost the route", "pool_id", route.PoolID, "runner_id", route.RunnerID, "tenant_id", route.TenantID, "name", route.Name)
+}
+
+// extendPoolDeleteWrite makes room for a delete's answer: the server's own
+// WriteTimeout is no longer than poolDeleteDeadline, so a drain that takes all of
+// it would otherwise lose its answer.
+func extendPoolDeleteWrite(w http.ResponseWriter, logger *slog.Logger) {
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(poolDeleteDeadline + 5*time.Second)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		logger.Warn("pool delete cannot extend its write deadline", "error", err)
+	}
 }
 
 // bindPoolIdentity forces tenant and agent from the key, as createSandbox does. A
@@ -302,6 +391,20 @@ func hidePoolRunner(key APIKey, p *v1.Pool) {
 	}
 }
 
+// routedPool is what the API knows of a pool from its route alone.
+func routedPool(route PoolRoute, state v1.PoolState) *v1.Pool {
+	return &v1.Pool{
+		Id:       route.PoolID,
+		RunnerId: route.RunnerID,
+		State:    state,
+		Spec:     &v1.PoolSpec{Name: route.Name, TenantId: route.TenantID, AgentId: route.AgentID, Reuse: route.Reuse},
+	}
+}
+
+// getPool answers 200 with POOL_NOT_ON_RUNNER when the runner has no such pool. A
+// 404 would say nothing is left to clean up, while the route still holds the
+// reservation and the name. The state is the same whether a declare is in flight
+// or the runner lost the record, and a PUT or a DELETE converges from either.
 func (s *Server) getPool(w http.ResponseWriter, r *http.Request) {
 	route, ok := s.poolRouteFor(w, r)
 	if !ok {
@@ -315,10 +418,10 @@ func (s *Server) getPool(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), poolCallTimeout)
 	defer cancel()
 	p, err := rc.GetPool(ctx, route.PoolID, route.TenantID)
+	if status.Code(err) == codes.NotFound {
+		p, err = routedPool(route, v1.PoolState_POOL_NOT_ON_RUNNER), nil
+	}
 	if err != nil {
-		if status.Code(err) == codes.NotFound {
-			_ = s.dropPoolRoute(ctx, route, "runner has no such pool")
-		}
 		writePoolError(w, err)
 		return
 	}
@@ -326,8 +429,9 @@ func (s *Server) getPool(w http.ResponseWriter, r *http.Request) {
 	writeProto(w, http.StatusOK, p)
 }
 
-// listPools answers from the routes, so a pool whose runner is down still shows,
-// with no state, and goes on showing that it holds a reservation.
+// listPools answers from the routes, so a pool whose runner is down shows with no
+// state and one its runner lost shows as POOL_NOT_ON_RUNNER: each goes on showing
+// that it holds a reservation.
 func (s *Server) listPools(w http.ResponseWriter, r *http.Request) {
 	key := principalFrom(r.Context()).key
 	tenant := key.TenantID
@@ -339,49 +443,52 @@ func (s *Server) listPools(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	out := &v1.ListPoolsResponse{}
-	for _, route := range routes {
-		if !s.canAccessPool(key, route) {
+	routes = slices.DeleteFunc(routes, func(route PoolRoute) bool { return !s.canAccessPool(key, route) })
+	out := &v1.ListPoolsResponse{Pools: make([]*v1.Pool, len(routes))}
+	ctx, cancel := context.WithTimeout(r.Context(), s.poolListDeadline)
+	defer cancel()
+	slots := make(chan struct{}, poolListConcurrency)
+	var asking sync.WaitGroup
+	for i, route := range routes {
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			out.Pools[i] = routedPool(route, v1.PoolState_POOL_STATE_UNSPECIFIED)
+			hidePoolRunner(key, out.Pools[i])
 			continue
 		}
-		p, gone := s.poolForListing(r.Context(), route)
-		if gone {
-			_ = s.dropPoolRoute(r.Context(), route, "runner has no such pool")
-			continue
-		}
-		hidePoolRunner(key, p)
-		out.Pools = append(out.Pools, p)
+		asking.Go(func() {
+			defer func() { <-slots }()
+			p := s.poolForListing(ctx, route)
+			hidePoolRunner(key, p)
+			out.Pools[i] = p
+		})
 	}
+	asking.Wait()
 	writeProto(w, http.StatusOK, out)
 }
 
-func (s *Server) poolForListing(ctx context.Context, route PoolRoute) (p *v1.Pool, gone bool) {
-	unanswered := &v1.Pool{
-		Id:       route.PoolID,
-		RunnerId: route.RunnerID,
-		Spec:     &v1.PoolSpec{Name: route.Name, TenantId: route.TenantID, AgentId: route.AgentID},
-	}
+func (s *Server) poolForListing(ctx context.Context, route PoolRoute) *v1.Pool {
 	rc, err := s.poolRunner(ctx, route.RunnerID)
 	if err != nil {
-		return unanswered, false
+		return routedPool(route, v1.PoolState_POOL_STATE_UNSPECIFIED)
 	}
 	ctx, cancel := context.WithTimeout(ctx, poolCallTimeout)
 	defer cancel()
-	p, err = rc.GetPool(ctx, route.PoolID, route.TenantID)
+	p, err := rc.GetPool(ctx, route.PoolID, route.TenantID)
 	switch {
 	case status.Code(err) == codes.NotFound:
-		return nil, true
+		return routedPool(route, v1.PoolState_POOL_NOT_ON_RUNNER)
 	case err != nil:
-		return unanswered, false
+		return routedPool(route, v1.PoolState_POOL_STATE_UNSPECIFIED)
 	}
-	return p, false
+	return p
 }
 
 // deletePool drains a pool. The route, and so the reservation, goes only once
 // the runner says the pool is gone: 202 and 503 keep it, and repeating converges.
-// A pool the runner no longer knows, or whose runner has no record left, has
-// nothing to wait for. The whole call is detached, as a client that leaves must
-// not strand a drained pool's route.
+// A pool the runner no longer knows has nothing to wait for. The whole call is
+// detached, as a client that leaves must not strand a drained pool's route.
 func (s *Server) deletePool(w http.ResponseWriter, r *http.Request) {
 	route, ok := s.poolRouteFor(w, r)
 	if !ok {
@@ -389,34 +496,25 @@ func (s *Server) deletePool(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), poolDeleteDeadline)
 	defer cancel()
-	// The server's own WriteTimeout is no longer than the deadline above, so a drain
-	// that takes all of it would otherwise lose its answer.
-	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(poolDeleteDeadline + 5*time.Second)); err != nil && !errors.Is(err, http.ErrNotSupported) {
-		s.logger.Warn("pool delete cannot extend its write deadline", "error", err)
-	}
+	extendPoolDeleteWrite(w, s.logger)
 
-	drained := false
 	rc, err := s.poolRunner(ctx, route.RunnerID)
-	switch {
-	case errors.Is(err, errRunnerGone):
-		drained = true
-	case err != nil:
+	if err != nil {
 		writeRunnerDown(w)
 		return
-	default:
-		drained, err = rc.DeletePool(ctx, &v1.DeletePoolRequest{
-			PoolId:   route.PoolID,
-			TenantId: route.TenantID,
-			Actor:    actorFromKey(principalFrom(r.Context()).key),
-			WaitMs:   poolDeleteWait.Milliseconds(),
-		})
-		if status.Code(err) == codes.NotFound {
-			drained, err = true, nil
-		}
-		if err != nil {
-			writePoolError(w, err)
-			return
-		}
+	}
+	drained, err := rc.DeletePool(ctx, &v1.DeletePoolRequest{
+		PoolId:   route.PoolID,
+		TenantId: route.TenantID,
+		Actor:    actorFromKey(principalFrom(r.Context()).key),
+		WaitMs:   poolDeleteWait.Milliseconds(),
+	})
+	if status.Code(err) == codes.NotFound {
+		drained, err = true, nil
+	}
+	if err != nil {
+		writePoolError(w, err)
+		return
 	}
 	if !drained {
 		w.WriteHeader(http.StatusAccepted)
@@ -468,7 +566,9 @@ func (s *Server) runPool(w http.ResponseWriter, r *http.Request) {
 	})
 	var first *v1.RunChunk
 	if err == nil {
+		firstFrame := time.AfterFunc(s.runFirstFrameTimeout, cancel)
 		first, err = stream.Recv()
+		firstFrame.Stop()
 	}
 	if err != nil {
 		if r.Context().Err() != nil {
@@ -476,8 +576,14 @@ func (s *Server) runPool(w http.ResponseWriter, r *http.Request) {
 		}
 		// The wait for the first frame may have outlasted the server's WriteTimeout.
 		out.extendDeadline()
-		if status.Code(err) == codes.NotFound {
-			s.dropRouteIfGone(ctx, rc, route)
+		if ctx.Err() != nil {
+			s.logger.Warn("pool run gave up waiting for its first frame", "pool_id", route.PoolID, "runner_id", route.RunnerID)
+			writePoolError(w, status.Error(codes.DeadlineExceeded, "no first frame"))
+			return
+		}
+		if status.Code(err) == codes.NotFound && s.poolIsGone(ctx, rc, route) {
+			writeError(w, http.StatusConflict, "the pool's runner has no record of it; declare it again, or delete it to release its reservation")
+			return
 		}
 		writePoolError(w, err)
 		return
@@ -514,14 +620,13 @@ func (s *Server) runPool(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// dropRouteIfGone asks before dropping: a NotFound out of a run could come from
-// inside it, and only GetPool's says the pool itself is gone.
-func (s *Server) dropRouteIfGone(ctx context.Context, rc RunnerClient, route PoolRoute) {
+// poolIsGone asks the runner: a NotFound out of a run could come from inside it,
+// and only GetPool's says the pool itself is gone.
+func (s *Server) poolIsGone(ctx context.Context, rc RunnerClient, route PoolRoute) bool {
 	ctx, cancel := context.WithTimeout(ctx, poolCallTimeout)
 	defer cancel()
-	if _, err := rc.GetPool(ctx, route.PoolID, route.TenantID); status.Code(err) == codes.NotFound {
-		_ = s.dropPoolRoute(ctx, route, "runner has no such pool")
-	}
+	_, err := rc.GetPool(ctx, route.PoolID, route.TenantID)
+	return status.Code(err) == codes.NotFound
 }
 
 // runErrorLine is the frame for a run that fails after its status line went out.

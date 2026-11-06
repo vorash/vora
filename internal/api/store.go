@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"time"
+
+	v1 "github.com/vorash/vora/api/proto/v1"
 )
 
 // Scopes gate API access.
@@ -112,10 +114,10 @@ type SnapshotRoute struct {
 
 // PoolRoute is the API's record of a pool: which runner holds it, who may use
 // it, and what it reserves. It is written before the runner is asked for the
-// pool and removed only once the runner says the pool is gone, so a pool the
-// runner may hold always has a route, and capacity is reserved for as long as
-// the route exists: MaxSize members of CPUMillis and MemoryBytes each. Members
-// get no SandboxRoute, so a runner replacing them never moves these books.
+// pool and removed only once the runner says the pool is gone or refuses to make
+// it, and capacity is reserved for as long as the route exists: MaxSize members of
+// CPUMillis and MemoryBytes each. Members get no SandboxRoute, so a runner replacing
+// them never moves these books.
 type PoolRoute struct {
 	TenantID    string `json:"tenant_id"`
 	Name        string `json:"name"`
@@ -125,6 +127,10 @@ type PoolRoute struct {
 	MaxSize     int32  `json:"max_size"`
 	CPUMillis   int64  `json:"cpu_millis"`
 	MemoryBytes int64  `json:"memory_bytes"`
+	// Reuse is kept so a pool whose runner cannot answer still says whether it resets
+	// its members. Unspecified on a route written before this field, or while the
+	// runner has yet to answer a declare that named no reuse.
+	Reuse v1.PoolReuse `json:"reuse,omitempty"`
 }
 
 // Store persists control-plane state.
@@ -151,8 +157,10 @@ type Store interface {
 
 	// InsertPoolRoute fails with ErrPoolRouteExists when (tenant, name) is taken.
 	InsertPoolRoute(ctx context.Context, route PoolRoute) error
-	// SetPoolRoute writes a route whether or not (tenant, name) exists.
-	SetPoolRoute(ctx context.Context, route PoolRoute) error
+	// SetPoolRoute rewrites a route only while it names expectPoolID or already
+	// names route.PoolID, and otherwise fails with ErrPoolRouteChanged, including
+	// when the route is gone. Two declares answered with one pool both succeed.
+	SetPoolRoute(ctx context.Context, route PoolRoute, expectPoolID string) error
 	PoolRoute(ctx context.Context, tenant, name string) (PoolRoute, error)
 	// ListPoolRoutes lists one tenant's routes, or every route for an empty
 	// tenant, sorted by tenant and name.

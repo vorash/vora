@@ -84,6 +84,12 @@ const (
 	// boot: it has no members and no reservation, runs are FAILED_PRECONDITION, and
 	// a boot that can honour it loads it again. not_loaded_reason says why.
 	PoolState_POOL_NOT_LOADED PoolState = 3
+	// Set by the API, never by a runner. A pool route exists, so its reservation is
+	// held and its name is taken, but the runner answered that it has no such pool:
+	// a declare is still in flight, or the runner lost the record. It does not come
+	// back on its own. A PUT creates the pool again under a new id, and a DELETE
+	// releases the reservation.
+	PoolState_POOL_NOT_ON_RUNNER PoolState = 4
 )
 
 // Enum value maps for PoolState.
@@ -93,12 +99,14 @@ var (
 		1: "POOL_ACTIVE",
 		2: "POOL_DRAINING",
 		3: "POOL_NOT_LOADED",
+		4: "POOL_NOT_ON_RUNNER",
 	}
 	PoolState_value = map[string]int32{
 		"POOL_STATE_UNSPECIFIED": 0,
 		"POOL_ACTIVE":            1,
 		"POOL_DRAINING":          2,
 		"POOL_NOT_LOADED":        3,
+		"POOL_NOT_ON_RUNNER":     4,
 	}
 )
 
@@ -201,7 +209,7 @@ type PoolSpec struct {
 	MaxRuns           *uint32      `protobuf:"varint,7,opt,name=max_runs,json=maxRuns,proto3,oneof" json:"max_runs,omitempty"`                                  // runs per member before it is replaced; default 100
 	MaxAgeSeconds     *int64       `protobuf:"varint,8,opt,name=max_age_seconds,json=maxAgeSeconds,proto3,oneof" json:"max_age_seconds,omitempty"`              // member age limit; default 1800
 	MaxRunSeconds     *int64       `protobuf:"varint,9,opt,name=max_run_seconds,json=maxRunSeconds,proto3,oneof" json:"max_run_seconds,omitempty"`              // cap on a run's timeout_seconds; default 300
-	BorrowTimeoutMs   *int64       `protobuf:"varint,10,opt,name=borrow_timeout_ms,json=borrowTimeoutMs,proto3,oneof" json:"borrow_timeout_ms,omitempty"`       // wait for an idle member; default 2000
+	BorrowTimeoutMs   *int64       `protobuf:"varint,10,opt,name=borrow_timeout_ms,json=borrowTimeoutMs,proto3,oneof" json:"borrow_timeout_ms,omitempty"`       // wait for an idle member; default 2000, at most 300000
 	IdleExpirySeconds *int64       `protobuf:"varint,11,opt,name=idle_expiry_seconds,json=idleExpirySeconds,proto3,oneof" json:"idle_expiry_seconds,omitempty"` // no run for this long drains to size 0; default 3600
 	Reuse             PoolReuse    `protobuf:"varint,12,opt,name=reuse,proto3,enum=vora.v1.PoolReuse" json:"reuse,omitempty"`
 	unknownFields     protoimpl.UnknownFields
@@ -1311,12 +1319,13 @@ const file_api_proto_v1_pool_proto_rawDesc = "" +
 	"\tPoolReuse\x12\x1a\n" +
 	"\x16POOL_REUSE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10POOL_REUSE_RESET\x10\x01\x12\x1e\n" +
-	"\x1aPOOL_REUSE_UNSAFE_NO_RESET\x10\x02*`\n" +
+	"\x1aPOOL_REUSE_UNSAFE_NO_RESET\x10\x02*x\n" +
 	"\tPoolState\x12\x1a\n" +
 	"\x16POOL_STATE_UNSPECIFIED\x10\x00\x12\x0f\n" +
 	"\vPOOL_ACTIVE\x10\x01\x12\x11\n" +
 	"\rPOOL_DRAINING\x10\x02\x12\x13\n" +
-	"\x0fPOOL_NOT_LOADED\x10\x03*\x88\x01\n" +
+	"\x0fPOOL_NOT_LOADED\x10\x03\x12\x16\n" +
+	"\x12POOL_NOT_ON_RUNNER\x10\x04*\x88\x01\n" +
 	"\x10PoolResetOutcome\x12\x1a\n" +
 	"\x16POOL_RESET_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rPOOL_RESET_OK\x10\x01\x12\x15\n" +

@@ -95,6 +95,12 @@ const (
 // Limits.MaxTTL.
 const maxDuration = 30 * 24 * time.Hour
 
+// MaxBorrowTimeout caps a run's wait for a member. Each waiting run holds a stream
+// on the runner and a goroutine and a connection on vora-api, so a tenant must not
+// choose to hold them for days. Five minutes lets a run queue behind one run of the
+// default max_run, and vora-api bounds its wait for a run's first frame from it.
+const MaxBorrowTimeout = defaultMaxRun
+
 // What a zero cap in Limits means. The resource and TTL values are the ones
 // the runner's enforceResourceLimits falls back to, and a runner test holds
 // them equal. defaultMaxPoolSize is VORA_MAX_SANDBOXES' default.
@@ -244,16 +250,16 @@ func Parse(raw RawSpec, limits Limits) (Spec, error) {
 		return Spec{}, fmt.Errorf("%w: max_runs must be >= 1", ErrInvalidSpec)
 	}
 	for _, d := range []struct {
-		name       string
-		value, min time.Duration
+		name            string
+		value, min, max time.Duration
 	}{
-		{"max_age", s.maxAge, minMaxAge},
-		{"max_run", s.maxRun, minMaxRun},
-		{"borrow_timeout", s.borrowTimeout, minBorrowTimeout},
-		{"idle_expiry", s.idleExpiry, minIdleExpiry},
+		{"max_age", s.maxAge, minMaxAge, maxDuration},
+		{"max_run", s.maxRun, minMaxRun, maxDuration},
+		{"borrow_timeout", s.borrowTimeout, minBorrowTimeout, MaxBorrowTimeout},
+		{"idle_expiry", s.idleExpiry, minIdleExpiry, maxDuration},
 	} {
-		if d.value < d.min || d.value > maxDuration {
-			return Spec{}, fmt.Errorf("%w: %s must be between %s and %s", ErrInvalidSpec, d.name, d.min, maxDuration)
+		if d.value < d.min || d.value > d.max {
+			return Spec{}, fmt.Errorf("%w: %s must be between %s and %s", ErrInvalidSpec, d.name, d.min, d.max)
 		}
 	}
 	if s.MemberTTL() > limits.MaxTTL {

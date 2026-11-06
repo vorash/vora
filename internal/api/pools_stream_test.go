@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,7 @@ import (
 
 	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/client"
+	"github.com/vorash/vora/internal/pool"
 )
 
 // streamRunner is a runner over real gRPC, so these tests see the real client's
@@ -99,6 +101,44 @@ func frame(kind string) *v1.RunChunk {
 		return &v1.RunChunk{Payload: &v1.RunChunk_Exit{Exit: &v1.ExecExit{ExitCode: 7}}}
 	default:
 		return &v1.RunChunk{Payload: &v1.RunChunk_RunDone{RunDone: &v1.PoolRunDone{Outcome: v1.PoolResetOutcome_POOL_RESET_OK}}}
+	}
+}
+
+// A tenant's borrow_timeout sets how long a run may queue, and every queued run
+// holds a goroutine, a connection and a stream here. The route has its own ceiling
+// on that, answers something a client can retry, and gives the runner its stream back.
+func TestRunWithNoFirstFrameIsCutOffAtTheCeiling(t *testing.T) {
+	released := make(chan struct{})
+	f := newStreamFixture(t, &streamRunner{run: func(_ *v1.RunInPoolRequest, stream grpc.ServerStreamingServer[v1.RunChunk]) error {
+		<-stream.Context().Done()
+		close(released)
+		return stream.Context().Err()
+	}}, time.Minute)
+	f.s.runFirstFrameTimeout = 50 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	resp, err := http.DefaultClient.Do(runRequest(ctx, f))
+	if err != nil {
+		t.Fatalf("run: %v, want an answer at the ceiling", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusGatewayTimeout || resp.Header.Get("Retry-After") == "" {
+		t.Fatalf("run = %d %s, Retry-After %q, want 504 with Retry-After", resp.StatusCode, body, resp.Header.Get("Retry-After"))
+	}
+	select {
+	case <-released:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the runner's stream was not cancelled")
+	}
+}
+
+// The ceiling must never cut off a wait the spec allows: the longest borrow_timeout,
+// then a cold start at the pool's default of 60 s.
+func TestFirstFrameCeilingCoversTheLongestAllowedWait(t *testing.T) {
+	if got, least := New(Options{Store: NewMemStore()}).runFirstFrameTimeout, pool.MaxBorrowTimeout+time.Minute; got <= least {
+		t.Fatalf("first frame ceiling %s, want above %s", got, least)
 	}
 }
 

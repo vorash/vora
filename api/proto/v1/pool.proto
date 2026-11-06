@@ -30,7 +30,7 @@ message PoolSpec {
   optional uint32 max_runs = 7;          // runs per member before it is replaced; default 100
   optional int64 max_age_seconds = 8;    // member age limit; default 1800
   optional int64 max_run_seconds = 9;    // cap on a run's timeout_seconds; default 300
-  optional int64 borrow_timeout_ms = 10; // wait for an idle member; default 2000
+  optional int64 borrow_timeout_ms = 10; // wait for an idle member; default 2000, at most 300000
   optional int64 idle_expiry_seconds = 11; // no run for this long drains to size 0; default 3600
   PoolReuse reuse = 12;
 }
@@ -65,6 +65,12 @@ enum PoolState {
   // boot: it has no members and no reservation, runs are FAILED_PRECONDITION, and
   // a boot that can honour it loads it again. not_loaded_reason says why.
   POOL_NOT_LOADED = 3;
+  // Set by the API, never by a runner. A pool route exists, so its reservation is
+  // held and its name is taken, but the runner answered that it has no such pool:
+  // a declare is still in flight, or the runner lost the record. It does not come
+  // back on its own. A PUT creates the pool again under a new id, and a DELETE
+  // releases the reservation.
+  POOL_NOT_ON_RUNNER = 4;
 }
 
 message Pool {
