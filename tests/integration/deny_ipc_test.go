@@ -157,7 +157,8 @@ func (s ipcSandbox) reset(t *testing.T, manifest []byte) {
 	}
 }
 
-func (s ipcSandbox) probe(t *testing.T, mode string) map[string]int {
+// ipcSyscallNumbers is ipcProbe's first argument.
+func ipcSyscallNumbers(t *testing.T) string {
 	t.Helper()
 	numbers, err := json.Marshal(map[string]int{
 		"shmget": unix.SYS_SHMGET, "semget": unix.SYS_SEMGET, "msgget": unix.SYS_MSGGET,
@@ -169,7 +170,12 @@ func (s ipcSandbox) probe(t *testing.T, mode string) map[string]int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := mustExec(t, s.backend, s.h, "/usr/bin/python3", "-c", ipcProbe, string(numbers), mode, ipcProbe)
+	return string(numbers)
+}
+
+func (s ipcSandbox) probe(t *testing.T, mode string) map[string]int {
+	t.Helper()
+	out := mustExec(t, s.backend, s.h, "/usr/bin/python3", "-c", ipcProbe, ipcSyscallNumbers(t), mode, ipcProbe)
 	var got map[string]int
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
 		t.Fatalf("probe %s printed %q: %v", mode, out, err)
@@ -189,19 +195,21 @@ func wantProbe(t *testing.T, got, want map[string]int) {
 	}
 }
 
+// ipcDenied is what ipcProbe's "calls" mode prints under the filter. Every create call is
+// denied, so nothing can exist for the others to act on.
+var ipcDenied = map[string]int{
+	"shmget": int(unix.EPERM), "semget": int(unix.EPERM), "msgget": int(unix.EPERM),
+	"mq_open": int(unix.EPERM), "mq_unlink": int(unix.EPERM), "mq_timedsend": int(unix.EPERM),
+	"mq_timedreceive": int(unix.EPERM), "mq_notify": int(unix.EPERM), "mq_getsetattr": int(unix.EPERM),
+	"shmat": int(unix.EINVAL), "shmctl": int(unix.EINVAL), "semop": int(unix.EINVAL), "semctl": int(unix.EINVAL),
+	"msgsnd": int(unix.EINVAL), "msgrcv": int(unix.EINVAL), "msgctl": int(unix.EINVAL),
+}
+
 // testIPCDenied is what a sandbox that will be reset must guarantee on either backend.
 func testIPCDenied(t *testing.T, s ipcSandbox) {
-	eperm, einval := int(unix.EPERM), int(unix.EINVAL)
-	// Every create call is denied, so nothing can exist for the others to act on.
-	denied := map[string]int{
-		"shmget": eperm, "semget": eperm, "msgget": eperm,
-		"mq_open": eperm, "mq_unlink": eperm, "mq_timedsend": eperm,
-		"mq_timedreceive": eperm, "mq_notify": eperm, "mq_getsetattr": eperm,
-		"shmat": einval, "shmctl": einval, "semop": einval, "semctl": einval,
-		"msgsnd": einval, "msgrcv": einval, "msgctl": einval,
-	}
-	wantProbe(t, s.probe(t, "calls"), denied)
-	wantProbe(t, s.probe(t, "child"), denied)
+	eperm := int(unix.EPERM)
+	wantProbe(t, s.probe(t, "calls"), ipcDenied)
+	wantProbe(t, s.probe(t, "child"), ipcDenied)
 
 	// A normal concurrent program must not notice.
 	out := mustExec(t, s.backend, s.h, "/usr/bin/python3", "-c", ordinaryPython)
@@ -215,7 +223,7 @@ func testIPCDenied(t *testing.T, s ipcSandbox) {
 	wantProbe(t, s.probe(t, "plant"), map[string]int{"shm": eperm, "sem": eperm, "msg": eperm, "mq": eperm})
 	s.reset(t, manifest)
 	wantProbe(t, s.probe(t, "find"), map[string]int{"shm": 0, "sem": 0, "msg": 0, "mq": eperm})
-	wantProbe(t, s.probe(t, "calls"), denied)
+	wantProbe(t, s.probe(t, "calls"), ipcDenied)
 }
 
 // testIPCAllowed is an ordinary sandbox, which must keep working as it did, and also the

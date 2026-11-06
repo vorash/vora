@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/pool"
 	"github.com/vorash/vora/internal/runtime"
 )
@@ -78,6 +79,8 @@ type leakPoolRow struct {
 	// runA plants, and prints whatever took needs to see that it did.
 	runA func(s leakSandbox) runtime.ExecRequest
 	took func(t *testing.T, res runResult)
+	// endsAtTimeout is a run A that never exits by itself, so took alone judges how it ended.
+	endsAtTimeout bool
 	// killed and removed say what the reset after run A must report having done.
 	killed, removed bool
 	// clean is what run B checks, given what run A printed. Every row also compares the
@@ -92,8 +95,8 @@ var leakRows = []leakRow{
 	{"L3_vora", leakL3Vora, leakPoolRow{runA: poolL3Plant, clean: leakL3Clean}},
 	{"L4_env", leakL4Env, leakPoolRow{runA: poolL4Plant, took: tookOutput(leakSecret + " " + leakSecret), clean: leakL4Clean}},
 	{"L5_background_processes", leakL5BackgroundProcesses, leakPoolRow{runA: poolL5Plant, took: tookOutput("all-beating"), killed: true, removed: true, clean: leakL5Clean}},
-	{"L6_holder_of_stdout", leakL6HolderOfStdout, leakPoolRow{runA: poolHolder(holdStdout), took: tookHolder}},
-	{"L6_holder_of_stdout_past_a_timeout", leakL6HolderPastATimeout, leakPoolRow{runA: poolHolder("setsid " + holdStdout), took: tookHolder}},
+	{"L6_holder_of_stdout", leakL6HolderOfStdout, leakPoolRow{runA: poolHolder(holdStdout), took: tookHolder, endsAtTimeout: true}},
+	{"L6_holder_of_stdout_past_a_timeout", leakL6HolderPastATimeout, leakPoolRow{runA: poolHolder("setsid " + holdStdout), took: tookHolder, endsAtTimeout: true, killed: true}},
 }
 
 // leakProgram runs whole programs one after another in one exec, and stops at the first
@@ -183,12 +186,16 @@ func poolHolder(script string) func(leakSandbox) runtime.ExecRequest {
 	}
 }
 
-// tookHolder checks that a holder did not stretch the run past its timeout and the runner's
-// grace on top of it, with a margin for a loaded host.
+// tookHolder checks that something held the run's stdout until the timeout, and that it did
+// not stretch the run past that timeout and the runner's grace on top of it, with a margin for
+// a loaded host.
 func tookHolder(t *testing.T, res runResult) {
 	t.Helper()
 	if !strings.Contains(string(res.stdout), "started") {
 		t.Fatalf("stdout %q, want the output from before the timeout", res.stdout)
+	}
+	if res.toExit < leakHolderTimeout && res.exit.GetReason() != v1.ExitReason_TIMEOUT_EXCEEDED {
+		t.Fatalf("the run ended by itself after %v with %v, so nothing held its stdout", res.toExit, res.exit)
 	}
 	if limit := leakHolderTimeout + 5*time.Second + 3*time.Second; res.toExit > limit {
 		t.Fatalf("the exit came after %v, past %v", res.toExit, limit)
