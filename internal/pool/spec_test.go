@@ -95,6 +95,7 @@ func TestParseRejects(t *testing.T) {
 		{"max_age so large the ttl would overflow", func(r *RawSpec) { r.MaxAge = huge }, Limits{MaxTTL: time.Hour, Reusable: testLimits.Reusable}, ErrInvalidSpec},
 		{"max_run so large the ttl would overflow", func(r *RawSpec) { r.MaxRun = huge - time.Minute }, Limits{MaxTTL: time.Hour, Reusable: testLimits.Reusable}, ErrInvalidSpec},
 		{"borrow_timeout above the ceiling", func(r *RawSpec) { r.BorrowTimeout = huge }, testLimits, ErrInvalidSpec},
+		{"borrow_timeout just above its cap", func(r *RawSpec) { r.BorrowTimeout = 5*time.Minute + time.Millisecond }, testLimits, ErrInvalidSpec},
 		{"idle_expiry above the ceiling", func(r *RawSpec) { r.IdleExpiry = huge }, testLimits, ErrInvalidSpec},
 		{"negative max_age", func(r *RawSpec) { r.MaxAge = -time.Hour }, testLimits, ErrInvalidSpec},
 		{"negative max_run", func(r *RawSpec) { r.MaxRun = -time.Hour }, testLimits, ErrInvalidSpec},
@@ -144,7 +145,7 @@ func TestParseAcceptsTheBoundaries(t *testing.T) {
 			r.MaxAge, r.MaxRun, r.BorrowTimeout, r.IdleExpiry = minMaxAge, minMaxRun, minBorrowTimeout, minIdleExpiry
 		}, testLimits},
 		{"durations at the ceiling", func(r *RawSpec) {
-			r.MaxAge, r.MaxRun, r.BorrowTimeout, r.IdleExpiry = maxDuration, maxDuration, maxDuration, maxDuration
+			r.MaxAge, r.MaxRun, r.BorrowTimeout, r.IdleExpiry = maxDuration, maxDuration, 5*time.Minute, maxDuration
 		}, Limits{MaxTTL: 2*maxDuration + time.Minute, Reusable: yes}},
 		{"member ttl at the cap", nil, Limits{MaxTTL: 36 * time.Minute, Reusable: yes}},
 		{"a backend the runner has", nil, Limits{Reusable: yes, HasBackend: yes}},

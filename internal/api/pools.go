@@ -35,6 +35,11 @@ const (
 	// stopped reading. With 32 KiB of output in a frame, that fails only a client
 	// reading slower than about 1.5 KiB/s.
 	defaultRunWriteTimeout = 30 * time.Second
+	// defaultRunFirstFrameTimeout bounds the wait for a run's first frame, which holds
+	// a goroutine, a connection and a stream. The route does not know this pool's
+	// borrow_timeout, so it allows the largest, and two cold starts at the pool's 60 s
+	// for a start that fails and is retried on another member.
+	defaultRunFirstFrameTimeout = pool.MaxBorrowTimeout + 2*time.Minute
 )
 
 var (
@@ -534,7 +539,9 @@ func (s *Server) runPool(w http.ResponseWriter, r *http.Request) {
 	})
 	var first *v1.RunChunk
 	if err == nil {
+		firstFrame := time.AfterFunc(s.runFirstFrameTimeout, cancel)
 		first, err = stream.Recv()
+		firstFrame.Stop()
 	}
 	if err != nil {
 		if r.Context().Err() != nil {
@@ -542,6 +549,11 @@ func (s *Server) runPool(w http.ResponseWriter, r *http.Request) {
 		}
 		// The wait for the first frame may have outlasted the server's WriteTimeout.
 		out.extendDeadline()
+		if ctx.Err() != nil {
+			s.logger.Warn("pool run gave up waiting for its first frame", "pool_id", route.PoolID, "runner_id", route.RunnerID)
+			writePoolError(w, status.Error(codes.DeadlineExceeded, "no first frame"))
+			return
+		}
 		if status.Code(err) == codes.NotFound && s.poolIsGone(ctx, rc, route) {
 			writeError(w, http.StatusConflict, "the pool's runner has no record of it; declare it again, or delete it to release its reservation")
 			return

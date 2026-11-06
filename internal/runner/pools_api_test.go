@@ -403,6 +403,11 @@ func TestAPIRunnerCapacityAndSpecRefusals(t *testing.T) {
 	if route, err := p.store.PoolRoute(context.Background(), testTenant, "two"); !errors.Is(err, api.ErrNotFound) {
 		t.Fatalf("a refused pool kept its reservation: %+v, %v", route, err)
 	}
+	patient := planeShape(0, 1)
+	patient["borrowTimeoutMs"] = "300001"
+	if got := p.call(http.MethodPut, "/v1/pools/patient", p.key, patient); got.code != http.StatusBadRequest || !strings.Contains(got.body, "borrow_timeout") {
+		t.Fatalf("borrow_timeout_ms past its cap = %+v", got)
+	}
 	if got := p.call(http.MethodPut, "/v1/pools/BAD_NAME", p.key, planeShape(0, 1)); got.code != http.StatusBadRequest {
 		t.Fatalf("a name the runner refuses = %+v", got)
 	}

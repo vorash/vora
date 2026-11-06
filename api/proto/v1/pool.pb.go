@@ -209,7 +209,7 @@ type PoolSpec struct {
 	MaxRuns           *uint32      `protobuf:"varint,7,opt,name=max_runs,json=maxRuns,proto3,oneof" json:"max_runs,omitempty"`                                  // runs per member before it is replaced; default 100
 	MaxAgeSeconds     *int64       `protobuf:"varint,8,opt,name=max_age_seconds,json=maxAgeSeconds,proto3,oneof" json:"max_age_seconds,omitempty"`              // member age limit; default 1800
 	MaxRunSeconds     *int64       `protobuf:"varint,9,opt,name=max_run_seconds,json=maxRunSeconds,proto3,oneof" json:"max_run_seconds,omitempty"`              // cap on a run's timeout_seconds; default 300
-	BorrowTimeoutMs   *int64       `protobuf:"varint,10,opt,name=borrow_timeout_ms,json=borrowTimeoutMs,proto3,oneof" json:"borrow_timeout_ms,omitempty"`       // wait for an idle member; default 2000
+	BorrowTimeoutMs   *int64       `protobuf:"varint,10,opt,name=borrow_timeout_ms,json=borrowTimeoutMs,proto3,oneof" json:"borrow_timeout_ms,omitempty"`       // wait for an idle member; default 2000, at most 300000
 	IdleExpirySeconds *int64       `protobuf:"varint,11,opt,name=idle_expiry_seconds,json=idleExpirySeconds,proto3,oneof" json:"idle_expiry_seconds,omitempty"` // no run for this long drains to size 0; default 3600
 	Reuse             PoolReuse    `protobuf:"varint,12,opt,name=reuse,proto3,enum=vora.v1.PoolReuse" json:"reuse,omitempty"`
 	unknownFields     protoimpl.UnknownFields
