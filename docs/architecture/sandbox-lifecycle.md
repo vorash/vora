@@ -1,6 +1,6 @@
 # Sandbox lifecycle
 
-Status: draft · Applies to: v0.2
+Status: draft · Written for v0.2 and updated since. Where this document and the code differ, the code is right.
 
 ## States
 
@@ -53,7 +53,7 @@ Every transition appends a record to `logs/events.jsonl`:
 ├── config.json          # spec, state, timestamps, limits, runner_id
 ├── workspace/           # rw, bind-mounted /workspace
 ├── home/                # rw, bind-mounted /root
-├── ipc/                 # bind-mounted /run/vora (control.sock)
+├── ipc/                 # bind-mounted /vora (control.sock)
 └── logs/
     ├── events.jsonl
     └── exec/<exe_id>.json
@@ -64,10 +64,11 @@ change is observable. The store is the source of truth across runner restarts.
 
 ## Exec model
 
-A sandbox is long-lived and holds a `vora-init` process as PID 1. Exec goes
+A sandbox is long-lived and holds a `vora-init` process: PID 2 under bwrap, which
+stays PID 1, and PID 1 under gVisor. Exec goes
 through an in-sandbox agent rather than re-launching Bubblewrap:
 
-1. The runner binds `<sandbox>/ipc` to `/run/vora` inside the sandbox.
+1. The runner binds `<sandbox>/ipc` to `/vora` inside the sandbox.
 2. `vora-init` creates `control.sock` and serves `AgentService`
    (`Ping`, `Exec`, `Signal`, `Shutdown`).
 3. The runner dials the socket (AF_UNIX filesystem sockets cross network
@@ -97,7 +98,7 @@ termination reasons are read from the sandbox cgroup:
 | `OOMKilled` | `memory.events` `oom_kill > 0` |
 | `PidsLimitExceeded` | `pids.events` `max > 0`. On gVisor this counts the Sentry's host threads, and reaching the limit ends the sandbox |
 | `TimeoutExceeded` | runner deadline / TTL |
-| `PolicyViolation` | reserved for v0.3 |
+| `PolicyViolation` | bwrap: the systemd unit's result is `resources` |
 | `RuntimeFailure` | backend/agent error |
 
 An OOM kill ends the exec, not the sandbox. The unit runs with

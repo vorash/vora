@@ -93,8 +93,9 @@ infallible. The design minimises the trusted surface.
 | Hostile snapshot archive | capture opens workload entries through confined `os.Root` handles and refuses raced symlinks; restore refuses traversal and special-file entries and never follows symlinks (ADR 023) | storage |
 | Malicious CLI plugin on `$PATH` | `vora <name>` dispatches only to a strictly named `vora-<name>` resolved with `exec.LookPath`: no shell, no config-supplied command line, built-ins and Vora's own companion binaries always win, and `VORA_DISABLE_PLUGINS=1` opts out. This is the same trust model as `git` and `kubectl`: a writable early `$PATH` already implies code execution. | CLI |
 
-Credential brokering is delivered for bwrap (ADR 013) and its decisions appear in
-the same audit trail. Restricted egress and the gateway resolver are delivered
+Credential brokering is delivered for both backends (ADR 013, ADR 017), and its
+decisions appear in the same audit trail. Its isolation test,
+`TestNoSecretsLeakBroker`, runs on bwrap. Restricted egress and the gateway resolver are delivered
 for both backends (ADR 012, closed for gVisor by ADR 017).
 `NetworkFull` and `NetworkPrivate` remain bwrap-only (ADR 016).
 
