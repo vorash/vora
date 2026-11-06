@@ -797,6 +797,58 @@ func TestPoolDeleteKeepsItsRouteUntilTheRunnerSaysGone(t *testing.T) {
 	})
 }
 
+// Whether a pool resets its members is what a tenant most needs to know of it, so a
+// runner being down or having lost the pool must not hide it.
+func TestRouteSaysWhetherThePoolResets(t *testing.T) {
+	unsafe := poolBody(1, 1)
+	unsafe["reuse"] = "POOL_REUSE_UNSAFE_NO_RESET"
+	setup := func(t *testing.T) (*fakeRunner, *Server, *httptest.Server, string, *v1.Pool) {
+		t.Helper()
+		fr := &fakeRunner{}
+		s, ts := newTestServer(t, fr)
+		key := mintKey(t, s, "tenant-a", "", ScopeAdmin)
+		return fr, s, ts, key, declare(t, ts, key, "py", unsafe)
+	}
+	t.Run("a runner that does not answer", func(t *testing.T) {
+		fr, _, ts, key, _ := setup(t)
+		fr.getErr = status.Error(codes.Unavailable, "down")
+		list := call(t, http.MethodGet, ts.URL+"/v1/pools", key, nil)
+		if list.code != http.StatusOK || !strings.Contains(list.body, "POOL_REUSE_UNSAFE_NO_RESET") || strings.Contains(list.body, "POOL_ACTIVE") {
+			t.Fatalf("list with the runner down = %d %s, want no state and the reuse", list.code, list.body)
+		}
+	})
+	t.Run("a runner that lost the pool", func(t *testing.T) {
+		fr, _, ts, key, p := setup(t)
+		delete(fr.pools, p.GetId())
+		got := call(t, http.MethodGet, ts.URL+"/v1/pools/py", key, nil)
+		if read := decodePool(t, got.body); read.GetState() != v1.PoolState_POOL_NOT_ON_RUNNER || read.GetSpec().GetReuse() != v1.PoolReuse_POOL_REUSE_UNSAFE_NO_RESET {
+			t.Fatalf("get of a lost pool = %v", read)
+		}
+	})
+	t.Run("while the create is in flight", func(t *testing.T) {
+		fr := &fakeRunner{}
+		fr.createdThenErr = status.Error(codes.Unavailable, "connection reset")
+		s, ts := newTestServer(t, fr)
+		key := mintKey(t, s, "tenant-a", "", ScopeAdmin)
+		call(t, http.MethodPut, ts.URL+"/v1/pools/py", key, unsafe)
+		if route, ok := routeNamed(t, s, "tenant-a", "py"); !ok || route.Reuse != v1.PoolReuse_POOL_REUSE_UNSAFE_NO_RESET {
+			t.Fatalf("route before the runner answered = %+v, %v", route, ok)
+		}
+	})
+	t.Run("a redeclare changes it", func(t *testing.T) {
+		fr, s, ts, key, p := setup(t)
+		delete(fr.pools, p.GetId())
+		reset := poolBody(1, 1)
+		reset["reuse"] = "POOL_REUSE_RESET"
+		if got := call(t, http.MethodPut, ts.URL+"/v1/pools/py", key, reset); got.code != http.StatusOK {
+			t.Fatalf("redeclare = %d %s", got.code, got.body)
+		}
+		if route, _ := routeNamed(t, s, "tenant-a", "py"); route.Reuse != v1.PoolReuse_POOL_REUSE_RESET {
+			t.Fatalf("route after the redeclare = %+v", route)
+		}
+	})
+}
+
 // A listing asks a runner about every pool. A runner that accepts the calls and
 // never answers must not hold a tenant's listing past the server's WriteTimeout,
 // and one tenant's listing must not open a call per pool at once.

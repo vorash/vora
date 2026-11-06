@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"time"
+
+	v1 "github.com/vorash/vora/api/proto/v1"
 )
 
 // Scopes gate API access.
@@ -125,6 +127,10 @@ type PoolRoute struct {
 	MaxSize     int32  `json:"max_size"`
 	CPUMillis   int64  `json:"cpu_millis"`
 	MemoryBytes int64  `json:"memory_bytes"`
+	// Reuse is kept so a pool whose runner cannot answer still says whether it resets
+	// its members. Unspecified on a route written before this field, or while the
+	// runner has yet to answer a declare that named no reuse.
+	Reuse v1.PoolReuse `json:"reuse,omitempty"`
 }
 
 // Store persists control-plane state.

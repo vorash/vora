@@ -234,6 +234,7 @@ func (s *Server) putPool(w http.ResponseWriter, r *http.Request) {
 			MaxSize:     int32(maxSize),
 			CPUMillis:   res.GetCpuMillis(),
 			MemoryBytes: res.GetMemoryBytes(),
+			Reuse:       spec.GetReuse(),
 		}
 		err = s.store.InsertPoolRoute(ctx, route)
 		switch {
@@ -287,6 +288,7 @@ func (s *Server) putPool(w http.ResponseWriter, r *http.Request) {
 	route.MaxSize = int32(created.GetSpec().GetMaxSize())
 	route.CPUMillis = created.GetSpec().GetSandbox().GetResources().GetCpuMillis()
 	route.MemoryBytes = created.GetSpec().GetSandbox().GetResources().GetMemoryBytes()
+	route.Reuse = created.GetSpec().GetReuse()
 	err = s.store.SetPoolRoute(ctx, route, readPoolID)
 	if errors.Is(err, ErrPoolRouteChanged) {
 		// A pool the runner already had is not this declare's to remove: its own
@@ -394,7 +396,7 @@ func routedPool(route PoolRoute, state v1.PoolState) *v1.Pool {
 		Id:       route.PoolID,
 		RunnerId: route.RunnerID,
 		State:    state,
-		Spec:     &v1.PoolSpec{Name: route.Name, TenantId: route.TenantID, AgentId: route.AgentID},
+		Spec:     &v1.PoolSpec{Name: route.Name, TenantId: route.TenantID, AgentId: route.AgentID, Reuse: route.Reuse},
 	}
 }
 

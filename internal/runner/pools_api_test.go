@@ -516,6 +516,18 @@ func TestAPIRunnerRestartKeepsTheRoute(t *testing.T) {
 	p.run("py", 5).mustComplete(t)
 }
 
+// The runner answers every declare with the reuse it filled in, so a route never
+// stays unspecified once the runner has answered.
+func TestAPIRunnerFillsTheRoutesReuse(t *testing.T) {
+	h := newWarmHarness(t)
+	p := newAPIPlane(t, h.s)
+	p.declare("py", planeShape(0, 1))
+	route, err := p.store.PoolRoute(context.Background(), testTenant, "py")
+	if err != nil || route.Reuse != v1.PoolReuse_POOL_REUSE_RESET {
+		t.Fatalf("route = %+v, %v, want POOL_REUSE_RESET", route, err)
+	}
+}
+
 // A runner that comes back without a pool's record leaves a route the runner cannot
 // back. The API must say so, keep the reservation until the tenant acts, and let a
 // declare bring the pool back on that runner.

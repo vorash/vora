@@ -12,6 +12,7 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/api"
 )
 
@@ -164,7 +165,7 @@ func TestPostgresAPIStore(t *testing.T) {
 	// --- Pool routes ---
 	pr := api.PoolRoute{
 		TenantID: "tenant_pg", Name: "py", PoolID: "pool_pg_1", RunnerID: "run_pg_test", AgentID: "agent_pg",
-		MaxSize: 8, CPUMillis: 1000, MemoryBytes: 256 << 20,
+		MaxSize: 8, CPUMillis: 1000, MemoryBytes: 256 << 20, Reuse: v1.PoolReuse_POOL_REUSE_UNSAFE_NO_RESET,
 	}
 	if err := store.InsertPoolRoute(ctx, pr); err != nil {
 		t.Fatalf("insert pool route: %v", err)
@@ -199,7 +200,7 @@ func TestPostgresAPIStore(t *testing.T) {
 		t.Fatalf("all pool routes = %+v, %v, want them sorted by tenant", all, err)
 	}
 	moved := pr
-	moved.PoolID, moved.MaxSize = "pool_pg_3", 4
+	moved.PoolID, moved.MaxSize, moved.Reuse = "pool_pg_3", 4, v1.PoolReuse_POOL_REUSE_RESET
 	if err := store.SetPoolRoute(ctx, moved, "pool_pg_elsewhere"); !errors.Is(err, api.ErrPoolRouteChanged) {
 		t.Fatalf("set expecting another pool = %v, want ErrPoolRouteChanged", err)
 	}

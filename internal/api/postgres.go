@@ -8,6 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	v1 "github.com/vorash/vora/api/proto/v1"
 )
 
 const postgresSchema = `
@@ -77,6 +79,7 @@ create table if not exists pool_routes (
   created_at   timestamptz not null default now(),
   primary key (tenant_id, name)
 );
+alter table pool_routes add column if not exists reuse integer not null default 0;
 
 -- The API connects as the table owner, which bypasses RLS; enabling it keeps
 -- api_keys (key hashes), runners and routing state out of Supabase's PostgREST
@@ -320,10 +323,10 @@ func (s *PostgresStore) DeleteSnapshotRoute(ctx context.Context, snapshotID stri
 
 func (s *PostgresStore) InsertPoolRoute(ctx context.Context, route PoolRoute) error {
 	tag, err := s.pool.Exec(ctx,
-		`insert into pool_routes (tenant_id, name, pool_id, runner_id, agent_id, max_size, cpu_millis, memory_bytes)
-		 values ($1,$2,$3,$4,$5,$6,$7,$8)
+		`insert into pool_routes (tenant_id, name, pool_id, runner_id, agent_id, max_size, cpu_millis, memory_bytes, reuse)
+		 values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 		 on conflict (tenant_id, name) do nothing`,
-		route.TenantID, route.Name, route.PoolID, route.RunnerID, route.AgentID, route.MaxSize, route.CPUMillis, route.MemoryBytes)
+		route.TenantID, route.Name, route.PoolID, route.RunnerID, route.AgentID, route.MaxSize, route.CPUMillis, route.MemoryBytes, int32(route.Reuse))
 	if err != nil {
 		return err
 	}
@@ -335,9 +338,9 @@ func (s *PostgresStore) InsertPoolRoute(ctx context.Context, route PoolRoute) er
 
 func (s *PostgresStore) SetPoolRoute(ctx context.Context, route PoolRoute, expectPoolID string) error {
 	tag, err := s.pool.Exec(ctx,
-		`update pool_routes set pool_id = $3, runner_id = $4, agent_id = $5, max_size = $6, cpu_millis = $7, memory_bytes = $8
-		 where tenant_id = $1 and name = $2 and (pool_id = $9 or pool_id = $3)`,
-		route.TenantID, route.Name, route.PoolID, route.RunnerID, route.AgentID, route.MaxSize, route.CPUMillis, route.MemoryBytes, expectPoolID)
+		`update pool_routes set pool_id = $3, runner_id = $4, agent_id = $5, max_size = $6, cpu_millis = $7, memory_bytes = $8, reuse = $9
+		 where tenant_id = $1 and name = $2 and (pool_id = $10 or pool_id = $3)`,
+		route.TenantID, route.Name, route.PoolID, route.RunnerID, route.AgentID, route.MaxSize, route.CPUMillis, route.MemoryBytes, int32(route.Reuse), expectPoolID)
 	if err != nil {
 		return err
 	}
@@ -349,18 +352,20 @@ func (s *PostgresStore) SetPoolRoute(ctx context.Context, route PoolRoute, expec
 
 func (s *PostgresStore) PoolRoute(ctx context.Context, tenant, name string) (PoolRoute, error) {
 	route := PoolRoute{TenantID: tenant, Name: name}
+	var reuse int32
 	err := s.pool.QueryRow(ctx,
-		`select pool_id, runner_id, agent_id, max_size, cpu_millis, memory_bytes from pool_routes where tenant_id = $1 and name = $2`, tenant, name).
-		Scan(&route.PoolID, &route.RunnerID, &route.AgentID, &route.MaxSize, &route.CPUMillis, &route.MemoryBytes)
+		`select pool_id, runner_id, agent_id, max_size, cpu_millis, memory_bytes, reuse from pool_routes where tenant_id = $1 and name = $2`, tenant, name).
+		Scan(&route.PoolID, &route.RunnerID, &route.AgentID, &route.MaxSize, &route.CPUMillis, &route.MemoryBytes, &reuse)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PoolRoute{}, ErrNotFound
 	}
+	route.Reuse = v1.PoolReuse(reuse)
 	return route, err
 }
 
 func (s *PostgresStore) ListPoolRoutes(ctx context.Context, tenant string) ([]PoolRoute, error) {
 	rows, err := s.pool.Query(ctx,
-		`select tenant_id, name, pool_id, runner_id, agent_id, max_size, cpu_millis, memory_bytes
+		`select tenant_id, name, pool_id, runner_id, agent_id, max_size, cpu_millis, memory_bytes, reuse
 		   from pool_routes where ($1 = '' or tenant_id = $1) order by tenant_id, name`, tenant)
 	if err != nil {
 		return nil, err
@@ -369,9 +374,11 @@ func (s *PostgresStore) ListPoolRoutes(ctx context.Context, tenant string) ([]Po
 	var out []PoolRoute
 	for rows.Next() {
 		var r PoolRoute
-		if err := rows.Scan(&r.TenantID, &r.Name, &r.PoolID, &r.RunnerID, &r.AgentID, &r.MaxSize, &r.CPUMillis, &r.MemoryBytes); err != nil {
+		var reuse int32
+		if err := rows.Scan(&r.TenantID, &r.Name, &r.PoolID, &r.RunnerID, &r.AgentID, &r.MaxSize, &r.CPUMillis, &r.MemoryBytes, &reuse); err != nil {
 			return nil, err
 		}
+		r.Reuse = v1.PoolReuse(reuse)
 		out = append(out, r)
 	}
 	return out, rows.Err()
