@@ -704,3 +704,19 @@ func (m *member) tasks(t *testing.T) int64 {
 	}
 	return st.Pids
 }
+
+func TestBwrapReusableFailedResetNeverReturns(t *testing.T) {
+	testLeakFailedResetNeverReturns(t, func(t *testing.T) (leakMember, error) {
+		backend, h, ws := startBwrapSandbox(t, runtime.SandboxSpec{Resources: runtime.ResourceLimits{CPUMillis: 1000, MemoryBytes: 256 << 20, Pids: 64}, DenyIPC: true})
+		if err := seedKeepFile(ws); err != nil {
+			return leakMember{}, err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		r, err := backend.Prepare(ctx, h)
+		if err != nil {
+			return leakMember{}, err
+		}
+		return leakMember{backend: backend, h: h, reset: r}, nil
+	})
+}

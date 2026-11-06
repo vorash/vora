@@ -3,6 +3,7 @@ package gvisor
 import (
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,13 +14,15 @@ import (
 )
 
 // fakeExecRunsc stands in for runsc: `exec` reports a sandbox PID through
-// -internal-pid-file and then runs for $FAKE_EXEC_SECONDS; `kill` is only logged.
+// -internal-pid-file and then runs for $FAKE_EXEC_SECONDS; `kill` is only logged;
+// `state` prints $FAKE_STATE. $FAKE_REFUSE makes exec fail as runsc does, before any PID,
+// and $FAKE_EXIT makes it report a PID and exit with that code.
 const fakeExecRunsc = `#!/bin/sh
 sub=""
 pidfile=""
 prev=""
 for a in "$@"; do
-  case "$a" in exec|kill) [ -z "$sub" ] && sub="$a" ;; esac
+  case "$a" in exec|kill|state) [ -z "$sub" ] && sub="$a" ;; esac
   [ "$prev" = "-internal-pid-file" ] && pidfile="$a"
   prev="$a"
 done
@@ -28,13 +31,27 @@ if [ "$sub" = "kill" ]; then
   [ -f "$FAKE_SLEEP_PID" ] && kill "$(cat "$FAKE_SLEEP_PID")" 2>/dev/null
   exit 0
 fi
+if [ "$sub" = "state" ]; then
+  printf '{"status":"%s"}\n' "$FAKE_STATE"
+  exit 0
+fi
+if [ -n "$FAKE_REFUSE" ]; then
+  echo "cannot execute" >&2
+  exit 128
+fi
+if [ -n "$FAKE_EXIT" ]; then
+  echo 4242 > "$pidfile"
+  exit "$FAKE_EXIT"
+fi
 # A process that left the command's group: "kill -pid" never reaches it.
 [ -n "$FAKE_HOLDER_SECONDS" ] && { sleep "$FAKE_HOLDER_SECONDS" <&0 & }
 # Like the real runsc, the command outlives this client and keeps its pipes.
 sleep "$FAKE_EXEC_SECONDS" &
 echo $! > "$FAKE_SLEEP_PID"
+sleeper=$!
 [ -n "$pidfile" ] && echo 4242 > "$pidfile"
-wait
+wait "$sleeper"
+exit $?
 `
 
 func fakeExecBackend(t *testing.T, execSeconds string) (*Backend, *handle, string) {
@@ -52,7 +69,7 @@ func fakeExecBackend(t *testing.T, execSeconds string) (*Backend, *handle, strin
 	if err := os.MkdirAll(hd.bundleDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	b := &Backend{runsc: script, root: dir, platform: "systrap", handles: map[string]*handle{hd.id: hd}}
+	b := &Backend{logger: slog.New(slog.DiscardHandler), runsc: script, root: dir, platform: "systrap", handles: map[string]*handle{hd.id: hd}}
 	return b, hd, killLog
 }
 
@@ -93,17 +110,18 @@ func TestExecTimeoutKillsTheProcessInsideTheSandbox(t *testing.T) {
 	}
 	defer stream.Close()
 	start := time.Now()
-	if got := lastChunk(t, stream).Exit.Reason; got != runtime.ReasonTimeout {
-		t.Fatalf("reason = %s, want %s", got, runtime.ReasonTimeout)
+	got := lastChunk(t, stream).Exit
+	if got.Reason != runtime.ReasonTimeout || got.ExitCode != -1 {
+		t.Fatalf("exit %+v, want %s and -1, since the code is the kill's and not the command's", got, runtime.ReasonTimeout)
 	}
 	// The command holds the pipes for 30s; only killing it inside the sandbox
 	// lets the stream finish in time.
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("exit chunk took %v: the command was not killed at the timeout", elapsed)
 	}
-	got := readKillLog(t, killLog)
-	if !strings.Contains(got, "kill") || !strings.Contains(got, "-pid 4242") || !strings.Contains(got, "KILL") || !strings.Contains(got, hd.id) {
-		t.Fatalf("runsc kill log = %q, want a KILL of pid 4242 in %s", got, hd.id)
+	log := readKillLog(t, killLog)
+	if !strings.Contains(log, "kill") || !strings.Contains(log, "-pid 4242") || !strings.Contains(log, "KILL") || !strings.Contains(log, hd.id) {
+		t.Fatalf("runsc kill log = %q, want a KILL of pid 4242 in %s", log, hd.id)
 	}
 }
 
@@ -161,6 +179,40 @@ func TestExecThatFinishesIsNotKilled(t *testing.T) {
 	}
 	if got := readKillLog(t, killLog); got != "" {
 		t.Fatalf("a finished exec was killed: %q", got)
+	}
+}
+
+// An exec into a stopped sandbox, or one whose sandbox died under it, used to read as the
+// program exiting 128, which a caller counts as the program's own result (#120). The rows
+// next to it must keep their reason: a program may exit 128 in a live sandbox, and a command
+// that is missing is the caller's mistake.
+func TestExecReasonWhenRunscExits128(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		refuse, state string
+		exit          string
+		want          runtime.ExitReason
+	}{
+		{name: "sandbox stopped", refuse: "1", state: "stopped", want: runtime.ReasonRuntimeFailure},
+		{name: "missing command in a running sandbox", refuse: "1", state: "running", want: runtime.ReasonExited},
+		{name: "sandbox dies after the command started", exit: "128", state: "stopped", want: runtime.ReasonRuntimeFailure},
+		{name: "program exits 128", exit: "128", state: "running", want: runtime.ReasonExited},
+		{name: "program exits 3", exit: "3", state: "stopped", want: runtime.ReasonExited},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, hd, _ := fakeExecBackend(t, "0")
+			t.Setenv("FAKE_REFUSE", tc.refuse)
+			t.Setenv("FAKE_EXIT", tc.exit)
+			t.Setenv("FAKE_STATE", tc.state)
+			stream, err := b.Exec(t.Context(), runtime.Handle(fakeHandle{hd.id}), runtime.ExecRequest{Command: "true"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = stream.Close() }()
+			if got := lastChunk(t, stream).Exit.Reason; got != tc.want {
+				t.Fatalf("reason = %s, want %s", got, tc.want)
+			}
+		})
 	}
 }
 

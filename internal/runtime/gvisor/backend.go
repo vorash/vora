@@ -9,6 +9,7 @@ package gvisor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -62,6 +63,8 @@ type handle struct {
 	broker *egress.Broker
 	dns    *egress.DNS
 	cancel context.CancelFunc
+
+	execs execClients
 }
 
 func (h *handle) ID() string { return h.id }
@@ -489,37 +492,56 @@ func (b *Backend) Exec(ctx context.Context, h runtime.Handle, req runtime.ExecRe
 	pidFile := filepath.Join(pidDir, "pid")
 	args := append(b.globalFlags("none"), execArgsWithPID(hd.id, req, pidFile)...)
 	cmd := exec.CommandContext(execCtx, b.runsc, args...)
-	// Bounds the stdin copy in Wait: a process that left the command's group can
+	// A client killed mid-start can leave a command that starts later and that nothing can
+	// find (see execClients), so the end of ctx does not kill it. killExec ends the command
+	// and the client exits by itself. WaitDelay is the backstop for a client that does neither.
+	cmd.Cancel = func() error { return nil }
+	// It also bounds the stdin copy in Wait: a process that left the command's group can
 	// keep the read end of the stdin pipe open without ever reading it.
 	cmd.WaitDelay = execPipeGrace
 	if len(req.Stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(req.Stdin)
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
+	client := newExecClient(pidFile)
+	if err := hd.execs.begin(hd.id, client); err != nil {
 		cancel()
-		os.RemoveAll(pidDir)
+		_ = os.RemoveAll(pidDir)
 		return nil, err
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
+	abort := func(err error) (runtime.ExecStream, error) {
+		hd.execs.end(client, false)
 		cancel()
-		os.RemoveAll(pidDir)
+		_ = os.RemoveAll(pidDir)
 		return nil, err
+	}
+	stdout, stderr, closeClientEnds, err := outputPipes(cmd)
+	if err != nil {
+		return abort(err)
 	}
 	if err := cmd.Start(); err != nil {
-		cancel()
-		os.RemoveAll(pidDir)
-		return nil, err
+		closeClientEnds()
+		_ = stdout.Close()
+		_ = stderr.Close()
+		return abort(err)
 	}
+	closeClientEnds()
 
-	es := &execStream{ctx: execCtx, ch: make(chan runtime.ExecChunk, 16), done: make(chan struct{}), cancel: cancel, cmd: cmd}
-	// The command's stdout/stderr pipes outlive the killed runsc client for as
-	// long as the command runs, so the kill cannot wait for them to drain.
+	es := &execStream{ctx: execCtx, ch: make(chan runtime.ExecChunk, 16), done: make(chan struct{}), cancel: cancel, client: client, stopped: func() bool { return b.stopped(hd.id) }}
+	// Wait runs now rather than after the output drains, because a reset has to learn the
+	// client is gone even while a process it left behind holds the pipes. runsc reports a
+	// refusal with its failure code, so any other end without a PID is a client that died
+	// with its request unanswered.
+	go func() {
+		es.waitErr = cmd.Wait()
+		es.endedByContext = execCtx.Err() != nil
+		hd.execs.end(client, client.pid() == 0 && cmd.ProcessState.ExitCode() != runscExitFailure)
+	}()
+	// The command's stdout/stderr pipes outlive the runsc client for as long as the command
+	// runs, so the kill cannot wait for them to drain.
 	go func() {
 		<-execCtx.Done()
 		if !es.finished.Load() {
-			b.killExec(hd.id, pidFile)
+			b.killExec(hd.id, client)
 			// A process that left the command's group with setsid survives that
 			// kill and keeps the pipes open. The readers get a bounded time to
 			// drain what the command wrote, so it cannot outlive its timeout.
@@ -528,10 +550,32 @@ func (b *Backend) Exec(ctx context.Context, h runtime.Handle, req runtime.ExecRe
 				_ = stderr.Close()
 			})
 		}
-		os.RemoveAll(pidDir)
+		<-client.exited
+		_ = os.RemoveAll(pidDir)
 	}()
 	go es.stream(stdout, stderr)
 	return es, nil
+}
+
+// outputPipes gives cmd a stdout and a stderr and returns the ends to read, with a function
+// that closes the ends only the client should hold. Unlike StdoutPipe, these stay open
+// after Wait returns.
+func outputPipes(cmd *exec.Cmd) (stdout, stderr *os.File, closeClientEnds func(), err error) {
+	stdout, stdoutW, err := os.Pipe()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	stderr, stderrW, err := os.Pipe()
+	if err != nil {
+		_ = stdout.Close()
+		_ = stdoutW.Close()
+		return nil, nil, nil, err
+	}
+	cmd.Stdout, cmd.Stderr = stdoutW, stderrW
+	return stdout, stderr, func() {
+		_ = stdoutW.Close()
+		_ = stderrW.Close()
+	}, nil
 }
 
 func execArgs(id string, req runtime.ExecRequest) []string {
@@ -558,25 +602,12 @@ func execArgsWithPID(id string, req runtime.ExecRequest, pidFile string) []strin
 	return append(args, req.Args...)
 }
 
-// killExec kills the command a stopped `runsc exec` client started, using the
-// sandbox PID runsc wrote to pidFile. If the client was stopped before it
-// reported a PID there is nothing to kill.
-func (b *Backend) killExec(id, pidFile string) {
-	// runsc writes the file just after the command starts; a cancel that lands
-	// in that window would otherwise find nothing to kill.
-	var data []byte
-	var err error
-	for range 20 {
-		if data, err = os.ReadFile(pidFile); err == nil {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if err != nil {
-		return
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
+// killExec kills the command of an exec whose context ended, by the sandbox PID its client
+// reports. A client that exits without reporting one started nothing to kill.
+func (b *Backend) killExec(id string, client *execClient) {
+	// Ends by itself: WaitDelay kills a client that outlives its context by that long.
+	pid, err := client.answer(context.Background())
+	if err != nil || pid == 0 {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -740,14 +771,21 @@ func isMissing(out string) bool {
 // exited. It only has to cover draining what is already buffered.
 const execPipeGrace = time.Second
 
+// runscExitFailure is the exit code of a runsc that failed, rather than of a command.
+const runscExitFailure = 128
+
 // execStream adapts a runsc exec process to runtime.ExecStream.
 type execStream struct {
 	ch     chan runtime.ExecChunk
 	done   chan struct{}
 	ctx    context.Context
 	cancel context.CancelFunc
-	cmd    *exec.Cmd
 	once   sync.Once
+	client *execClient
+	// waitErr and endedByContext are set before client.exited closes.
+	waitErr        error
+	endedByContext bool
+	stopped        func() bool
 	// finished is set once the command has run to completion, so a later
 	// cancel (the consumer closing the stream) does not kill anything.
 	finished atomic.Bool
@@ -776,15 +814,18 @@ func (e *execStream) send(chunk runtime.ExecChunk) {
 	}
 }
 
-func (e *execStream) stream(stdout, stderr io.Reader) {
+func (e *execStream) stream(stdout, stderr *os.File) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go pipeExec(stdout, func(b []byte) { e.send(runtime.ExecChunk{Stdout: b}) }, &wg)
 	go pipeExec(stderr, func(b []byte) { e.send(runtime.ExecChunk{Stderr: b}) }, &wg)
 	wg.Wait()
+	_ = stdout.Close()
+	_ = stderr.Close()
 
+	<-e.client.exited
 	code := 0
-	if err := e.cmd.Wait(); err != nil && !errors.Is(err, exec.ErrWaitDelay) {
+	if err := e.waitErr; err != nil && !errors.Is(err, exec.ErrWaitDelay) {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
 			code = ee.ExitCode()
@@ -792,18 +833,49 @@ func (e *execStream) stream(stdout, stderr io.Reader) {
 			code = -1
 		}
 	}
+	// The client may have reported what the kill did to the command, which is not the
+	// command's own result.
+	if e.endedByContext {
+		code = -1
+	}
 	if e.ctx.Err() == nil {
 		e.finished.Store(true)
 	}
 	reason := runtime.ReasonExited
 	if errors.Is(e.ctx.Err(), context.DeadlineExceeded) {
 		reason = runtime.ReasonTimeout
+	} else if e.sandboxStopped(code) {
+		reason = runtime.ReasonRuntimeFailure
 	}
 	select {
 	case e.ch <- runtime.ExecChunk{Exit: &runtime.ExecResult{ExitCode: code, Reason: reason}}:
 	case <-e.done:
 	}
 	close(e.ch)
+}
+
+// sandboxStopped tells a sandbox that died from a program's own exit. runsc exits 128 when
+// it cannot run a command or loses the sandbox while waiting for one, and a program can
+// exit 128 too. A missing command also exits 128, and that one is the caller's mistake, so
+// the sandbox's state decides. A workload cannot forge that answer: `runsc state` looks at
+// the Sentry's host process, which guest code cannot signal.
+func (e *execStream) sandboxStopped(code int) bool {
+	return code == runscExitFailure && e.ctx.Err() == nil && e.stopped()
+}
+
+// stopped reports whether runsc says the sandbox is no longer running. A runsc that fails
+// to answer says nothing, so that is false.
+func (b *Backend) stopped(id string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := b.run(ctx, "state", "--", id)
+	if err != nil {
+		return isMissing(out)
+	}
+	var state struct {
+		Status string `json:"status"`
+	}
+	return json.Unmarshal([]byte(out), &state) == nil && state.Status == "stopped"
 }
 
 func pipeExec(r io.Reader, send func([]byte), wg *sync.WaitGroup) {
