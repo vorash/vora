@@ -51,7 +51,6 @@ const (
 
 var (
 	errPoolNotFound = errors.New("pool not found")
-	errRunnerGone   = errors.New("api: the pool's runner is no longer registered")
 	errRunnerDown   = errors.New("api: the pool's runner is unavailable")
 )
 
@@ -92,9 +91,6 @@ func (s *Server) canAccessPool(key APIKey, route PoolRoute) bool {
 // keepalive notices.
 func (s *Server) poolRunner(ctx context.Context, runnerID string) (RunnerClient, error) {
 	r, err := s.store.Runner(ctx, runnerID)
-	if errors.Is(err, ErrNotFound) {
-		return nil, errRunnerGone
-	}
 	if err != nil {
 		s.logger.Error("read pool runner failed", "runner_id", runnerID, "error", err)
 		return nil, errRunnerDown
@@ -486,9 +482,8 @@ func (s *Server) poolForListing(ctx context.Context, route PoolRoute) *v1.Pool {
 
 // deletePool drains a pool. The route, and so the reservation, goes only once
 // the runner says the pool is gone: 202 and 503 keep it, and repeating converges.
-// A pool the runner no longer knows, or whose runner has no record left, has
-// nothing to wait for. The whole call is detached, as a client that leaves must
-// not strand a drained pool's route.
+// A pool the runner no longer knows has nothing to wait for. The whole call is
+// detached, as a client that leaves must not strand a drained pool's route.
 func (s *Server) deletePool(w http.ResponseWriter, r *http.Request) {
 	route, ok := s.poolRouteFor(w, r)
 	if !ok {
@@ -498,28 +493,23 @@ func (s *Server) deletePool(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	extendPoolDeleteWrite(w, s.logger)
 
-	drained := false
 	rc, err := s.poolRunner(ctx, route.RunnerID)
-	switch {
-	case errors.Is(err, errRunnerGone):
-		drained = true
-	case err != nil:
+	if err != nil {
 		writeRunnerDown(w)
 		return
-	default:
-		drained, err = rc.DeletePool(ctx, &v1.DeletePoolRequest{
-			PoolId:   route.PoolID,
-			TenantId: route.TenantID,
-			Actor:    actorFromKey(principalFrom(r.Context()).key),
-			WaitMs:   poolDeleteWait.Milliseconds(),
-		})
-		if status.Code(err) == codes.NotFound {
-			drained, err = true, nil
-		}
-		if err != nil {
-			writePoolError(w, err)
-			return
-		}
+	}
+	drained, err := rc.DeletePool(ctx, &v1.DeletePoolRequest{
+		PoolId:   route.PoolID,
+		TenantId: route.TenantID,
+		Actor:    actorFromKey(principalFrom(r.Context()).key),
+		WaitMs:   poolDeleteWait.Milliseconds(),
+	})
+	if status.Code(err) == codes.NotFound {
+		drained, err = true, nil
+	}
+	if err != nil {
+		writePoolError(w, err)
+		return
 	}
 	if !drained {
 		w.WriteHeader(http.StatusAccepted)

@@ -751,19 +751,22 @@ func TestPoolDeleteKeepsItsRouteUntilTheRunnerSaysGone(t *testing.T) {
 		}
 		gone(t, s)
 	})
-	t.Run("a runner with no record left frees the route", func(t *testing.T) {
-		_, s, ts, key, _ := setup(t)
+	// Only a row removed by hand gets here, and the runner may still hold the pool and
+	// register again, so dropping the route would orphan it.
+	t.Run("a runner with no record left keeps the route", func(t *testing.T) {
+		_, s, ts, key, p := setup(t)
 		mem := s.store.(*MemStore)
 		mem.mu.Lock()
 		delete(mem.runners, "run_test")
 		mem.mu.Unlock()
-		if got := call(t, http.MethodGet, ts.URL+"/v1/pools/py", key, nil); got.code != http.StatusServiceUnavailable {
-			t.Fatalf("get = %d %s, want 503", got.code, got.body)
+		for _, method := range []string{http.MethodGet, http.MethodDelete} {
+			if got := call(t, method, ts.URL+"/v1/pools/py", key, nil); got.code != http.StatusServiceUnavailable {
+				t.Fatalf("%s = %d %s, want 503", method, got.code, got.body)
+			}
 		}
-		if got := call(t, http.MethodDelete, ts.URL+"/v1/pools/py", key, nil); got.code != http.StatusNoContent {
-			t.Fatalf("delete = %d %s, want 204", got.code, got.body)
+		if route, ok := routeNamed(t, s, "tenant-a", "py"); !ok || route.PoolID != p.GetId() {
+			t.Fatalf("route = %+v, %v, want it kept", route, ok)
 		}
-		gone(t, s)
 	})
 	t.Run("a failed route removal repeats to the same end", func(t *testing.T) {
 		fr, s, ts, key, p := setup(t)
