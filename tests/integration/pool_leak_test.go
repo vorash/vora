@@ -151,12 +151,16 @@ var gvisorPoolHost = poolHost{
 		},
 		// pids.max holds Sentry threads here, so nothing but memory.max is left to bound this one.
 		{
-			name: "fork_bomb",
-			run:  shellRun(forkBombScript, 3),
+			name:        "fork_bomb",
+			run:         shellRun(forkBombScript, 30),
+			costsMember: true,
 			check: func(t *testing.T, res runResult) {
 				t.Helper()
 				if !strings.Contains(string(res.stdout), "started") {
 					t.Fatalf("the bomb never started, so this proved nothing: stdout %q, stderr %q, exit %v", res.stdout, res.stderr, res.exit)
+				}
+				if res.exit.GetReason() != v1.ExitReason_OOM_KILLED || res.exit.GetUsage().GetOomKills() == 0 {
+					t.Fatalf("exit %v, want memory.max to have stopped the bomb", res.exit)
 				}
 			},
 		},

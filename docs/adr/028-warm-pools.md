@@ -112,7 +112,7 @@ workload one, and an exec loop passed 150 of 150 there (bwrap, vora-mini,
 
 Under gVisor it counts the Sentry's host threads, not guest tasks: 800 guest
 processes held `pids.current` at 38. So it doesn't bound guest tasks, which leaves
-`memory.max` to stop a fork bomb. One logged run saw that: through a pool with a 256 MiB limit, a fork bomb ended `OOM_KILLED` at a 256 MiB peak and cost the member (gVisor, vora-mini, 2026-11-06).
+`memory.max` to stop a fork bomb. Through a pool with a 256 MiB limit, a fork bomb ended `OOM_KILLED` at a 256 MiB peak and cost the member, in each of 6 logged runs (gVisor, vora-mini, 2026-11-06). `TestPoolWorkloadThatEndsItsMember` asserts it, and CI can't run that row.
 Reaching `pids` ends the whole sandbox. Limits from 12 to 26
 can't start, 28 to 36 died under load, and 48, 64 and 128 each passed 60 cycles
 (gVisor, vora-mini, 2026-11-05). Thread growth has no measured plateau, so the
