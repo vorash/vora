@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -163,5 +164,45 @@ func TestStoreCreatesPrivateSandboxDirectory(t *testing.T) {
 	}
 	if got := info.Mode().Perm(); got != 0o700 {
 		t.Fatalf("sandbox dir mode = %04o, want 0700", got)
+	}
+}
+
+// Records on disk outlive the binary that wrote them, and they were written two
+// ways before a measured zero could be told from a missing value.
+func TestOldExecRecordsReadBack(t *testing.T) {
+	const (
+		beforeUsage = `{"execution_id":"exe_01KA0000000000000000000000","sandbox_id":"sbx_a","command":"/bin/true","started_at":"2026-01-01T00:00:00Z","finished_at":"2026-01-01T00:00:01Z","exit_code":0,"reason":"Exited","stdout_bytes":0,"stderr_bytes":0}`
+		zeroOmitted = `{"execution_id":"exe_01KB0000000000000000000000","sandbox_id":"sbx_a","command":"/bin/true","started_at":"2026-01-02T00:00:00Z","finished_at":"2026-01-02T00:00:01Z","exit_code":0,"reason":"Exited","stdout_bytes":0,"stderr_bytes":0,"cpu_millis":120,"memory_peak_bytes":4096,"memory_peak_scope":1,"egress_denied":2}`
+		noScope     = `{"execution_id":"exe_01KC0000000000000000000000","sandbox_id":"sbx_a","command":"/bin/true","started_at":"2026-01-03T00:00:00Z","finished_at":"2026-01-03T00:00:01Z","exit_code":0,"reason":"Exited","stdout_bytes":0,"stderr_bytes":0,"memory_peak_bytes":8192}`
+	)
+	dir := t.TempDir()
+	for i, body := range []string{beforeUsage, zeroOmitted, noScope} {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("exe_%d.json", i)), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recs, err := ReadExecRecords(dir)
+	if err != nil || len(recs) != 3 {
+		t.Fatalf("ReadExecRecords = %v, %v", recs, err)
+	}
+
+	first := recs[0]
+	if first.CPUMillis != nil || first.MemoryPeakBytes != nil || first.OOMKills != nil || first.PidsLimitHits != nil ||
+		first.EgressAllowed != nil || first.EgressDenied != nil || first.MemoryPeakScope != runtime.PeakUnspecified {
+		t.Errorf("a record from before usage reads as measured: %+v", first)
+	}
+
+	second := recs[1]
+	if second.CPUMillis == nil || *second.CPUMillis != 120 || second.MemoryPeakBytes == nil || *second.MemoryPeakBytes != 4096 ||
+		second.MemoryPeakScope != runtime.PeakWindow || second.EgressDenied == nil || *second.EgressDenied != 2 {
+		t.Errorf("an old record lost what it did hold: %+v", second)
+	}
+	if second.OOMKills != nil {
+		t.Errorf("oom_kills is absent from the file and reads as %d", *second.OOMKills)
+	}
+
+	third := recs[2]
+	if third.MemoryPeakBytes == nil || *third.MemoryPeakBytes != 8192 || third.MemoryPeakScope != runtime.PeakUnspecified {
+		t.Errorf("a lifetime peak with no scope: %+v", third)
 	}
 }

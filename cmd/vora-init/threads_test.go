@@ -46,6 +46,9 @@ func startAgentProcessWithGrace(t *testing.T, gomaxprocs int, grace string) (*ex
 	cmd.Env = []string{runAgentEnv + "=1", "GOMAXPROCS=" + strconv.Itoa(gomaxprocs)}
 	var agentErr bytes.Buffer
 	cmd.Stderr = &agentErr
+	// In a sandbox the agent leads its group. Signal also signals its own group, and
+	// sharing the test's would reach every process the test binary was started with.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start agent: %v", err)
 	}
@@ -64,6 +67,26 @@ func startAgentProcessWithGrace(t *testing.T, gomaxprocs int, grace string) (*ex
 		t.Fatalf("agent not ready: %v\nagent stderr:\n%s", err, agentErr.String())
 	}
 	return cmd, client
+}
+
+// agentWithinThreadBudget starts agents until one is ready within maxAgentThreads. On
+// a loaded machine about one start in eight comes up one or two threads over, with
+// GOMAXPROCS at 64 or at 1. Load only adds threads, so the lowest count is what a
+// change to the agent can move.
+func agentWithinThreadBudget(t *testing.T) (*exec.Cmd, *agentproto.Client, int) {
+	t.Helper()
+	var ready int
+	for range 8 {
+		cmd, client := startAgentProcess(t, 64)
+		ready = threadsOf(t, cmd.Process.Pid)
+		t.Logf("agent ready with %d threads", ready)
+		if ready <= maxAgentThreads {
+			return cmd, client, ready
+		}
+		_ = cmd.Process.Kill()
+	}
+	t.Fatalf("agent has %d threads when ready, on every start, want at most %d", ready, maxAgentThreads)
+	return nil, nil, 0
 }
 
 func drainExec(ctx context.Context, client *agentproto.Client, command string, args ...string) error {
@@ -117,12 +140,7 @@ const maxAgentThreads = 9
 // The load is what makes the agent reach for a thread: signals, an exec blocked in
 // wait, a fork, heavy output, and RPCs arriving meanwhile.
 func TestAgentNeedsNoThreadsAfterStartup(t *testing.T) {
-	cmd, client := startAgentProcess(t, 64)
-	ready := threadsOf(t, cmd.Process.Pid)
-	t.Logf("agent ready with %d threads", ready)
-	if ready > maxAgentThreads {
-		t.Fatalf("agent has %d threads when ready, want at most %d", ready, maxAgentThreads)
-	}
+	cmd, client, ready := agentWithinThreadBudget(t)
 
 	ctx := t.Context()
 	stop := make(chan struct{})

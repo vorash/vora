@@ -447,6 +447,9 @@ func TestBackendErrorTextStaysOutOfWhatATenantSees(t *testing.T) {
 	})
 	second := poolSpec(0, 1)
 	second.Name = "second"
+	// The retry waits on the first member's destroy, however long that takes here.
+	wait := patience.Milliseconds()
+	second.BorrowTimeoutMs = &wait
 	refused := h.create(second)
 	if _, err := h.run(h.ctx(), refused.GetId(), 5); status.Code(err) != codes.Unavailable || strings.Contains(err.Error(), secret) {
 		t.Fatalf("refused exec: %v, want Unavailable without the backend's text", err)

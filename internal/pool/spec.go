@@ -95,6 +95,12 @@ const (
 // Limits.MaxTTL.
 const maxDuration = 30 * 24 * time.Hour
 
+// MaxBorrowTimeout caps a run's wait for a member. Each waiting run holds a stream
+// on the runner and a goroutine and a connection on vora-api, so a tenant must not
+// choose to hold them for days. Five minutes lets a run queue behind one run of the
+// default max_run, and vora-api bounds its wait for a run's first frame from it.
+const MaxBorrowTimeout = defaultMaxRun
+
 // What a zero cap in Limits means. The resource and TTL values are the ones
 // the runner's enforceResourceLimits falls back to, and a runner test holds
 // them equal. defaultMaxPoolSize is VORA_MAX_SANDBOXES' default.
@@ -201,22 +207,17 @@ type Spec struct {
 // idle_expiry 1 h, reuse reset.
 func Parse(raw RawSpec, limits Limits) (Spec, error) {
 	limits = limits.withDefaults()
+	size, maxSize := sizes(raw.Size, raw.MaxSize)
 	s := Spec{
 		raw:           raw,
-		size:          defaultSize,
+		size:          size,
+		maxSize:       maxSize,
 		maxRuns:       raw.MaxRuns,
 		maxAge:        raw.MaxAge,
 		maxRun:        raw.MaxRun,
 		borrowTimeout: raw.BorrowTimeout,
 		idleExpiry:    raw.IdleExpiry,
 		reuse:         raw.Reuse,
-	}
-	if raw.Size != nil {
-		s.size = *raw.Size
-	}
-	s.maxSize = max(s.size, 1)
-	if raw.MaxSize != nil {
-		s.maxSize = *raw.MaxSize
 	}
 	if s.maxRuns == 0 {
 		s.maxRuns = defaultMaxRuns
@@ -249,16 +250,16 @@ func Parse(raw RawSpec, limits Limits) (Spec, error) {
 		return Spec{}, fmt.Errorf("%w: max_runs must be >= 1", ErrInvalidSpec)
 	}
 	for _, d := range []struct {
-		name       string
-		value, min time.Duration
+		name            string
+		value, min, max time.Duration
 	}{
-		{"max_age", s.maxAge, minMaxAge},
-		{"max_run", s.maxRun, minMaxRun},
-		{"borrow_timeout", s.borrowTimeout, minBorrowTimeout},
-		{"idle_expiry", s.idleExpiry, minIdleExpiry},
+		{"max_age", s.maxAge, minMaxAge, maxDuration},
+		{"max_run", s.maxRun, minMaxRun, maxDuration},
+		{"borrow_timeout", s.borrowTimeout, minBorrowTimeout, MaxBorrowTimeout},
+		{"idle_expiry", s.idleExpiry, minIdleExpiry, maxDuration},
 	} {
-		if d.value < d.min || d.value > maxDuration {
-			return Spec{}, fmt.Errorf("%w: %s must be between %s and %s", ErrInvalidSpec, d.name, d.min, maxDuration)
+		if d.value < d.min || d.value > d.max {
+			return Spec{}, fmt.Errorf("%w: %s must be between %s and %s", ErrInvalidSpec, d.name, d.min, d.max)
 		}
 	}
 	if s.MemberTTL() > limits.MaxTTL {
@@ -283,6 +284,26 @@ func Parse(raw RawSpec, limits Limits) (Spec, error) {
 		return Spec{}, fmt.Errorf("%w: %q", ErrNotReusable, raw.Template.Backend)
 	}
 	return s, nil
+}
+
+func sizes(rawSize, rawMaxSize *int) (size, maxSize int) {
+	size = defaultSize
+	if rawSize != nil {
+		size = *rawSize
+	}
+	maxSize = max(size, 1)
+	if rawMaxSize != nil {
+		maxSize = *rawMaxSize
+	}
+	return size, maxSize
+}
+
+// MaxSizeOf is the max_size a declare with these raw fields gets once defaults
+// are filled in, so vora-api can reserve capacity before the runner parses the
+// spec.
+func MaxSizeOf(rawSize, rawMaxSize *int) int {
+	_, maxSize := sizes(rawSize, rawMaxSize)
+	return maxSize
 }
 
 func checkTemplate(t runtime.SandboxSpec, limits Limits) error {

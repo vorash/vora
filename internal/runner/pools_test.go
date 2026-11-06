@@ -1,8 +1,10 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -18,6 +20,64 @@ import (
 	"github.com/vorash/vora/internal/sandbox"
 	"github.com/vorash/vora/internal/ulid"
 )
+
+// lockedBuffer collects logs from whichever goroutine writes them.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// How much of the runner is free depends on what other tenants hold, so a tenant
+// must read the same refusal whatever they hold, and the operator reads the numbers.
+func TestPoolCapacityRefusalSaysNothingOfOtherTenants(t *testing.T) {
+	h := newWarmHarness(t)
+	logs := &lockedBuffer{}
+	h.s.logger = slog.New(slog.NewTextHandler(logs, nil))
+	h.s.cfg.MaxSandboxes = 6
+	h.s.cfg.MaxSandboxesPerTenant = 6
+	refusal := func() string {
+		t.Helper()
+		mine := poolSpec(0, 2)
+		mine.Name = "mine"
+		_, err := h.client.CreatePool(h.ctx(), &v1.CreatePoolRequest{Spec: mine})
+		if status.Code(err) != codes.ResourceExhausted {
+			t.Fatalf("declare past the runner's cap: %v, want ResourceExhausted", err)
+		}
+		return status.Convert(err).Message()
+	}
+	occupy := func(name string, maxSize uint32) {
+		t.Helper()
+		spec := poolSpec(0, maxSize)
+		spec.Name, spec.TenantId = name, "someone-else"
+		h.create(spec)
+	}
+
+	occupy("first", 5)
+	withOneFree := refusal()
+	if !strings.Contains(logs.String(), "1 free on the runner") {
+		t.Fatalf("the log does not say how much was free:\n%s", logs)
+	}
+	occupy("second", 1)
+	withNoneFree := refusal()
+	if !strings.Contains(logs.String(), "0 free on the runner") {
+		t.Fatalf("the log does not say how much was free:\n%s", logs)
+	}
+	if withOneFree != "sandbox capacity reached" || withNoneFree != withOneFree {
+		t.Fatalf("refusals were %q and %q, want the same fixed text", withOneFree, withNoneFree)
+	}
+}
 
 func TestRunInPoolStreamsRunOutputExitThenDone(t *testing.T) {
 	h := newWarmHarness(t)
@@ -134,8 +194,10 @@ func TestMemberDestroyedOutsideThePoolIsRetiredOnBorrow(t *testing.T) {
 		t.Fatalf("RunInPool: %v", err)
 	}
 	run := frames[0].GetRun()
-	if got := kinds(frames); got[0] != "run" || run.GetSandboxId() == victim || run.GetWarm() {
-		t.Fatalf("frames = %v, run = %v; want a run frame on a cold member other than the destroyed %s", got, run, victim)
+	// Not asserting its warmth: the retry cold-starts, unless the victim's destroy
+	// got in first and a refill is on its way, which the borrow rule prefers.
+	if got := kinds(frames); got[0] != "run" || run.GetSandboxId() == victim {
+		t.Fatalf("frames = %v, run = %v; want a run frame on a member other than the destroyed %s", got, run, victim)
 	}
 	waitFor(t, func() bool {
 		st := h.get(p.GetId()).GetStats()
@@ -391,15 +453,20 @@ func TestClientDisconnectMidColdStartLeaksNoSandbox(t *testing.T) {
 		t.Fatalf("stream after cancel: %v, want Canceled", err)
 	}
 
-	waitFor(t, func() bool { return len(h.backend.live()) == 0 }, "the half-started sandbox to be destroyed; live: %v", h.backend.live())
+	// The slot frees last: the backend is gone, then the record says so, and only
+	// then does the failed start return to the pool.
+	waitFor(t, func() bool {
+		st := h.get(p.GetId()).GetStats()
+		return st.GetStarting()+st.GetBusy()+st.GetIdle()+st.GetRetiring() == 0
+	}, "the pool to give up the slot")
+	if live := h.backend.live(); len(live) != 0 {
+		t.Fatalf("the backend still holds the half-started %v", live)
+	}
 	recs, _ := h.s.store.List()
 	for _, rec := range recs {
 		if rec.State != sandbox.StateDestroyed {
 			t.Fatalf("record %s is %s, want DESTROYED", rec.ID, rec.State)
 		}
-	}
-	if st := h.get(p.GetId()).GetStats(); st.GetStarting()+st.GetBusy()+st.GetIdle()+st.GetRetiring() != 0 {
-		t.Fatalf("pool still holds a member: %v", st)
 	}
 }
 
@@ -429,6 +496,35 @@ func TestPoolsAreScopedToTheirTenant(t *testing.T) {
 	q, err := h.client.CreatePool(h.ctx(), &v1.CreatePoolRequest{Spec: spec})
 	if err != nil || q.GetId() == p.GetId() {
 		t.Fatalf("CreatePool in another tenant = %v, %v", q, err)
+	}
+}
+
+// vora-api records a pool's route before it asks for the pool, so the id it chose
+// is the only handle on a pool whose create answer was lost.
+func TestCreatePoolUsesTheCallersID(t *testing.T) {
+	h := newWarmHarness(t)
+	id := ulid.NewPool()
+	p, err := h.client.CreatePool(h.ctx(), &v1.CreatePoolRequest{Spec: poolSpec(0, 1), PoolId: id})
+	if err != nil || p.GetId() != id {
+		t.Fatalf("CreatePool = %v, %v, want id %s", p, err, id)
+	}
+	if got := h.get(id); got.GetId() != id {
+		t.Fatalf("GetPool by the caller's id = %v", got)
+	}
+
+	// A repeat under another id finds the pool by name and reports its real id.
+	again, err := h.client.CreatePool(h.ctx(), &v1.CreatePoolRequest{Spec: poolSpec(0, 1), PoolId: ulid.NewPool()})
+	if err != nil || again.GetId() != id {
+		t.Fatalf("repeat = %v, %v, want the existing pool %s", again, err, id)
+	}
+
+	other := poolSpec(0, 1)
+	other.Name = "other"
+	if _, err := h.client.CreatePool(h.ctx(), &v1.CreatePoolRequest{Spec: other, PoolId: id}); status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("a second pool under a taken id: %v, want AlreadyExists", err)
+	}
+	if _, err := h.client.CreatePool(h.ctx(), &v1.CreatePoolRequest{Spec: other, PoolId: "../../etc"}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("a pool id that is not one, which names the pool's record path: %v, want InvalidArgument", err)
 	}
 }
 
@@ -533,10 +629,17 @@ func TestReaperHandsAnExpiredMemberToItsPool(t *testing.T) {
 	if err := h.s.ReapExpired(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, func() bool { return h.backend.isGone(member.ID) }, "the pool to retire the expired member")
+	// The backend is gone before the record says so, so wait for the record itself.
+	waitFor(t, func() bool {
+		rec, err := h.s.store.Load(member.ID)
+		return err == nil && rec.State.Terminal()
+	}, "the pool to retire the expired member")
 	rec, _ := h.s.store.Load(member.ID)
 	if rec.State != sandbox.StateDestroyed {
 		t.Fatalf("expired member is %s, want DESTROYED through its pool, not EXPIRED by the reaper", rec.State)
+	}
+	if !h.backend.isGone(member.ID) {
+		t.Fatal("the record says DESTROYED, but the backend still has the sandbox")
 	}
 	waitFor(t, func() bool {
 		st := h.get(p.GetId()).GetStats()
@@ -641,6 +744,8 @@ func TestRestartFailsOldMembersAndReloadsPools(t *testing.T) {
 	unsafe.Reuse = v1.PoolReuse_POOL_REUSE_UNSAFE_NO_RESET
 	h.s.cfg.PoolUnsafeReuse = true
 	granted := h.create(unsafe)
+	// Close on a member mid-start would undo it, and only a settled one is old.
+	h.waitIdle(granted.GetId(), 1)
 	oldIDs := h.backend.live()
 
 	// The old process stops: pools close, nothing is destroyed.

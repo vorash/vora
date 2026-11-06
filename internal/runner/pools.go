@@ -301,6 +301,10 @@ func (s *Server) admitPersisted(rec poolRecord, limits pool.Limits) (pool.Spec, 
 	return spec, "", nil
 }
 
+// errPoolCapacity is all a tenant reads of a capacity refusal. The free count that
+// wraps it is for the log: the runner-wide term depends on other tenants' usage.
+var errPoolCapacity = errors.New("sandbox capacity reached")
+
 // checkPoolCapacity admits a pool's whole reservation. The caller holds createMu.
 func (s *Server) checkPoolCapacity(spec pool.Spec) error {
 	global, forTenant, err := s.committed(spec.TenantID())
@@ -309,7 +313,7 @@ func (s *Server) checkPoolCapacity(spec pool.Spec) error {
 	}
 	maxGlobal, maxTenant := s.capacityCaps()
 	if global+spec.MaxSize() > maxGlobal || forTenant+spec.MaxSize() > maxTenant {
-		return status.Errorf(codes.ResourceExhausted, "sandbox capacity reached: pool needs %d of %d free", spec.MaxSize(), min(maxGlobal-global, maxTenant-forTenant))
+		return fmt.Errorf("%w: pool needs %d, with %d free on the runner and %d for the tenant", errPoolCapacity, spec.MaxSize(), maxGlobal-global, maxTenant-forTenant)
 	}
 	return nil
 }
@@ -424,7 +428,13 @@ func (s *Server) CreatePool(ctx context.Context, req *v1.CreatePoolRequest) (*v1
 			return nil, errPoolNotLoaded{n}
 		}
 	}
-	raw.ID = pool.ID(ulid.NewPool())
+	raw.ID = pool.ID(req.GetPoolId())
+	switch {
+	case raw.ID == "":
+		raw.ID = pool.ID(ulid.NewPool())
+	case !validPoolID(string(raw.ID)):
+		return nil, status.Error(codes.InvalidArgument, "invalid pool_id")
+	}
 	if raw.Template.Resources.DiskBytes == 0 {
 		raw.Template.Resources.DiskBytes = s.cfg.DefaultDiskBytes
 		if raw.Template.Resources.DiskBytes <= 0 {
@@ -451,7 +461,14 @@ func (s *Server) CreatePool(ctx context.Context, req *v1.CreatePoolRequest) (*v1
 			return nil, status.Errorf(codes.AlreadyExists, "pool %s exists with a different spec", spec.Name())
 		}
 	}
+	if s.pools.get(spec.ID()) != nil || s.pools.notLoadedPool(spec.ID()) != nil {
+		return nil, status.Errorf(codes.AlreadyExists, "pool id %s is taken", spec.ID())
+	}
 	if err := s.checkPoolCapacity(spec); err != nil {
+		if errors.Is(err, errPoolCapacity) {
+			s.logger.Warn("pool refused", "pool_id", spec.ID(), "name", spec.Name(), "tenant_id", spec.TenantID(), "error", err)
+			return nil, status.Error(codes.ResourceExhausted, errPoolCapacity.Error())
+		}
 		return nil, err
 	}
 	rec := poolRecord{ID: spec.ID(), Spec: spec.Raw(), CreatedAt: time.Now().UTC()}
@@ -526,6 +543,28 @@ func (s *Server) DeletePool(ctx context.Context, req *v1.DeletePoolRequest) (*v1
 	s.auditPool(e.spec.Raw(), req.GetActor().GetKeyId(), "pool_delete", e.spec.Name())
 	s.logger.Info("pool deleted", "pool_id", e.spec.ID(), "name", e.spec.Name(), "key_id", req.GetActor().GetKeyId())
 	return &v1.DeletePoolResponse{Drained: true}, nil
+}
+
+// GetPoolEvents returns a pool's own audit trail. It answers from the trail, not
+// the registry, because the event that matters most, pool_delete, is written once
+// the pool is gone. Each row names its tenant, so a pool of another tenant reads
+// as not found, and these rows hold pool names, not a member's raw backend text.
+func (s *Server) GetPoolEvents(ctx context.Context, req *v1.GetPoolEventsRequest) (*v1.GetSandboxEventsResponse, error) {
+	if !validPoolID(req.GetPoolId()) {
+		return nil, status.Error(codes.InvalidArgument, "invalid pool_id")
+	}
+	if req.GetTenantId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "tenant_id is required")
+	}
+	events, err := s.audit.Events(ctx, req.GetPoolId())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "read events: %v", err)
+	}
+	events = slices.DeleteFunc(events, func(e sandbox.Event) bool { return e.Actor.TenantID != req.GetTenantId() })
+	if len(events) == 0 {
+		return nil, status.Errorf(codes.NotFound, "pool %s not found", req.GetPoolId())
+	}
+	return &v1.GetSandboxEventsResponse{Events: eventsToProto(events)}, nil
 }
 
 // auditPool puts who declared or deleted a pool on the audit trail, under the
@@ -827,8 +866,8 @@ func (a poolSandboxes) Destroy(ctx context.Context, sandboxID string) error {
 }
 
 // Event records a pool event on the member's trail. Reason repeats kind and
-// detail, because the Postgres audit store has no columns for them until
-// step 17 and would otherwise store an empty row per reset.
+// detail because reason is all the wire's SandboxEvent carries, and because a
+// row written before the store had those columns has nothing else.
 func (a poolSandboxes) Event(sandboxID, kind, detail string) {
 	a.s.events.append(sandbox.Event{
 		SandboxID: sandboxID,

@@ -63,6 +63,8 @@ type Server struct {
 	brokerCreds map[string][]egress.Credential
 	denyMu      sync.Mutex
 	denyWindows map[string]denyWindow
+	// deniedWindow is the suppression window for denied egress decisions.
+	deniedWindow time.Duration
 	// allowedWindow is the aggregation window for allowed egress decisions.
 	allowedWindow    time.Duration
 	allowMu          sync.Mutex
@@ -124,6 +126,7 @@ const (
 	allowedSandboxBudget = 100
 	allowedOverflowHost  = "*"
 	defaultAllowedWindow = 10 * time.Second
+	defaultDeniedWindow  = time.Second
 )
 
 type allowedKey struct{ sandboxID, host, alias, reason string }
@@ -146,21 +149,22 @@ func NewServer(cfg config.Config, store *sandbox.Store, registry *runtime.Regist
 	}
 	workspaces := workspace.NewManager(cfg.SandboxesDir())
 	s := &Server{
-		cfg:         cfg,
-		store:       store,
-		registry:    registry,
-		images:      images.NewResolver(cfg, logger),
-		workspaces:  workspaces,
-		snapshots:   snapshot.NewStore(cfg.SnapshotsDir()),
-		quota:       quota.New(cfg.SandboxesDir()),
-		audit:       jsonl.New(workspaces.LogsDir),
-		runnerID:    runnerID,
-		logger:      logger,
-		metrics:     telemetry.New(),
-		handles:     make(map[string]sandboxHandle),
-		brokerCreds: make(map[string][]egress.Credential),
-		denyWindows: make(map[string]denyWindow),
-		localAudit:  true,
+		cfg:          cfg,
+		store:        store,
+		registry:     registry,
+		images:       images.NewResolver(cfg, logger),
+		workspaces:   workspaces,
+		snapshots:    snapshot.NewStore(cfg.SnapshotsDir()),
+		quota:        quota.New(cfg.SandboxesDir()),
+		audit:        jsonl.New(workspaces.LogsDir),
+		runnerID:     runnerID,
+		logger:       logger,
+		metrics:      telemetry.New(),
+		handles:      make(map[string]sandboxHandle),
+		brokerCreds:  make(map[string][]egress.Credential),
+		denyWindows:  make(map[string]denyWindow),
+		deniedWindow: defaultDeniedWindow,
+		localAudit:   true,
 
 		allowedWindow:    defaultAllowedWindow,
 		allowedWindows:   make(map[allowedKey]*allowedCount),
@@ -240,7 +244,7 @@ func (s *Server) RecordEgress(event egress.Event) error {
 		defer s.denyMu.Unlock()
 		window := s.denyWindows[event.SandboxID]
 		now := time.Now()
-		if now.Sub(window.start) >= time.Second {
+		if now.Sub(window.start) >= s.deniedWindow {
 			if window.suppressed > 0 {
 				summary := record
 				summary.Host, summary.Remote, summary.Alias = "", "", ""
@@ -926,6 +930,7 @@ func (s *Server) meterExec(ctx context.Context, sandboxID, executionID string, b
 			s.logger.Warn("exec usage unavailable", "sandbox_id", sandboxID, "execution_id", executionID, "error", err)
 			return usage
 		}
+		u.Measured = true
 		usage = u
 		return usage
 	}
@@ -935,30 +940,30 @@ func (s *Server) meterExec(ctx context.Context, sandboxID, executionID string, b
 // fatal: losing an audit write must not fail the caller's command.
 func (s *Server) recordExec(sandboxID string, req runtime.ExecRequest, started time.Time, stdoutBytes, stderrBytes int64, code int, reason runtime.ExitReason, usage runtime.Usage, keyID string, opts execOptions) {
 	finished := time.Now().UTC()
-	allowed, denied := s.egressInWindow(sandboxID, started, finished)
 	rec := sandbox.ExecRecord{
-		PoolID:          opts.poolID,
-		SandboxRun:      opts.sandboxRun,
-		ExecutionID:     req.ExecutionID,
-		SandboxID:       sandboxID,
-		Actor:           s.recordActor(sandboxID, keyID),
-		Command:         req.Command,
-		Args:            req.Args,
-		Cwd:             req.Cwd,
-		StartedAt:       started,
-		FinishedAt:      finished,
-		ExitCode:        code,
-		Reason:          reason,
-		StdoutBytes:     stdoutBytes,
-		StderrBytes:     stderrBytes,
-		CPUMillis:       usage.CPUMillis,
-		MemoryPeakBytes: usage.MemoryPeak,
-		MemoryPeakScope: usage.PeakScope,
-		OOMKills:        usage.OOMKills,
-		PidsLimitHits:   usage.PidsLimitHits,
-		EgressAllowed:   allowed,
-		EgressDenied:    denied,
+		PoolID:      opts.poolID,
+		SandboxRun:  opts.sandboxRun,
+		ExecutionID: req.ExecutionID,
+		SandboxID:   sandboxID,
+		Actor:       s.recordActor(sandboxID, keyID),
+		Command:     req.Command,
+		Args:        req.Args,
+		Cwd:         req.Cwd,
+		StartedAt:   started,
+		FinishedAt:  finished,
+		ExitCode:    code,
+		Reason:      reason,
+		StdoutBytes: stdoutBytes,
+		StderrBytes: stderrBytes,
 	}
+	if usage.Measured {
+		rec.CPUMillis, rec.OOMKills, rec.PidsLimitHits = &usage.CPUMillis, &usage.OOMKills, &usage.PidsLimitHits
+	}
+	// A window can read its counters with no memory.peak to read.
+	if usage.PeakScope != runtime.PeakUnspecified {
+		rec.MemoryPeakBytes, rec.MemoryPeakScope = &usage.MemoryPeak, usage.PeakScope
+	}
+	rec.EgressAllowed, rec.EgressDenied = s.egressInWindow(sandboxID, started, finished)
 	ctx, cancel := context.WithTimeout(context.Background(), s.auditTimeout)
 	defer cancel()
 	if err := s.audit.AppendExec(ctx, sandboxID, rec); err != nil {
@@ -968,15 +973,17 @@ func (s *Server) recordExec(sandboxID string, req runtime.ExecRequest, started t
 }
 
 // egressInWindow counts restricted-network decisions inside [start, end], so an
-// execution's outbound requests and policy violations are recorded with it.
-func (s *Server) egressInWindow(sandboxID string, start, end time.Time) (allowed, denied int64) {
+// execution's outbound requests and policy violations are recorded with it. Both
+// are nil if the store could not count them.
+func (s *Server) egressInWindow(sandboxID string, start, end time.Time) (allowed, denied *int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.auditTimeout)
 	defer cancel()
-	allowed, denied, err := s.audit.EgressCounts(ctx, sandboxID, start, end)
+	a, d, err := s.audit.EgressCounts(ctx, sandboxID, start, end)
 	if err != nil {
-		return 0, 0
+		s.logger.Warn("count exec egress failed", "sandbox_id", sandboxID, "error", err)
+		return nil, nil
 	}
-	return allowed, denied
+	return &a, &d
 }
 
 // SignalSandbox forwards a signal to the sandbox.
@@ -1154,10 +1161,11 @@ func (s *Server) ReapExpired(ctx context.Context) error {
 }
 
 // PruneAudit removes the tombstone, including the local audit trail, of
-// sandboxes that finished longer ago than the configured retention. Retention
-// is off by default: destroy never deletes audit, only this reaper does. It
-// only applies to the local JSONL trail: with an external audit store the
-// tombstone is what makes that store's rows reachable through the API.
+// sandboxes that finished longer ago than the configured retention, and the
+// local trail of pools that are gone. Retention is off by default: destroy never
+// deletes audit, only this reaper does. It only applies to the local JSONL
+// trail: with an external audit store the tombstone is what makes that store's
+// rows reachable through the API.
 func (s *Server) PruneAudit(ctx context.Context) error {
 	if !s.localAudit || s.cfg.AuditRetention <= 0 {
 		return nil
@@ -1173,7 +1181,7 @@ func (s *Server) PruneAudit(ctx context.Context) error {
 		}
 		s.pruneOne(ctx, rec.ID, cutoff)
 	}
-	return nil
+	return s.prunePoolTrails(cutoff)
 }
 
 // pruneOne removes one expired tombstone. It re-reads the record under the

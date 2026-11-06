@@ -29,7 +29,7 @@ func (s *Server) snapshotSandbox(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	route, err := s.authorizedRoute(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		s.writeRouteError(w, r, id, err)
 		return
 	}
 	rc, err := s.runnerByID(r.Context(), route.RunnerID)
