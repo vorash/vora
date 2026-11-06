@@ -178,10 +178,27 @@ func TestPoolDeclareRefusesWhatTheKeyMayNotSay(t *testing.T) {
 	if got := fr.creates[0].GetSpec().GetAgentId(); got != "agent-1" {
 		t.Fatalf("an agent-bound key declared for agent %q", got)
 	}
-	// Names are per tenant, so another agent's key cannot take this one over.
+	// Names are per tenant, so another agent's key cannot take this one over. It
+	// gets the answer every other route gives it, and the runner is not asked: its
+	// refusal names the pool.
 	otherAgent := mintKey(t, s, "tenant-a", "agent-2", ScopeSandbox)
-	if got := call(t, http.MethodPut, ts.URL+"/v1/pools/bound", otherAgent, poolBody(1, 1)); got.code != http.StatusConflict {
-		t.Fatalf("another agent redeclaring the name = %d %s, want 409", got.code, got.body)
+	want := call(t, http.MethodGet, ts.URL+"/v1/pools/nobody-has-this", otherAgent, nil)
+	before := fr.callCount()
+	got := call(t, http.MethodPut, ts.URL+"/v1/pools/bound", otherAgent, poolBody(1, 1))
+	if got.code != http.StatusNotFound || got != want {
+		t.Fatalf("another agent redeclaring the name = %d %s, want %d %s", got.code, got.body, want.code, want.body)
+	}
+	if fr.callCount() != before {
+		t.Fatalf("another agent's declare made %d runner calls", fr.callCount()-before)
+	}
+	// The agent that owns it, and a key for the whole tenant, still reach the runner.
+	if got := call(t, http.MethodPut, ts.URL+"/v1/pools/bound", bound, poolBody(1, 1)); got.code != http.StatusOK {
+		t.Fatalf("the owner redeclaring = %d %s, want 200", got.code, got.body)
+	}
+	owned := poolBody(1, 1)
+	owned["agentId"] = "agent-1"
+	if got := call(t, http.MethodPut, ts.URL+"/v1/pools/bound", tenantKey(t, s, "tenant-a"), owned); got.code != http.StatusOK {
+		t.Fatalf("a tenant key redeclaring = %d %s, want 200", got.code, got.body)
 	}
 }
 

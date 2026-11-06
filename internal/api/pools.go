@@ -230,6 +230,12 @@ func (s *Server) putPool(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Names are per tenant, so a declare can find another agent's pool. Every other
+	// route answers that with this same 404, and the runner would name the pool.
+	if !inserted && !s.canAccessPool(key, route) {
+		writeError(w, http.StatusNotFound, errPoolNotFound.Error())
+		return
+	}
 
 	rc, err := s.poolRunner(ctx, route.RunnerID)
 	if err != nil {
