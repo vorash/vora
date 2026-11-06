@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -48,6 +49,8 @@ type twoRunners struct {
 	runA *heldCreate
 	runB *fakeRunner
 	logs *bytes.Buffer
+
+	releaseOnce sync.Once
 }
 
 func newTwoRunners(t *testing.T) *twoRunners {
@@ -74,8 +77,15 @@ func newTwoRunners(t *testing.T) *twoRunners {
 	f.occupy(t, "x", "run_b", 50)
 	f.ts = httptest.NewServer(f.s.Handler())
 	t.Cleanup(f.ts.Close)
+	// Before the server closes, which waits for a declare still held: a test that
+	// fails with one held must report that, not hang until the test binary times out.
+	t.Cleanup(f.releaseCreate)
 	f.key = tenantKey(t, f.s, "tenant-a")
 	return f
+}
+
+func (f *twoRunners) releaseCreate() {
+	f.releaseOnce.Do(func() { close(f.runA.release) })
 }
 
 func (f *twoRunners) occupy(t *testing.T, name, runner string, cpu int64) {
@@ -127,7 +137,7 @@ func TestReadsDuringACreateKeepTheRoute(t *testing.T) {
 	if second.code != http.StatusOK {
 		t.Fatalf("second declare = %d %s, want 200", second.code, second.body)
 	}
-	close(f.runA.release)
+	f.releaseCreate()
 	firstAnswer := <-first
 	if firstAnswer.code != http.StatusCreated {
 		t.Fatalf("first declare = %d %s, want 201", firstAnswer.code, firstAnswer.body)
@@ -159,7 +169,7 @@ func TestDeclareThatLosesItsRouteRemovesItsPool(t *testing.T) {
 			t.Fatalf("the second declare did not land on run_b: run_a %d pools, run_b %d", f.runA.poolCount(), f.runB.poolCount())
 		}
 
-		close(f.runA.release)
+		f.releaseCreate()
 		late := <-first
 		if late.code != http.StatusServiceUnavailable || !strings.Contains(late.body, "retry") {
 			t.Fatalf("late declare = %d %s, want 503 asking for a retry", late.code, late.body)
@@ -180,7 +190,7 @@ func TestDeclareThatLosesItsRouteRemovesItsPool(t *testing.T) {
 		if got := call(t, http.MethodDelete, f.ts.URL+"/v1/pools/py", f.key, nil); got.code != http.StatusNoContent {
 			t.Fatalf("delete mid-create = %d %s, want 204", got.code, got.body)
 		}
-		close(f.runA.release)
+		f.releaseCreate()
 		if late := <-first; late.code != http.StatusServiceUnavailable {
 			t.Fatalf("late declare = %d %s, want 503", late.code, late.body)
 		}
@@ -197,7 +207,7 @@ func TestDeclareThatLosesItsRouteRemovesItsPool(t *testing.T) {
 		f.runA.mu.Lock()
 		f.runA.deleteErr = status.Error(codes.Unavailable, "gone")
 		f.runA.mu.Unlock()
-		close(f.runA.release)
+		f.releaseCreate()
 		if late := <-first; late.code != http.StatusServiceUnavailable {
 			t.Fatalf("late declare = %d %s, want 503", late.code, late.body)
 		}
@@ -286,7 +296,7 @@ func TestRedeclaresOfALostPoolAgreeOnOnePool(t *testing.T) {
 	if second.code != http.StatusOK {
 		t.Fatalf("second redeclare = %d %s, want 200", second.code, second.body)
 	}
-	close(f.runA.release)
+	f.releaseCreate()
 	firstAnswer := <-first
 	if firstAnswer.code != http.StatusOK {
 		t.Fatalf("first redeclare = %d %s, want 200", firstAnswer.code, firstAnswer.body)

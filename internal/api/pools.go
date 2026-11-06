@@ -129,8 +129,8 @@ func writePoolError(w http.ResponseWriter, err error) {
 	}
 }
 
-// writeDeclareRaced answers a declare that another request overtook. Nothing it did
-// remains, so the same declare again decides afresh.
+// writeDeclareRaced answers a declare that another request overtook. The same
+// declare again decides afresh from whatever the route says by then.
 func writeDeclareRaced(w http.ResponseWriter) {
 	w.Header().Set("Retry-After", "1")
 	writeError(w, http.StatusServiceUnavailable, "the pool changed while this declare ran; retry")
@@ -165,9 +165,9 @@ func createRefused(err error) bool {
 
 // putPool declares a pool. The route goes in first, carrying an id the API
 // minted, and the runner is asked second, so racing declares meet at the insert
-// and a pool always has a route by the time it exists. A declare that finds a
-// route goes to that route's runner, which is idempotent by (tenant, name) and
-// answers with the pool it has, or 409 on a different spec.
+// and a create whose answer is lost still has a route that can reach its pool. A
+// declare that finds a route goes to that route's runner, which is idempotent by
+// (tenant, name) and answers with the pool it has, or 409 on a different spec.
 //
 // The last write is a compare-and-set. A DELETE can release the route while the
 // create is in flight, since the runner answers NotFound until it finishes, and a
@@ -175,6 +175,11 @@ func createRefused(err error) bool {
 // gone or replaced deletes the pool it created and asks for a retry, so a late
 // loser leaves no pool that no route names. If the runner refuses that delete
 // too, the pool is logged at error level.
+//
+// A declare that gets no answer cannot do this. If a DELETE then overtakes it, a
+// pool can remain with no route: when the runner finishes a create after the
+// declare's deadline, or when a redeclare's new id was created and only the answer
+// was lost, so the route still names the old id.
 func (s *Server) putPool(w http.ResponseWriter, r *http.Request) {
 	spec := &v1.PoolSpec{}
 	if err := decodeProto(r, spec); err != nil {

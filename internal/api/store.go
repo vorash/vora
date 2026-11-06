@@ -114,10 +114,10 @@ type SnapshotRoute struct {
 
 // PoolRoute is the API's record of a pool: which runner holds it, who may use
 // it, and what it reserves. It is written before the runner is asked for the
-// pool and removed only once the runner says the pool is gone, so a pool the
-// runner may hold always has a route, and capacity is reserved for as long as
-// the route exists: MaxSize members of CPUMillis and MemoryBytes each. Members
-// get no SandboxRoute, so a runner replacing them never moves these books.
+// pool and removed only once the runner says the pool is gone or refuses to make
+// it, and capacity is reserved for as long as the route exists: MaxSize members of
+// CPUMillis and MemoryBytes each. Members get no SandboxRoute, so a runner replacing
+// them never moves these books.
 type PoolRoute struct {
 	TenantID    string `json:"tenant_id"`
 	Name        string `json:"name"`
