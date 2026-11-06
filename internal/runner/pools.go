@@ -301,6 +301,10 @@ func (s *Server) admitPersisted(rec poolRecord, limits pool.Limits) (pool.Spec, 
 	return spec, "", nil
 }
 
+// errPoolCapacity is all a tenant reads of a capacity refusal. The free count that
+// wraps it is for the log: the runner-wide term depends on other tenants' usage.
+var errPoolCapacity = errors.New("sandbox capacity reached")
+
 // checkPoolCapacity admits a pool's whole reservation. The caller holds createMu.
 func (s *Server) checkPoolCapacity(spec pool.Spec) error {
 	global, forTenant, err := s.committed(spec.TenantID())
@@ -309,7 +313,7 @@ func (s *Server) checkPoolCapacity(spec pool.Spec) error {
 	}
 	maxGlobal, maxTenant := s.capacityCaps()
 	if global+spec.MaxSize() > maxGlobal || forTenant+spec.MaxSize() > maxTenant {
-		return status.Errorf(codes.ResourceExhausted, "sandbox capacity reached: pool needs %d of %d free", spec.MaxSize(), min(maxGlobal-global, maxTenant-forTenant))
+		return fmt.Errorf("%w: pool needs %d, with %d free on the runner and %d for the tenant", errPoolCapacity, spec.MaxSize(), maxGlobal-global, maxTenant-forTenant)
 	}
 	return nil
 }
@@ -461,6 +465,10 @@ func (s *Server) CreatePool(ctx context.Context, req *v1.CreatePoolRequest) (*v1
 		return nil, status.Errorf(codes.AlreadyExists, "pool id %s is taken", spec.ID())
 	}
 	if err := s.checkPoolCapacity(spec); err != nil {
+		if errors.Is(err, errPoolCapacity) {
+			s.logger.Warn("pool refused", "pool_id", spec.ID(), "name", spec.Name(), "tenant_id", spec.TenantID(), "error", err)
+			return nil, status.Error(codes.ResourceExhausted, errPoolCapacity.Error())
+		}
 		return nil, err
 	}
 	rec := poolRecord{ID: spec.ID(), Spec: spec.Raw(), CreatedAt: time.Now().UTC()}

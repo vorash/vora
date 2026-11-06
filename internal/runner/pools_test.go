@@ -1,8 +1,10 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -18,6 +20,64 @@ import (
 	"github.com/vorash/vora/internal/sandbox"
 	"github.com/vorash/vora/internal/ulid"
 )
+
+// lockedBuffer collects logs from whichever goroutine writes them.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// How much of the runner is free depends on what other tenants hold, so a tenant
+// must read the same refusal whatever they hold, and the operator reads the numbers.
+func TestPoolCapacityRefusalSaysNothingOfOtherTenants(t *testing.T) {
+	h := newWarmHarness(t)
+	logs := &lockedBuffer{}
+	h.s.logger = slog.New(slog.NewTextHandler(logs, nil))
+	h.s.cfg.MaxSandboxes = 6
+	h.s.cfg.MaxSandboxesPerTenant = 6
+	refusal := func() string {
+		t.Helper()
+		mine := poolSpec(0, 2)
+		mine.Name = "mine"
+		_, err := h.client.CreatePool(h.ctx(), &v1.CreatePoolRequest{Spec: mine})
+		if status.Code(err) != codes.ResourceExhausted {
+			t.Fatalf("declare past the runner's cap: %v, want ResourceExhausted", err)
+		}
+		return status.Convert(err).Message()
+	}
+	occupy := func(name string, maxSize uint32) {
+		t.Helper()
+		spec := poolSpec(0, maxSize)
+		spec.Name, spec.TenantId = name, "someone-else"
+		h.create(spec)
+	}
+
+	occupy("first", 5)
+	withOneFree := refusal()
+	if !strings.Contains(logs.String(), "1 free on the runner") {
+		t.Fatalf("the log does not say how much was free:\n%s", logs)
+	}
+	occupy("second", 1)
+	withNoneFree := refusal()
+	if !strings.Contains(logs.String(), "0 free on the runner") {
+		t.Fatalf("the log does not say how much was free:\n%s", logs)
+	}
+	if withOneFree != "sandbox capacity reached" || withNoneFree != withOneFree {
+		t.Fatalf("refusals were %q and %q, want the same fixed text", withOneFree, withNoneFree)
+	}
+}
 
 func TestRunInPoolStreamsRunOutputExitThenDone(t *testing.T) {
 	h := newWarmHarness(t)
