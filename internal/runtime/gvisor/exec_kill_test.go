@@ -1,6 +1,7 @@
 package gvisor
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -49,7 +50,7 @@ fi
 sleep "$FAKE_EXEC_SECONDS" &
 echo $! > "$FAKE_SLEEP_PID"
 sleeper=$!
-[ -n "$pidfile" ] && echo 4242 > "$pidfile"
+[ -z "$FAKE_NO_ANSWER" ] && [ -n "$pidfile" ] && echo 4242 > "$pidfile"
 wait "$sleeper"
 exit $?
 `
@@ -193,7 +194,6 @@ func TestExecReasonWhenRunscExits128(t *testing.T) {
 		exit          string
 		want          runtime.ExitReason
 	}{
-		{name: "sandbox stopped", refuse: "1", state: "stopped", want: runtime.ReasonRuntimeFailure},
 		{name: "missing command in a running sandbox", refuse: "1", state: "running", want: runtime.ReasonExited},
 		{name: "sandbox dies after the command started", exit: "128", state: "stopped", want: runtime.ReasonRuntimeFailure},
 		{name: "program exits 128", exit: "128", state: "running", want: runtime.ReasonExited},
@@ -213,6 +213,52 @@ func TestExecReasonWhenRunscExits128(t *testing.T) {
 				t.Fatalf("reason = %s, want %s", got, tc.want)
 			}
 		})
+	}
+}
+
+// A stopped sandbox refuses the command before it runs, and only Exec's error lets a caller
+// act on that before it tells its client the command started. A pool retries on another
+// member on that error. The same refusal from a running sandbox is the caller's own missing
+// command, which must not cost a member.
+func TestExecIntoStoppedSandboxFailsAtExec(t *testing.T) {
+	b, hd, _ := fakeExecBackend(t, "0")
+	t.Setenv("FAKE_REFUSE", "1")
+	t.Setenv("FAKE_STATE", "stopped")
+	stream, err := b.Exec(t.Context(), runtime.Handle(fakeHandle{hd.id}), runtime.ExecRequest{Command: "true"})
+	if err == nil {
+		_ = stream.Close()
+		t.Fatal("Exec into a stopped sandbox returned a stream")
+	}
+	if !strings.Contains(err.Error(), "not running") {
+		t.Fatalf("err = %v", err)
+	}
+
+	t.Setenv("FAKE_STATE", "running")
+	stream, err = b.Exec(t.Context(), runtime.Handle(fakeHandle{hd.id}), runtime.ExecRequest{Command: "no-such-command"})
+	if err != nil {
+		t.Fatalf("a refusal from a running sandbox: %v", err)
+	}
+	defer func() { _ = stream.Close() }()
+	if got := lastChunk(t, stream).Exit; got.Reason != runtime.ReasonExited || got.ExitCode != runscExitFailure {
+		t.Fatalf("exit = %+v, want the program's own exit %d", got, runscExitFailure)
+	}
+}
+
+// A client that never answers must not hold Exec past its bound, or a stuck Sentry would
+// hold a run's first frame.
+func TestExecDoesNotWaitForeverForAnAnswer(t *testing.T) {
+	b, hd, _ := fakeExecBackend(t, "30")
+	t.Setenv("FAKE_NO_ANSWER", "1")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	begin := time.Now()
+	stream, err := b.Exec(ctx, runtime.Handle(fakeHandle{hd.id}), runtime.ExecRequest{Command: "true"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stream.Close() }()
+	if took := time.Since(begin); took < execAnswerWait || took > execAnswerWait+5*time.Second {
+		t.Fatalf("Exec took %s, want about %s", took, execAnswerWait)
 	}
 }
 

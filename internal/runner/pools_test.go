@@ -177,6 +177,69 @@ func TestExecThatDoesNotStartIsRetriedBeforeTheClientSeesAnything(t *testing.T) 
 	}
 }
 
+// A sandbox that dies under a running command reports it as the exec's exit, after the run
+// frame went out. The program may have run, so the run is not retried: the client sees the
+// failure, the audit trail says so, and the member does not come back.
+func TestExitWithRuntimeFailureEndsTheRunAndTheMember(t *testing.T) {
+	h := newWarmHarness(t)
+	var mu sync.Mutex
+	dead := ""
+	h.backend.set(func(b *poolBackend) {
+		b.execHook = func(ctx context.Context, id string, _ runtime.ExecRequest) (runtime.ExecStream, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			reason := runtime.ReasonExited
+			if dead == "" {
+				dead = id
+				reason = runtime.ReasonRuntimeFailure
+			}
+			return newCtxStream(ctx, false, runtime.ExecChunk{Exit: &runtime.ExecResult{ExitCode: 128, Reason: reason}}), nil
+		}
+		b.resetHook = func(_ context.Context, id string) error {
+			mu.Lock()
+			defer mu.Unlock()
+			if id == dead {
+				return errors.New("the sandbox is gone")
+			}
+			return nil
+		}
+	})
+	p := h.create(poolSpec(1, 1))
+	h.waitIdle(p.GetId(), 1)
+
+	frames, err := h.run(h.ctx(), p.GetId(), 5)
+	if err != nil {
+		t.Fatalf("RunInPool: %v", err)
+	}
+	if got := kinds(frames); !slices.Equal(got, []string{"run", "exit", "run_done"}) {
+		t.Fatalf("frames = %v", got)
+	}
+	id := frames[0].GetRun().GetSandboxId()
+	if got := frames[1].GetExit().GetReason(); got != v1.ExitReason_RUNTIME_FAILURE {
+		t.Fatalf("exit reason = %v, want RUNTIME_FAILURE", got)
+	}
+	if got := frames[2].GetRunDone(); got.GetOutcome() != v1.PoolResetOutcome_POOL_RESET_FAILED || got.GetRetireCause() != "reset_failed" {
+		t.Fatalf("run_done = %v, want a failed reset retiring the member", got)
+	}
+	execs, err := h.s.audit.Execs(context.Background(), id)
+	if err != nil || len(execs) != 1 || execs[0].Reason != runtime.ReasonRuntimeFailure {
+		t.Fatalf("records = %v (%v), want one RuntimeFailure", execs, err)
+	}
+	failed := h.metricFamily("vora_exec_failed_total")
+	if failed == nil || len(failed.GetMetric()) != 1 || failed.GetMetric()[0].GetCounter().GetValue() != 1 {
+		t.Fatalf("vora_exec_failed_total = %v, want 1: a dead sandbox is not a good exec", failed)
+	}
+
+	h.waitIdle(p.GetId(), 1)
+	frames, err = h.run(h.ctx(), p.GetId(), 5)
+	if err != nil {
+		t.Fatalf("the next run: %v", err)
+	}
+	if got := frames[0].GetRun().GetSandboxId(); got == id {
+		t.Fatalf("member %s came back after its sandbox died", id)
+	}
+}
+
 // A member destroyed behind the pool's back (the disk-quota enforcer still
 // acts on records directly) has no handle. The run must not reach the client
 // on it: the pool retires it and retries on another member.
