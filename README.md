@@ -302,7 +302,10 @@ for await (const chunk of sandbox.streamExec("for i in 1 2 3; do echo step $i; s
 
 `reason` explains how the run ended: `EXITED`, `OOM_KILLED`,
 `PIDS_LIMIT_EXCEEDED`, `TIMEOUT_EXCEEDED`, `DISK_QUOTA_EXCEEDED` or
-`RUNTIME_FAILURE`, which means the sandbox died under the command.
+`RUNTIME_FAILURE`, which means the sandbox failed rather than the program: it died
+under the command, or couldn't start a process for it. A command that doesn't exist
+is the command's own failure: `EXITED`, with exit code 127 on `bwrap` and 128 on
+`gvisor`.
 
 ### What an exec used
 
@@ -396,7 +399,10 @@ The spec's fields:
 
 `reuse` has two modes:
 
-- `POOL_REUSE_RESET` proves a member clean between runs.
+- `POOL_REUSE_RESET` resets a member between runs, and destroys it unless the host
+  can prove two things: no process remains but init's, and every writable mount is
+  back to its listing from when the member was prepared. A later run can still see
+  the traces listed at the end of this section.
 - `POOL_REUSE_UNSAFE_NO_RESET` skips the reset, so a run sees what the last one
   left. It exists as a baseline for measuring what a reset costs. It needs an
   admin key and a runner started with `VORA_POOL_UNSAFE_REUSE=allow`.
@@ -421,7 +427,8 @@ What a client sees when something goes wrong:
 | No member came free in `borrowTimeoutMs` | 429 with `Retry-After`. The program did not run | |
 | The first member's exec could not start | A normal run on another member, or 503 if the retry fails too | Destroyed |
 | The program runs past `timeoutSeconds` | `exit` with `TIMEOUT_EXCEEDED`, within about 5 s more if a process holds its output | Reset |
-| The program runs out of memory | `exit` with `OOM_KILLED` | bwrap: reset. gVisor: destroyed |
+| The command doesn't exist | `exit` with `EXITED`, and exit code 127 on bwrap or 128 on gVisor | Reset |
+| The program runs out of memory | bwrap: `exit` with `OOM_KILLED`. gVisor: the sandbox goes down with it, so any `exit` other than `EXITED`, or the error line below | bwrap: reset. gVisor: destroyed |
 | The sandbox dies under the program | `exit` with `RUNTIME_FAILURE`, or a last line `{"error":{"code":"run_failed",…}}` in place of `exit` | Destroyed |
 | The reset can't prove the member clean | `runDone` with `POOL_RESET_FAILED` and a `retireCause` | Destroyed |
 | The client disconnects | Nothing | Reset |
@@ -433,12 +440,18 @@ What a client sees when something goes wrong:
 `unsafe_reuse_not_granted`, `spec_refused`, `capacity` or `duplicate_name`.
 
 `GET /v1/pools/{name}/sandboxes/{id}/execs` and `.../events` read a member's audit
-trail. `run.sandboxRun` marks run boundaries in it. The plain sandbox routes refuse
-a member with 409.
+trail. `run.sandboxRun` marks run boundaries in it. Every plain `/v1/sandboxes/{id}`
+route refuses a member with 409, reads included, so those two are how to read one.
+`GET /v1/sandboxes` still lists it, with its pool. Behind the API, the runner's own
+RPCs refuse what would change a member: start, exec, signal, destroy, snapshot and
+files. Its RPCs for a sandbox's record, stats, events and execs stay open.
 
 A later run on a member can still tell that an earlier one happened, through PID
 numbers, file access times and directory inode flags. A pool belongs to one tenant,
 so these stay open ([ADR 028](docs/adr/028-warm-pools.md)).
+
+The [Python](sdk/python/README.md#pools) and
+[TypeScript](sdk/typescript/README.md#pools) SDKs wrap these routes.
 
 ### Allow one API, deny everything else
 
@@ -632,10 +645,13 @@ its flag is removed:
   user, and `runsc` needs root or a rootlesskit wrapper
   ([ADR 011](docs/adr/011-rootless-containerd.md)).
 - **On gVisor, `pids` doesn't limit guest processes.** It counts the Sentry's
-  host threads: 800 guest processes held `pids.current` at 38 on vora-mini. A fork
-  bomb is bounded only by `memory.max`. Reaching `pids` ends the whole sandbox. A
-  limit of 26 or less can't start, and 28 to 36 died under load
-  ([ADR 028](docs/adr/028-warm-pools.md)).
+  host threads: 800 guest processes held `pids.current` at 38 on vora-mini. That
+  leaves `memory.max` to stop a fork bomb, and no logged run has measured one stopping
+  there. Reaching `pids` ends the whole sandbox. A limit of 26 or less can't start,
+  and 28 to 36 died under load ([ADR 028](docs/adr/028-warm-pools.md)).
+- **Warm pools have barely run.** Through a runner, a pool has run only in CI, on
+  `bwrap` with 2 vCPUs. It has never run on gVisor or on vora-mini, and no logged run
+  has measured one under load.
 - **Sandboxes outlive a dead runner briefly**, then exit; orphans are cleaned
   up at the next start.
 - **The API store is in memory by default.** Set `VORA_API_DSN` for anything

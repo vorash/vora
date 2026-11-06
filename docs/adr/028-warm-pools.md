@@ -42,16 +42,24 @@ Any step that fails, is refused, can't be parsed or times out returns
 only from a reset that returned nil. `Prepare` runs one full reset on the fresh
 sandbox, so a backend that can't reset fails at warm-up and not at first reuse.
 
-**3. Every exec on a member is finished or cancelled before its reset, and none
-starts until the reset returns.** An exec issued with a live context during a
+**3. Every exec on a member is finished, or has its cancel requested, before its
+reset, and the runner starts none until the reset returns.** An exec issued with a live context during a
 reset can leak past the proof: 198 of 300 tries returned clean with a run's
 process and file present, and cancelling first gave 300 of 300 clean (bwrap,
 backend level, step 10 of the build, 2026-11-05; the log names no host for this
-one). `RunInPool` runs its
-exec on the client's context and closes it before it returns, the pool resets
-only after that, and `rejectPooled` refuses every plain RPC that could change a
-member. On gVisor a reset also waits for each `runsc exec` client to answer, as
-a killed client's request can still reach the Sentry later.
+one). `RunInPool` runs its exec on the client's context, and `rejectPooled` refuses
+every plain RPC that could change a member.
+
+The order this relies on is that `runExec` closes the exec's stream before `Pool.Run`
+checks the member in, and check-in is what starts the reset. A closed stream means the
+cancel was requested, not that it arrived, so the request may still be on its way to
+the agent or to `runsc`. What covers that gap differs by backend:
+
+- On bwrap the agent holds `execMu` while an exec runs, its restore waits for `execMu`,
+  and an exec whose cancel has arrived by the time it gets `execMu` doesn't start. The
+  host proves the process set after the restore as well as before it.
+- On gVisor a reset waits for each `runsc exec` client to answer, as a killed client's
+  request can still reach the Sentry later.
 
 **4. What a reset closes, and how:**
 
@@ -66,8 +74,8 @@ a killed client's request can still reach the Sentry later.
 | A changed nice, affinity, rlimit or sysctl on a long-lived process | detected at reset, and costs the member | `reset_kernel_test.go` |
 
 `tests/integration/leak_test.go` holds the rows.
-`tests/integration/pool_leak_test.go` runs them through a real API and runner on
-both backends.
+`tests/integration/pool_leak_test.go` runs them through a real API and runner. It has
+rows for both backends and has run only on bwrap, as `Consequences` says.
 
 **5. A pool is single-tenant by construction, and these channels stay open.** A
 pool belongs to one tenant, its routes are tenant-scoped, and a member never
@@ -103,8 +111,9 @@ workload one, and an exec loop passed 150 of 150 there (bwrap, vora-mini,
 2026-11-05). A workload that leaves a process behind needs 13.
 
 Under gVisor it counts the Sentry's host threads, not guest tasks: 800 guest
-processes held `pids.current` at 38. So it doesn't bound a fork bomb, only
-`memory.max` does, and reaching it ends the whole sandbox. Limits from 12 to 26
+processes held `pids.current` at 38. So it doesn't bound guest tasks, which leaves
+`memory.max` to stop a fork bomb, and no logged run has measured one stopping there.
+Reaching `pids` ends the whole sandbox. Limits from 12 to 26
 can't start, 28 to 36 died under load, and 48, 64 and 128 each passed 60 cycles
 (gVisor, vora-mini, 2026-11-05). Thread growth has no measured plateau, so the
 floor is 64, with a margin above the lowest that passed.
@@ -115,6 +124,11 @@ retires that member and retries the run once on another, before the client sees
 a frame. A sandbox that dies under a running command is different, as the program
 may have run. The client sees a `RUNTIME_FAILURE` exit or an error line, and the
 member's reset fails.
+
+A command that doesn't exist is neither of these, and costs nothing but its own run.
+The agent or `runsc` answers, so the client sees an ordinary `EXITED` exit, with code
+127 on bwrap and 128 on gVisor, and the member goes through its reset and stays.
+`vora_exec_failed_total` doesn't count it.
 
 ## Alternatives
 
@@ -142,9 +156,10 @@ member's reset fails.
   also takes the sandbox down, which costs the member.
 - `max_size` is reserved against the runner's capacity whether members are busy
   or not.
-- Every `Exec` on gVisor now waits for `runsc exec` to answer before it returns,
-  bounded at 2 s, and an exec into a stopped sandbox is an error from `Exec`
-  rather than an exit chunk.
+- Every `Exec` on gVisor now waits up to 2 s for `runsc exec` to answer before it
+  returns. A client that exits without having started the command also costs a
+  `runsc state`, bounded at 5 s, so by those bounds the worst case is about 7 s. An
+  exec into a stopped sandbox is an error from `Exec` rather than an exit chunk.
 
 ## Refs
 
