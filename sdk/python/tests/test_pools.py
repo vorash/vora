@@ -26,7 +26,7 @@ from vora import (
     VoraError,
 )
 from vora._pools import Pool
-from vora._types import decode_pool_info
+from vora._types import decode_pool_info, decode_sandbox_exec, decode_sandbox_info
 
 from wire_server import GOLDEN, Reply, Sent, WireServer, answer_reply, run_reply
 
@@ -348,10 +348,9 @@ async def test_a_cut_connection_after_exit_keeps_the_result(wire) -> None:
 async def test_leaving_the_stream_before_exit_disconnects_so_the_api_cancels_the_run(wire) -> None:
     client, server = await wire(lambda _: run_reply("warm_reset", cut_after=1, hold=True))
 
-    stream = handle(client).stream_run("sleep 60", timeout_seconds=60)
-    first = await stream.__anext__()
-    assert first.kind == "run"
-    await stream.aclose()
+    async for chunk in handle(client).stream_run("sleep 60", timeout_seconds=60):
+        assert chunk.kind == "run"
+        break
 
     await asyncio.wait_for(server.client_left.wait(), timeout=5)
 
@@ -710,6 +709,7 @@ async def test_a_global_admin_names_the_tenant_on_every_route(wire) -> None:
 
     declare, *rest = server.requests
     assert json.loads(declare.body)["tenantId"] == "tenant-a"
+    assert "tenantId" not in json.loads(declare.body)["sandbox"]
     assert all("tenant_id=tenant-a" in sent.path for sent in rest), [sent.path for sent in rest]
     assert len(rest) == 7
 
@@ -801,12 +801,20 @@ async def test_a_plain_route_raises_the_typed_error_with_its_status(boot, status
     assert str(excinfo.value) == "refused"
 
 
+def test_an_audit_record_and_a_sandbox_name_their_pool() -> None:
+    record = decode_sandbox_exec({"poolId": "pool_1", "sandboxRun": 2})
+    assert (record.pool_id, record.sandbox_run) == ("pool_1", 2)
+    assert decode_sandbox_info({"id": "sbx_1", "poolId": "pool_1"}).pool_id == "pool_1"
+    assert decode_sandbox_info({"id": "sbx_1"}).pool_id is None
+
+
 def test_a_retry_after_date_from_a_proxy_is_understood() -> None:
     from vora._http import _parse_retry_after
 
     assert _parse_retry_after("2") == 2.0
     assert _parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT") == 0.0
     assert _parse_retry_after("soon") is None
+    assert _parse_retry_after("nan") is None
     assert _parse_retry_after(None) is None
 
 

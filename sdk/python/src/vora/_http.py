@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import random
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -229,9 +230,11 @@ def _parse_retry_after(value: str | None) -> float | None:
     if value is None:
         return None
     try:
-        return max(float(value), 0.0)
+        seconds = float(value)
     except ValueError:
         pass
+    else:
+        return max(seconds, 0.0) if math.isfinite(seconds) else None
     try:
         when = parsedate_to_datetime(value)
     except (TypeError, ValueError):

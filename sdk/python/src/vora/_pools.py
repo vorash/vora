@@ -384,8 +384,9 @@ class Pool:
 
         Each call to the API waits up to about 25 s for running commands to finish,
         and the wait is repeated until the pool is gone or ``max_wait_seconds`` has
-        passed, which raises ``PoolDrainingError``. Runs in progress finish. Calling
-        ``delete`` again picks up the same drain.
+        passed, which raises ``PoolDrainingError``. A runner that is down is waited
+        out the same way, and its last refusal is raised. Runs in progress finish.
+        Calling ``delete`` again picks up the same drain.
         """
         sleep = self._retry.sleep if self._retry is not None else asyncio.sleep
         deadline = time.monotonic() + max_wait_seconds

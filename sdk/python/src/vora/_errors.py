@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ._types import PoolRun
 
 
 class VoraError(Exception):
@@ -93,7 +96,7 @@ class PoolRunError(VoraError):
     line, or ``stream_ended`` when the connection ended with no such line.
     """
 
-    def __init__(self, code: str, message: str, *, run: Any = None) -> None:
+    def __init__(self, code: str, message: str, *, run: "PoolRun | None" = None) -> None:
         super().__init__(message)
         self.code = code
         self.run = run

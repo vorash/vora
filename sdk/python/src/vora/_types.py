@@ -425,7 +425,9 @@ def encode_exec_request(options: Mapping[str, Any]) -> Json:
 
 def encode_pool_spec(name: str, options: Mapping[str, Any]) -> Json:
     """The ``uint32`` limits go as JSON numbers, the ``int64`` ones as strings."""
-    spec: Json = {"name": name, "sandbox": encode_sandbox_spec(options)}
+    # The pool owns its members' identity, so the template must not name one.
+    template = {key: value for key, value in options.items() if key not in ("tenant_id", "agent_id")}
+    spec: Json = {"name": name, "sandbox": encode_sandbox_spec(template)}
     for wire, key in (("tenantId", "tenant_id"), ("agentId", "agent_id")):
         if options.get(key) is not None:
             spec[wire] = options[key]
