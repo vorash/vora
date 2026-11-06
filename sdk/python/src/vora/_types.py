@@ -37,8 +37,10 @@ ExitReason = Literal[
 
 
 PoolReuse = Literal["POOL_REUSE_RESET", "POOL_REUSE_UNSAFE_NO_RESET"]
-PoolState = Literal["POOL_ACTIVE", "POOL_DRAINING", "POOL_NOT_LOADED"]
+PoolState = Literal["POOL_ACTIVE", "POOL_DRAINING", "POOL_NOT_LOADED", "POOL_NOT_ON_RUNNER"]
 PoolResetOutcome = Literal["POOL_RESET_OK", "POOL_RESET_FAILED", "POOL_RESET_SKIPPED", "POOL_RESET_RETIRED"]
+
+_STATES_WITH_STATS: frozenset[str | None] = frozenset({"POOL_ACTIVE", "POOL_DRAINING"})
 
 REUSE_SHORTHANDS: dict[str, str] = {
     "reset": "POOL_REUSE_RESET",
@@ -218,8 +220,9 @@ class PoolSpec:
 class PoolStats:
     """A runner's snapshot of one pool. Counters reset when the runner restarts.
 
-    These are ints, not ``int | None``: the runner fills all of them from memory on
-    every answer, so a key protojson left out is a zero the runner did report.
+    These are ints, not ``int | None``: ``PoolInfo.stats`` is set only for a pool the
+    runner has live, and the runner fills all of them from memory on every such answer,
+    so a key protojson left out is a zero the runner did report.
     """
 
     starting: int = 0
@@ -242,9 +245,18 @@ class PoolStats:
 class PoolInfo:
     """A pool's record.
 
-    Read ``state`` before ``stats``. In a listing, a pool whose runner did not answer
-    has ``state`` and ``stats`` both None. A ``POOL_NOT_LOADED`` pool has all-zero
-    stats, and ``not_loaded_reason`` says why it has no members.
+    Read ``state`` before ``stats``. ``stats`` is set for ``POOL_ACTIVE`` and
+    ``POOL_DRAINING`` only, and is None, never zeros, when nothing was measured:
+
+    - ``POOL_NOT_ON_RUNNER``: the route holds the reservation and the name, and the
+      runner has no such pool. ``declare`` creates it again under a new id, and
+      ``delete`` releases the reservation.
+    - ``POOL_NOT_LOADED``: the runner refused it at boot. ``not_loaded_reason`` says why.
+    - ``state`` None, in a listing: the runner did not answer.
+
+    In the first and last case ``spec`` holds only what the route knows: the name,
+    tenant, agent and reuse. ``reuse`` None is treated as a reset. ``id`` changes when a
+    lost pool is declared again, so don't keep it across a declare.
     """
 
     id: str
@@ -692,12 +704,15 @@ def decode_pool_stats(raw: Any) -> PoolStats | None:
 
 def decode_pool_info(raw: Any) -> PoolInfo:
     source = _object(raw) or {}
+    state = cast("PoolState | None", _string(source.get("state")))
     return PoolInfo(
         id=_string(source.get("id")) or "",
         spec=decode_pool_spec(source.get("spec")),
-        state=cast("PoolState | None", _string(source.get("state"))),
+        state=state,
         runner_id=_string(source.get("runnerId")),
-        stats=decode_pool_stats(source.get("stats")),
+        # A POOL_NOT_LOADED answer carries an empty ``stats`` that no pool filled, and
+        # its zeros must not read as measured.
+        stats=decode_pool_stats(source.get("stats")) if state in _STATES_WITH_STATS else None,
         created_at_unix_ms=_int(source.get("createdAtUnixMs")),
         not_loaded_reason=_string(source.get("notLoadedReason")),
     )

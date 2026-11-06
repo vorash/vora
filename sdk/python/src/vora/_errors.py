@@ -80,6 +80,14 @@ class PoolNotLoadedError(ConflictError):
         """``not_loaded_reason`` from the pool's record, for example ``backend_missing``."""
 
 
+class PoolNotOnRunnerError(ConflictError):
+    """The pool's route holds its reservation and name, and its runner has no such pool.
+
+    It does not come back on its own, so retrying won't help. ``declare`` creates it
+    again under a new id, and ``delete`` releases the reservation.
+    """
+
+
 class PoolSpecConflictError(ConflictError):
     """A live pool of this name has a different spec. Specs are immutable."""
 

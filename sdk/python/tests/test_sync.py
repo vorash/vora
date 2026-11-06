@@ -55,7 +55,7 @@ def test_sync_pool_runs_streams_and_deletes() -> None:
     _, api = make_client(handler)
     client = Vora(base_url="http://vora.test", api_key="vora_test", client=api.http)
     try:
-        pool = client.pools.declare("py", image="vora/base", size=1)
+        pool = client.pools.declare("py", image="vora/base", cpu="100m", memory="1Mi", size=1)
         assert pool.id == "pool_1"
         assert client.pools.get("py").name == "py"
 

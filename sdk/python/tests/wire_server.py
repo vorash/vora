@@ -31,6 +31,8 @@ class Reply:
     cut_after: int | None = None
     # Answer the status and these lines, then wait for the client to leave.
     hold: bool = False
+    # Say nothing for this long first, as a silent command or a slow first frame does.
+    delay: float = 0.0
 
 
 def run_reply(name: str, **overrides: Any) -> Reply:
@@ -88,6 +90,7 @@ class WireServer:
         sent = Sent(method, path, headers, body)
         self.requests.append(sent)
         reply = self.route(sent)
+        await asyncio.sleep(reply.delay)
 
         phrase = {200: "OK", 201: "Created", 202: "Accepted", 204: "No Content"}.get(reply.status, "Refused")
         out = [f"HTTP/1.1 {reply.status} {phrase}"]

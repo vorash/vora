@@ -181,6 +181,9 @@ class Transport:
             self.base_url + path,
             headers=self._headers("application/json"),
             content=body,
+            # A silent command sends nothing to read until it exits, and httpx's default
+            # 5 s would end it early. The exec's own timeout_seconds is its bound.
+            timeout=httpx.Timeout(30.0, read=None),
         ) as response:
             if response.is_error:
                 await response.aread()

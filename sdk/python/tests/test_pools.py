@@ -16,6 +16,7 @@ from vora import (
     GatewayTimeoutError,
     PoolDrainingError,
     PoolNotLoadedError,
+    PoolNotOnRunnerError,
     PoolRunError,
     PoolSpecConflictError,
     RateLimitedError,
@@ -26,7 +27,8 @@ from vora import (
     VoraError,
 )
 from vora._pools import Pool
-from vora._types import decode_pool_info, decode_sandbox_exec, decode_sandbox_info
+from vora._sandbox import Sandbox
+from vora._types import SandboxInfo, decode_pool_info, decode_sandbox_exec, decode_sandbox_info
 
 from wire_server import GOLDEN, Reply, Sent, WireServer, answer_reply, run_reply
 
@@ -58,6 +60,9 @@ async def wire():
         await client.aclose()
     for server in servers:
         await server.stop()
+
+
+LIMITS = GOLDEN["limits"]
 
 
 def handle(client: Vora, name: str = "py", tenant_id: str | None = None) -> Pool:
@@ -464,7 +469,7 @@ async def test_declare_retries_by_default_as_it_is_idempotent(wire) -> None:
     replies = iter([run_reply("runner_loading"), answer_reply("get_active")])
     client, server = await wire(lambda _: next(replies), retry=policy)
 
-    pool = await client.pools.declare("py", image="vora/base")
+    pool = await client.pools.declare("py", image="vora/base", cpu="100m", memory="1Mi")
 
     assert pool.info.state == "POOL_ACTIVE"
     assert len(server.requests) == 2
@@ -508,7 +513,7 @@ async def test_declaring_over_a_different_spec_is_typed(wire) -> None:
     )
 
     with pytest.raises(PoolSpecConflictError) as excinfo:
-        await client.pools.declare("py", image="vora/other")
+        await client.pools.declare("py", image="vora/other", cpu="100m", memory="1Mi")
 
     assert excinfo.value.status == 409
     assert "different spec" in str(excinfo.value)
@@ -522,7 +527,7 @@ async def test_declaring_over_a_draining_pool_is_typed(wire) -> None:
     )
 
     with pytest.raises(PoolDrainingError):
-        await client.pools.declare("py", image="vora/base")
+        await client.pools.declare("py", image="vora/base", cpu="100m", memory="1Mi")
 
 
 async def test_a_conflict_the_record_cannot_explain_stays_a_plain_conflict(wire) -> None:
@@ -533,10 +538,196 @@ async def test_a_conflict_the_record_cannot_explain_stays_a_plain_conflict(wire)
     )
 
     with pytest.raises(ConflictError) as excinfo:
-        await client.pools.declare("py", image="vora/base", reuse="unsafe_no_reset")
+        await client.pools.declare("py", image="vora/base", cpu="100m", memory="1Mi", reuse="unsafe_no_reset")
 
     assert type(excinfo.value) is ConflictError
     assert "unsafe reuse" in str(excinfo.value)
+
+
+# --- A pool its runner lost ------------------------------------------------------
+
+
+async def test_a_lost_pool_reads_as_its_state_with_nothing_measured(wire) -> None:
+    client, _ = await wire(lambda _: answer_reply("get_not_on_runner"))
+
+    pool = await client.pools.get("py")
+
+    assert pool.info.state == "POOL_NOT_ON_RUNNER"
+    assert pool.info.stats is None
+    assert await pool.stats() is None
+    assert pool.info.spec is not None
+    assert pool.info.spec.name == "py"
+    assert pool.info.spec.sandbox is None
+    assert pool.info.created_at_unix_ms is None
+
+
+async def test_a_run_on_a_lost_pool_is_typed_and_never_retried(wire) -> None:
+    policy, waited = no_wait()
+    client, server = await wire(
+        lambda sent: answer_reply("run_not_on_runner") if sent.method == "POST" else answer_reply("get_not_on_runner")
+    )
+
+    with pytest.raises(PoolNotOnRunnerError) as excinfo:
+        await handle(client).run("true", [], timeout_seconds=10, retry=policy)
+
+    assert isinstance(excinfo.value, ConflictError)
+    assert excinfo.value.status == 409
+    assert "declare it again" in str(excinfo.value)
+    assert [sent.method for sent in server.requests] == ["POST", "GET"]
+    assert waited == []
+
+
+async def test_redeclaring_a_lost_pool_moves_to_the_new_id_and_no_id_is_cached(wire) -> None:
+    answers = {"PUT": answer_reply("declare_lost_pool"), "POST": run_reply("warm_reset")}
+    reads = iter([answer_reply("get_not_on_runner"), answer_reply("declare_lost_pool")])
+    client, server = await wire(lambda sent: answers.get(sent.method) or next(reads))
+
+    held = await client.pools.get("py")
+    old_id = held.id
+
+    declared = await client.pools.declare("py", image="vora/base", cpu="100m", memory="1Mi")
+    assert declared.id != old_id
+    assert declared.info.state == "POOL_ACTIVE"
+
+    # The handle from before the declare still reaches the pool, as it goes by name.
+    await held.run("true", [], timeout_seconds=10)
+    assert await held.refresh() == declared.info
+    assert held.id == declared.id
+
+    assert all(old_id not in sent.path and declared.id not in sent.path for sent in server.requests)
+
+
+async def test_a_conflict_on_declaring_a_lost_pool_stays_a_plain_conflict(wire) -> None:
+    client, _ = await wire(
+        lambda sent: Reply(status=409, body='{"error":"pool id is taken"}')
+        if sent.method == "PUT"
+        else answer_reply("get_not_on_runner")
+    )
+
+    with pytest.raises(ConflictError) as excinfo:
+        await client.pools.declare("py", image="vora/base", cpu="100m", memory="1Mi")
+
+    assert type(excinfo.value) is ConflictError
+
+
+# --- What declare refuses --------------------------------------------------------
+
+
+async def test_a_declare_cannot_leave_out_cpu_or_memory(wire) -> None:
+    client, server = await wire(lambda _: answer_reply("declare_no_resources"))
+
+    with pytest.raises(TypeError):
+        await client.pools.declare("py", image="vora/base")  # type: ignore[call-arg]
+    assert server.requests == []
+
+    with pytest.raises(VoraError) as excinfo:
+        await client.pools.declare("py", image="vora/base", cpu=None, memory=None)  # type: ignore[arg-type]
+    assert excinfo.value.status == 400
+    assert "cpu_millis and memory_bytes" in str(excinfo.value)
+
+
+async def test_a_borrow_timeout_past_the_cap_is_the_apis_400(wire) -> None:
+    client, server = await wire(lambda _: answer_reply("declare_borrow_too_long"))
+
+    with pytest.raises(VoraError) as excinfo:
+        await client.pools.declare(
+            "py", image="vora/base", cpu="100m", memory="1Mi", borrow_timeout_ms=LIMITS["borrowTimeoutMaxMs"] + 1
+        )
+
+    assert excinfo.value.status == 400
+    assert "borrow_timeout" in str(excinfo.value)
+    assert json.loads(server.requests[0].body)["borrowTimeoutMs"] == "300001"
+
+
+async def test_another_agents_pool_name_is_a_plain_404_with_no_further_calls(wire) -> None:
+    policy, waited = no_wait()
+    client, server = await wire(lambda _: answer_reply("declare_other_agent"), retry=policy)
+
+    with pytest.raises(VoraError) as excinfo:
+        await client.pools.declare("owned", image="vora/base", cpu="100m", memory="1Mi")
+
+    assert type(excinfo.value) is VoraError
+    assert excinfo.value.status == 404
+    assert len(server.requests) == 1
+    assert waited == []
+
+
+async def test_a_declare_refused_for_now_honours_retry_after_or_says_so(wire) -> None:
+    policy, waited = no_wait()
+    replies = iter(["declare_runner_down", "declare_lost_pool"])
+    client, server = await wire(lambda _: answer_reply(next(replies)), retry=policy)
+
+    pool = await client.pools.declare("py", image="vora/base", cpu="100m", memory="1Mi")
+
+    assert pool.info.state == "POOL_ACTIVE"
+    assert len(server.requests) == 2
+    assert len(waited) == 1
+    assert 1.0 <= waited[0] <= 1.0 + policy.base_delay
+
+    client, _ = await wire(lambda _: answer_reply("declare_runner_down"), retry=None)
+    with pytest.raises(UnavailableError) as excinfo:
+        await client.pools.declare("py", image="vora/base", cpu="100m", memory="1Mi")
+    assert excinfo.value.retry_after == 1.0
+
+
+# --- What a later consumer relies on ---------------------------------------------
+
+
+async def test_an_admin_declares_for_a_tenant_whose_key_then_runs_and_reads_each_frame(wire) -> None:
+    runs = iter(["unsafe_no_reset", "warm_reset", "cold_first_run_nonzero_exit"])
+
+    def route(sent: Sent) -> Reply:
+        if sent.method == "PUT":
+            return Reply(status=201, body=GOLDEN["answers"]["get_active"]["body"])
+        if sent.method == "GET":
+            return answer_reply("get_active")
+        return run_reply(next(runs))
+
+    admin, server = await wire(route)
+    await admin.pools.declare(
+        "py", image="vora/base", cpu="100m", memory="1Mi", tenant_id="tenant-a", reuse="unsafe_no_reset"
+    )
+    declared = json.loads(server.requests[0].body)
+    assert (declared["tenantId"], declared["reuse"]) == ("tenant-a", "POOL_REUSE_UNSAFE_NO_RESET")
+
+    async with Vora(base_url=server.url, api_key="vora_tenant") as tenant:
+        pool = await tenant.pools.get("py")
+        assert server.requests[-1].path == "/v1/pools/py"
+        assert server.requests[-1].headers["authorization"] == "Bearer vora_tenant"
+
+        seen = []
+        for _ in range(3):
+            run = exit_ = done = None
+            async for chunk in pool.stream_run("true", [], timeout_seconds=10):
+                if chunk.kind == "run":
+                    run = chunk.run
+                elif chunk.kind == "exit":
+                    exit_ = chunk.exit
+                elif chunk.kind == "run_done":
+                    done = chunk.done
+            assert run is not None and exit_ is not None and done is not None
+            seen.append((run.warm, exit_.execution_id, exit_.exit_code, run.reset_ms, done.reset_ms, done.outcome))
+
+    execution_id = "exe_01M6M3D3FRG49JM5BK3MD9Q0X0"
+    assert seen == [
+        (True, execution_id, 0, None, None, "POOL_RESET_SKIPPED"),
+        (True, execution_id, 0, 7, 3, "POOL_RESET_OK"),
+        (False, execution_id, 7, None, None, "POOL_RESET_RETIRED"),
+    ]
+
+
+@pytest.mark.parametrize("refusal", ["pool_full", "runner_loading"])
+async def test_a_caller_can_handle_a_refusal_itself_with_no_policy(wire, refusal: str) -> None:
+    policy, waited = no_wait()
+    client, server = await wire(flaky(refusal, "warm_reset"), retry=policy)
+    pool = handle(client)
+
+    with pytest.raises((RateLimitedError, UnavailableError)):
+        await pool.run("true", [], timeout_seconds=10)
+    assert len(server.requests) == 1
+    assert waited == []
+
+    assert (await pool.run("true", [], timeout_seconds=10)).stdout == "42\n"
 
 
 # --- Delete ----------------------------------------------------------------------
@@ -581,6 +772,33 @@ async def test_delete_rides_out_a_runner_that_is_down(wire) -> None:
     assert waited == [1.0, 1.0]
 
 
+async def test_delete_of_a_pool_its_runner_lost_needs_one_call(wire) -> None:
+    policy, waited = no_wait()
+    client, server = await wire(lambda _: answer_reply("delete_not_on_runner"), retry=policy)
+
+    await handle(client).delete()
+
+    assert len(server.requests) == 1
+    assert waited == []
+
+
+async def test_delete_waits_out_a_missing_runner_row_and_then_says_so(wire) -> None:
+    policy, waited = no_wait()
+    client, server = await wire(lambda _: answer_reply("delete_runner_row_gone"), retry=policy)
+
+    with pytest.raises(UnavailableError) as excinfo:
+        await handle(client).delete(max_wait_seconds=0)
+
+    assert excinfo.value.retry_after == 1.0
+    assert len(server.requests) == 1
+
+    replies = iter(["delete_runner_row_gone", "delete_runner_row_gone", "delete_gone"])
+    client, server = await wire(lambda _: answer_reply(next(replies)), retry=policy)
+    await handle(client).delete()
+    assert len(server.requests) == 3
+    assert waited == [1.0, 1.0]
+
+
 # --- Timeouts --------------------------------------------------------------------
 
 
@@ -609,9 +827,68 @@ async def test_a_silent_run_outlasts_the_read_timeout() -> None:
     with pytest.raises(RateLimitedError):
         await handle(client).run("sleep 600", timeout_seconds=600)
 
-    # The API bounds a stream at the run's timeout plus 60 s, and a silent command
+    # The API bounds a stream at the run's timeout plus its tail, and a silent command
     # sends nothing to read until then.
-    assert seen[0].extensions["timeout"]["read"] > 660
+    assert seen[0].extensions["timeout"]["read"] > 600 + LIMITS["runTailSeconds"]
+
+
+async def test_a_short_run_still_waits_for_the_apis_504_on_its_first_frame() -> None:
+    seen: list[httpx.Request] = []
+    client = recording_client(seen, httpx.Response(429, json={"error": "full"}))
+
+    with pytest.raises(RateLimitedError):
+        await handle(client).run("true", timeout_seconds=1)
+
+    # A client that gives up first turns the API's typed 504 into a bare read error.
+    assert seen[0].extensions["timeout"]["read"] > LIMITS["runFirstFrameSeconds"]
+
+
+async def test_a_declare_waits_for_the_apis_answer_when_it_loses_its_route() -> None:
+    seen: list[httpx.Request] = []
+    client = recording_client(seen, httpx.Response(201, json={"id": "pool_1"}))
+
+    await client.pools.declare("py", image="vora/base", cpu="100m", memory="1Mi")
+
+    assert seen[0].extensions["timeout"]["read"] > LIMITS["declareSeconds"]
+
+
+async def test_no_first_frame_is_typed_and_a_run_does_not_retry_it(wire) -> None:
+    policy, waited = no_wait()
+    client, server = await wire(lambda _: run_reply("no_first_frame"))
+
+    with pytest.raises(GatewayTimeoutError) as excinfo:
+        await handle(client).run("true", [], timeout_seconds=10, retry=policy)
+
+    assert excinfo.value.status == 504
+    assert excinfo.value.retry_after == 1.0
+    assert len(server.requests) == 1
+    assert waited == []
+
+
+async def test_a_silent_pool_run_is_not_cut_off_by_the_clients_read_timeout() -> None:
+    server = WireServer(lambda _: run_reply("warm_reset", delay=0.3))
+    await server.start()
+    try:
+        async with httpx.AsyncClient(timeout=0.05) as http:
+            client = Vora(base_url=server.url, client=http)
+            result = await handle(client).run("sleep 7", timeout_seconds=10)
+    finally:
+        await server.stop()
+
+    assert result.stdout == "42\n"
+
+
+async def test_a_silent_exec_is_not_cut_off_by_the_clients_read_timeout() -> None:
+    server = WireServer(lambda _: Reply(lines=['{"exit":{"exitCode":0,"reason":"EXITED"}}'], delay=0.3))
+    await server.start()
+    try:
+        async with httpx.AsyncClient(timeout=0.05) as http:
+            client = Vora(base_url=server.url, client=http)
+            result = await Sandbox(client._transport, SandboxInfo(id="sbx_1")).exec("sleep 7")
+    finally:
+        await server.stop()
+
+    assert result.exit_code == 0
 
 
 # --- What a request looks like ---------------------------------------------------
@@ -698,7 +975,7 @@ async def test_a_global_admin_names_the_tenant_on_every_route(wire) -> None:
 
     client, server = await wire(route)
 
-    pool = await client.pools.declare("py", image="vora/base", tenant_id="tenant-a")
+    pool = await client.pools.declare("py", image="vora/base", cpu="100m", memory="1Mi", tenant_id="tenant-a")
     await client.pools.get("py", tenant_id="tenant-a")
     await client.pools.list(tenant_id="tenant-a")
     await pool.stats()
@@ -749,13 +1026,51 @@ async def test_a_pool_whose_runner_did_not_answer_has_no_state_and_no_counters(w
     assert pools[0].info.stats is None
 
 
-async def test_a_not_loaded_pool_reads_as_its_state(wire) -> None:
+async def test_a_lost_pool_stays_listed_with_nothing_measured(wire) -> None:
+    client, _ = await wire(lambda _: answer_reply("listing_not_on_runner"))
+
+    pools = await client.pools.list()
+
+    assert [pool.name for pool in pools] == ["py"]
+    assert pools[0].info.state == "POOL_NOT_ON_RUNNER"
+    assert pools[0].info.stats is None
+
+
+async def test_an_unanswered_listing_entry_still_says_whether_it_resets(wire) -> None:
+    client, _ = await wire(lambda _: answer_reply("listing_unsafe_unanswered"))
+
+    by_name = {pool.name: pool.info for pool in await client.pools.list()}
+
+    unsafe = by_name["unsafe"]
+    assert unsafe.state is None
+    assert unsafe.stats is None
+    assert unsafe.spec is not None
+    assert unsafe.spec.reuse == "POOL_REUSE_UNSAFE_NO_RESET"
+    assert by_name["py"].spec is not None
+    assert by_name["py"].spec.reuse is None
+
+
+async def test_a_handle_from_a_listing_of_every_tenant_reaches_its_own_tenant(wire) -> None:
+    client, server = await wire(
+        lambda sent: answer_reply("listing_runner_silent") if sent.path == "/v1/pools" else answer_reply("get_active")
+    )
+
+    pool = (await client.pools.list())[0]
+    await pool.refresh()
+
+    assert server.requests[-1].path == "/v1/pools/py?tenant_id=tenant-a"
+
+
+async def test_a_not_loaded_pool_has_no_stats_though_the_wire_sends_an_empty_one(wire) -> None:
     client, _ = await wire(lambda _: answer_reply("get_not_loaded"))
+    assert json.loads(GOLDEN["answers"]["get_not_loaded"]["body"])["stats"] == {}
 
     pool = await client.pools.get("py")
 
     assert pool.info.state == "POOL_NOT_LOADED"
     assert pool.info.not_loaded_reason == "backend_missing"
+    assert pool.info.stats is None
+    assert await pool.stats() is None
 
 
 async def test_counters_a_runner_reported_read_as_numbers(wire) -> None:

@@ -15,6 +15,7 @@ from ._errors import (
     GatewayTimeoutError,
     PoolDrainingError,
     PoolNotLoadedError,
+    PoolNotOnRunnerError,
     PoolRunError,
     PoolSpecConflictError,
     RateLimitedError,
@@ -47,19 +48,24 @@ from ._types import (
 _RUN_BODY_LIMIT = 1 << 20
 
 # httpx defaults to 5 s for everything, which is less than any of these calls may
-# take. The API's own bounds set each number: 10 s for a plain pool call, 30 s for
-# one DELETE, and a run's timeout plus 60 s for its stream.
+# take. Each number is above the API's own bound for that call, so the API's answer
+# arrives before the client gives up: 10 s for a plain pool call, 40 s for a declare
+# that loses its route and removes what it made, 30 s for one DELETE, and 420 s for a
+# run's first frame, then the run's timeout plus 60 s for its stream.
 _CALL_TIMEOUT = httpx.Timeout(30.0)
+_DECLARE_TIMEOUT = httpx.Timeout(50.0)
 _DELETE_TIMEOUT = httpx.Timeout(40.0)
+_RUN_FIRST_FRAME_SECONDS = 420.0
 _RUN_TAIL_SECONDS = 60.0
-_FIRST_FRAME_MARGIN_SECONDS = 30.0
+_RUN_READ_MARGIN_SECONDS = 30.0
 _DRAIN_POLL_SECONDS = 1.0
 
 
 def _run_timeout(timeout_seconds: int) -> httpx.Timeout:
-    # A silent command gives no bytes to read until it exits, so the read timeout has
-    # to cover its whole run.
-    return httpx.Timeout(30.0, read=timeout_seconds + _RUN_TAIL_SECONDS + _FIRST_FRAME_MARGIN_SECONDS)
+    # httpx times each read. The longest wait for one is the first frame, or a silent
+    # command, which gives no bytes to read until it exits.
+    longest_silence = max(_RUN_FIRST_FRAME_SECONDS, timeout_seconds + _RUN_TAIL_SECONDS)
+    return httpx.Timeout(30.0, read=longest_silence + _RUN_READ_MARGIN_SECONDS)
 
 
 def _pool_path(name: str, suffix: str = "", tenant_id: str | None = None) -> str:
@@ -87,6 +93,8 @@ async def _named_conflict(
         return PoolNotLoadedError(message, status=status, body=body, reason=info.not_loaded_reason)
     if declaring and info.state == "POOL_ACTIVE":
         return PoolSpecConflictError(message, status=status, body=body)
+    if not declaring and info.state == "POOL_NOT_ON_RUNNER":
+        return PoolNotOnRunnerError(message, status=status, body=body)
     return error
 
 
@@ -106,9 +114,9 @@ class Pools:
         name: str,
         *,
         image: str,
+        cpu: str | int | float,
+        memory: str | int,
         backend: str | None = None,
-        cpu: str | int | float | None = None,
-        memory: str | int | None = None,
         pids: int | None = None,
         disk: str | int | None = None,
         network: Any = "none",
@@ -128,10 +136,14 @@ class Pools:
 
         ``size=0`` starts every run cold. ``reuse="unsafe_no_reset"`` needs an admin
         key and a runner that grants it. A global admin must pass ``tenant_id``.
+        ``borrow_timeout_ms`` is at most 300000. A pool the runner lost is created again
+        under a new id, so read ``id`` from what this returns.
 
         Raises ``PoolSpecConflictError`` when the name has a different spec,
-        ``PoolDrainingError`` while a pool of the name is being deleted, and
-        ``PoolNotLoadedError`` when the runner refused to load it.
+        ``PoolDrainingError`` while a pool of the name is being deleted,
+        ``PoolNotLoadedError`` when the runner refused to load it, and ``VoraError``
+        with status 400 for a spec the API refuses, or 404 when another agent of the
+        tenant owns the name.
         """
         body = encode_pool_spec(
             name,
@@ -159,7 +171,7 @@ class Pools:
         try:
             raw = await retrying(
                 self._retry,
-                lambda: self._transport.json(_pool_path(name), method="PUT", json_body=body, timeout=_CALL_TIMEOUT),
+                lambda: self._transport.json(_pool_path(name), method="PUT", json_body=body, timeout=_DECLARE_TIMEOUT),
             )
         except ConflictError as error:
             raise await _named_conflict(self._transport, name, tenant_id, error, declaring=True) from error
@@ -183,7 +195,9 @@ class Pools:
         for item in raw.get("pools") or []:
             info = decode_pool_info(item)
             name = info.spec.name if info.spec is not None else None
-            pools.append(Pool(self._transport, self._retry, name or "", info, tenant_id))
+            # A global admin may list every tenant, and its handles must name their own.
+            owner = tenant_id or (info.spec.tenant_id if info.spec is not None else None)
+            pools.append(Pool(self._transport, self._retry, name or "", info, owner))
         return pools
 
 
@@ -206,6 +220,7 @@ class Pool:
 
     @property
     def id(self) -> str:
+        """The id as of the last call. A handle reaches its pool by name, not by this."""
         return self._info.id
 
     @property
@@ -301,9 +316,11 @@ class Pool:
         it's the caller's choice. A failure after the first frame is never retried.
 
         Raises ``RateLimitedError`` when the pool is full, ``UnavailableError`` when
-        no sandbox could start, ``PoolDrainingError``, ``PoolNotLoadedError``,
-        ``RequestTooLargeError`` for a body over the API's 1 MiB limit, and
-        ``PoolRunError`` for a failure after the first frame and before ``exit``.
+        no sandbox could start, ``GatewayTimeoutError`` when no first frame came within
+        the API's 7 minutes, ``PoolDrainingError``, ``PoolNotLoadedError``,
+        ``PoolNotOnRunnerError``, ``RequestTooLargeError`` for a body over the API's
+        1 MiB limit, and ``PoolRunError`` for a failure after the first frame and before
+        ``exit``.
         """
         request = exec_request(command, args, cwd, env, stdin, timeout_seconds)
         body = json.dumps(request).encode("utf-8")
@@ -384,9 +401,10 @@ class Pool:
 
         Each call to the API waits up to about 25 s for running commands to finish,
         and the wait is repeated until the pool is gone or ``max_wait_seconds`` has
-        passed, which raises ``PoolDrainingError``. A runner that is down is waited
-        out the same way, and its last refusal is raised. Runs in progress finish.
-        Calling ``delete`` again picks up the same drain.
+        passed, which raises ``PoolDrainingError``. A runner that is down, or whose row
+        the API no longer has, is waited out the same way, and its last refusal is
+        raised. Runs in progress finish. Calling ``delete`` again picks up the same
+        drain. A pool its runner lost has nothing to drain.
         """
         sleep = self._retry.sleep if self._retry is not None else asyncio.sleep
         deadline = time.monotonic() + max_wait_seconds

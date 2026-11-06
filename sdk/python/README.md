@@ -79,9 +79,18 @@ What a result tells you:
 - protojson leaves out zeros, so a duration or usage value that is None was not
   measured or was zero. The SDK does not guess which.
 
-Read `pool.info.state` before `pool.info.stats`. In a listing, a pool whose runner did
-not answer has both as None. A `POOL_NOT_LOADED` pool has zero counters, and
-`not_loaded_reason` says why.
+Read `pool.info.state` before `pool.info.stats`. Only `POOL_ACTIVE` and `POOL_DRAINING`
+have stats. Otherwise `stats` is None, because nothing was measured:
+
+| `state` | Meaning | What to do |
+| --- | --- | --- |
+| `POOL_NOT_ON_RUNNER` | The route holds the reservation and the name, and the runner has no such pool. A run raises `PoolNotOnRunnerError`. | `declare` creates it again under a new id. `delete` releases the reservation. |
+| `POOL_NOT_LOADED` | The runner refused it at boot. `not_loaded_reason` says why. | Fix the cause, or `delete` it. |
+| None, in a listing | The runner did not answer. | Read `spec.reuse` if it matters. It comes from the route. |
+
+Both `POOL_NOT_ON_RUNNER` and an unanswered entry have only the route's part of `spec`:
+the name, tenant, agent and reuse. Lost pools stay listed until deleted, as they hold a
+reservation. Keep the pool's name, not its `id`, across a `declare`.
 
 Limits on a run:
 
@@ -90,10 +99,15 @@ Limits on a run:
 - A client that reads slower than about 1.5 KiB/s while output is flowing is cut off
   with `client_stalled`.
 
+`declare` needs `cpu` and `memory`, as the API has no default for them.
+`borrow_timeout_ms` is at most 300000. Another agent's pool name answers 404.
+
 `delete` returns once the pool is gone. Each request can block for up to about 25 s,
 and `delete` repeats it for up to `max_wait_seconds` (default 600). The pool calls set
-their own HTTP timeouts, so a custom `httpx.AsyncClient`'s timeouts do not cut them
-short.
+their own HTTP timeouts above the API's own bounds, so a custom `httpx.AsyncClient`'s
+timeouts do not cut them short. A run can wait up to 7 minutes for its first frame,
+which then raises `GatewayTimeoutError`. Plain `exec` and `stream_exec` have no read
+timeout, as a silent command has nothing to read until it exits.
 
 ### Sync convenience
 
@@ -142,6 +156,7 @@ the message carries the API's error string. These subclasses say what to do next
 | `ConflictError` | 409 | The resource's state refuses the call. The next three are its subclasses. |
 | `PoolDrainingError` | 409 | The pool is being deleted. Retry later, or declare it again once it is gone. |
 | `PoolNotLoadedError` | 409 | The runner refused to load the pool. Do not retry. `reason` is its `not_loaded_reason`. |
+| `PoolNotOnRunnerError` | 409 | The runner has no such pool, and the route still holds its reservation. Don't retry: `declare` it again, or `delete` it. |
 | `PoolSpecConflictError` | 409 | A live pool of this name has a different spec. |
 | `PoolRunError` | none | A run failed after its first frame and before `exit`, so the command may have run. It has `code`, `run`, `stdout` and `stderr`. |
 | `RequestTooLargeError` | none | A run's body is over the API's limit. It was not sent. |
