@@ -16,8 +16,23 @@ export type { ListSandboxesOptions, VoraOptions } from "./client.js";
 export { Sandbox } from "./sandbox.js";
 export type { WriteFileOptions } from "./sandbox.js";
 export { Snapshots, Snapshot } from "./snapshots.js";
-export { VoraError } from "./errors.js";
+export { Pools, Pool } from "./pools.js";
+export type { DeletePoolOptions, TenantOptions } from "./pools.js";
+export {
+  ConflictError,
+  GatewayTimeoutError,
+  PoolDrainingError,
+  PoolNotLoadedError,
+  PoolRunError,
+  PoolSpecConflictError,
+  RateLimitedError,
+  RequestTooLargeError,
+  RetryLaterError,
+  UnavailableError,
+  VoraError,
+} from "./errors.js";
+export type { RetryLaterErrorOptions, VoraErrorOptions } from "./errors.js";
 export { Transport } from "./http.js";
-export type { JsonRequestOptions, RequestOptions, TransportOptions } from "./http.js";
+export type { JsonRequestOptions, RequestOptions, RetryPolicy, TransportOptions } from "./http.js";
 export { parseCPU, parseDuration, parseSize } from "./units.js";
 export type * from "./types.js";
