@@ -25,21 +25,24 @@ import (
 
 	v1 "github.com/vorash/vora/api/proto/v1"
 	"github.com/vorash/vora/internal/api"
-	"github.com/vorash/vora/internal/cgroup"
 	"github.com/vorash/vora/internal/config"
 	"github.com/vorash/vora/internal/registry"
 	"github.com/vorash/vora/internal/runner"
 	"github.com/vorash/vora/internal/runtime"
-	"github.com/vorash/vora/internal/runtime/bwrap"
 	"github.com/vorash/vora/internal/sandbox"
 	"github.com/vorash/vora/internal/ulid"
 )
 
-// poolPlane is a real vora-api in front of a real runner and bwrap backend, driven
-// only through HTTP, as a client would.
+// poolPlane is a real vora-api in front of a real runner and backend, driven only through
+// HTTP, as a client would.
 type poolPlane struct {
-	t      *testing.T
-	url    string
+	t    *testing.T
+	host poolHost
+	url  string
+	// runnerAddr is for what must be refused even to a client that skips the API.
+	runnerAddr string
+	// crash ends a member from the host.
+	crash  func(t *testing.T, sandboxID string)
 	tenant string // a sandbox-scoped key for tenant-a
 	admin  string // an admin-scoped key for tenant-a
 	other  string // a sandbox-scoped key for tenant-b
@@ -49,11 +52,12 @@ const poolBootKey = "vora_bootstrap_pool_integration"
 
 func startPoolPlane(t *testing.T, unsafeReuse bool) *poolPlane {
 	t.Helper()
+	return startPoolPlaneOn(t, bwrapPoolHost, unsafeReuse)
+}
+
+func startPoolPlaneOn(t *testing.T, host poolHost, unsafeReuse bool) *poolPlane {
+	t.Helper()
 	t.Setenv("VORA_INIT_BINARY", buildBinary(t, "vora-init"))
-	cgroups, err := cgroup.New(config.Config{SystemdMode: config.SystemdUser})
-	if err != nil {
-		t.Skipf("systemd user manager unavailable: %v", err)
-	}
 	rootfs := imageRootfs(t, "base")
 	stateDir := stateTempDir(t)
 	if err := os.Symlink(filepath.Dir(filepath.Dir(filepath.Dir(rootfs))), filepath.Join(stateDir, "images")); err != nil {
@@ -61,10 +65,7 @@ func startPoolPlane(t *testing.T, unsafeReuse bool) *poolPlane {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := config.Config{StateDir: stateDir, SystemdMode: config.SystemdUser, DefaultTTL: time.Minute, PoolUnsafeReuse: unsafeReuse}
-	backend, err := bwrap.New(cfg, cgroups, logger)
-	if err != nil {
-		t.Fatalf("bwrap backend: %v", err)
-	}
+	backend, crash := host.open(t, &cfg, logger)
 	reg := runtime.NewRegistry()
 	if err := reg.Register(backend); err != nil {
 		t.Fatalf("register backend: %v", err)
@@ -107,13 +108,13 @@ func startPoolPlane(t *testing.T, unsafeReuse bool) *poolPlane {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	reporter := &registry.Reporter{
-		Client: regClient, RunnerID: runnerID, Address: runnerLn.Addr().String(), Backends: []string{"bwrap"},
+		Client: regClient, RunnerID: runnerID, Address: runnerLn.Addr().String(), Backends: []string{host.name},
 		Version: "test", Logger: logger, Interval: 200 * time.Millisecond,
 		Running: func() int32 { return int32(runnerSrv.RunningCount()) },
 	}
 	go reporter.Run(ctx)
 
-	p := &poolPlane{t: t, url: httpSrv.URL}
+	p := &poolPlane{t: t, host: host, url: httpSrv.URL, runnerAddr: runnerLn.Addr().String(), crash: crash}
 	waitFor(t, 10*time.Second, func() bool {
 		var out struct {
 			Runners []struct {
@@ -178,10 +179,14 @@ func (p *poolPlane) call(method, path, key string, body any) (int, []byte) {
 // poolShape is the template every test here uses. Memory is small so the OOM run is
 // quick, and pids leaves room for a fork bomb to hit its limit.
 func poolShape(size, maxSize int) map[string]any {
+	return poolShapeOn("bwrap", 128<<20, size, maxSize)
+}
+
+func poolShapeOn(backend string, memoryBytes int64, size, maxSize int) map[string]any {
 	return map[string]any{
 		"sandbox": map[string]any{
-			"image": "vora/base", "backend": "bwrap",
-			"resources": map[string]any{"cpuMillis": "1000", "memoryBytes": fmt.Sprint(128 << 20), "pids": "64"},
+			"image": "vora/base", "backend": backend,
+			"resources": map[string]any{"cpuMillis": "1000", "memoryBytes": fmt.Sprint(memoryBytes), "pids": "64"},
 			"network":   map[string]any{"mode": "NETWORK_NONE"},
 		},
 		"size": size, "maxSize": maxSize,
@@ -555,78 +560,6 @@ func TestAPIPoolReusesAndCleans(t *testing.T) {
 			t.Fatalf("after another tenant's attempts the pool is %v", got)
 		}
 	})
-}
-
-// The build log's hazard: an Exec still live during a reset can leak past the proof.
-// A client that disconnects mid-run is the realistic way to start one, so this walks
-// the whole path, at many moments of the run, on a pool of one so the very next run
-// lands on the member that was abandoned.
-func TestAPIPoolDisconnectThenNextRunFindsNothing(t *testing.T) {
-	p := startPoolPlane(t, false)
-	shape := poolShape(1, 1)
-	shape["maxRuns"] = 1000
-	p.declarePool("solo", shape)
-	p.waitIdle("solo", 1)
-
-	moments := []struct {
-		name  string
-		after func(lines *bufio.Scanner) // what the client waits for before leaving
-		delay time.Duration
-	}{
-		{"before the first frame", nil, 0},
-		{"at the run frame", func(l *bufio.Scanner) { l.Scan() }, 0},
-		{"just after the run frame", func(l *bufio.Scanner) { l.Scan() }, 2 * time.Millisecond},
-		{"at the first output", func(l *bufio.Scanner) { l.Scan(); l.Scan() }, 0},
-		{"well into the run", func(l *bufio.Scanner) { l.Scan(); l.Scan() }, 50 * time.Millisecond},
-	}
-	script := plantScript + `echo started; i=0; while [ "$i" -lt 1000 ]; do echo planted > /tmp/planted-$i; i=$((i+1)); done; sleep 300`
-	const rounds = 8
-	var runs int
-	var member string
-	for round := range rounds {
-		for _, m := range moments {
-			ctx, cancel := context.WithCancel(context.Background())
-			req := p.request(ctx, http.MethodPost, "/v1/pools/solo/run", p.tenant, shellRun(script, 60))
-			if m.after == nil {
-				go func() {
-					time.Sleep(time.Duration(round) * time.Millisecond)
-					cancel()
-				}()
-				if resp, err := http.DefaultClient.Do(req); err == nil {
-					resp.Body.Close()
-				}
-			} else {
-				resp, err := http.DefaultClient.Do(req)
-				if err != nil {
-					cancel()
-					t.Fatalf("%s: %v", m.name, err)
-				}
-				if resp.StatusCode == http.StatusOK {
-					m.after(bufio.NewScanner(resp.Body))
-				}
-				time.Sleep(m.delay)
-				cancel()
-				resp.Body.Close()
-			}
-			cancel()
-			runs++
-			res := p.mustBeClean("solo", fmt.Sprintf("a disconnect %s (round %d)", m.name, round))
-			// A replaced member would pass the probe having proved nothing: the reset
-			// that matters is the one that kept this member.
-			if member == "" {
-				member = res.run.GetSandboxId()
-			}
-			if res.run.GetSandboxId() != member {
-				t.Fatalf("a disconnect %s (round %d) replaced member %s with %s", m.name, round, member, res.run.GetSandboxId())
-			}
-		}
-	}
-	stats := p.getPool("solo").GetStats()
-	t.Logf("%d disconnects: runs %d, resets %d, reset failures %d, destroyed %d",
-		runs, stats.GetRunsTotal(), stats.GetResetsTotal(), stats.GetResetFailuresTotal(), stats.GetDestroyedTotal())
-	if stats.GetRunsTotal() < uint64(runs) {
-		t.Fatalf("only %d runs reached the pool for %d attempts, so the disconnects tested little", stats.GetRunsTotal(), runs)
-	}
 }
 
 // A client that stops reading must not hold its member past the run's hard deadline.

@@ -1,0 +1,704 @@
+//go:build integration
+
+package integration
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"maps"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"syscall"
+	"testing"
+	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
+
+	v1 "github.com/vorash/vora/api/proto/v1"
+	"github.com/vorash/vora/internal/cgroup"
+	"github.com/vorash/vora/internal/config"
+	"github.com/vorash/vora/internal/runtime"
+	"github.com/vorash/vora/internal/runtime/bwrap"
+	"github.com/vorash/vora/internal/runtime/gvisor"
+)
+
+// This file is the leak matrix through a real pool: a client's run A plants through vora-api
+// and the runner's RunInPool, and run B on the same member finds nothing. What a backend does
+// differently is all in poolHost, so the tests read the same for both.
+
+// poolHost is one backend as a real runner runs it.
+type poolHost struct {
+	name string
+	// open builds the backend, or skips the test on a host that cannot run it. crash ends
+	// a member from the host, as a crash would.
+	open func(t *testing.T, cfg *config.Config, logger *slog.Logger) (backend runtime.Backend, crash func(t *testing.T, sandboxID string))
+	// writable and initPIDs mean what they do in leakSandbox.
+	writable []string
+	initPIDs []int
+	// disconnectKeepsMember is whether a run abandoned mid-fork must leave its member usable.
+	// It holds where one kill pass is exact, because no process can fork while frozen. On
+	// gVisor guest code runs between passes, so a member may fail closed instead.
+	disconnectKeepsMember bool
+	// endings are the ways a workload can end or wedge its member here.
+	endings []poolEnding
+}
+
+// poolEnding is one workload that attacks the member it runs on.
+type poolEnding struct {
+	name string
+	run  map[string]any
+	// memoryBytes is 0 for leakPoolMemory.
+	memoryBytes int64
+	// costsMember is whether the member must be gone afterwards. Otherwise either outcome
+	// is right, as long as the next run is clean.
+	costsMember bool
+	check       func(t *testing.T, res runResult)
+}
+
+const leakPoolMemory = 256 << 20
+
+// forkBombScript stops only when its timeout does.
+const forkBombScript = "bomb() { bomb | bomb & }; echo started; bomb; sleep 300"
+
+var bwrapPoolHost = poolHost{
+	name:                  "bwrap",
+	open:                  openBwrapPoolBackend,
+	writable:              bwrapWritable,
+	initPIDs:              bwrapInitPIDs,
+	disconnectKeepsMember: true,
+	endings: []poolEnding{
+		{
+			name:        "kills_its_agent",
+			run:         shellRun("echo started; kill -9 2; sleep 30", 20),
+			costsMember: true,
+			check: func(t *testing.T, res runResult) {
+				t.Helper()
+				if res.exit.GetReason() == v1.ExitReason_EXITED {
+					t.Fatalf("a run that took its agent down reads as a normal exit: %v", res.exit)
+				}
+			},
+		},
+		{
+			name:        "stops_its_agent",
+			run:         shellRun("echo started; kill -STOP 2; sleep 30", 1),
+			costsMember: true,
+			check: func(t *testing.T, res runResult) {
+				t.Helper()
+				if res.exit.GetReason() != v1.ExitReason_TIMEOUT_EXCEEDED {
+					t.Fatalf("exit = %v, want the runner's hard deadline to end it", res.exit)
+				}
+			},
+		},
+		{
+			name: "fork_bomb",
+			run:  shellRun(forkBombScript, 3),
+			check: func(t *testing.T, res runResult) {
+				t.Helper()
+				if res.exit.GetUsage().GetPidsLimitHits() == 0 {
+					t.Fatalf("the bomb never reached pids.max, so this proved nothing: %v", res.exit)
+				}
+			},
+		},
+	},
+}
+
+var gvisorPoolHost = poolHost{
+	name:     "gvisor",
+	open:     openGvisorPoolBackend,
+	writable: []string{"/tmp", "/dev", "/dev/shm", "/workspace", "/root"},
+	initPIDs: []int{1},
+	endings: []poolEnding{
+		{
+			name:        "out_of_memory",
+			run:         map[string]any{"command": "/usr/bin/python3", "args": []string{"-c", `b = bytearray(1 << 30); [b.__setitem__(i, 1) for i in range(0, len(b), 4096)]`}, "timeoutSeconds": "30"},
+			memoryBytes: 128 << 20,
+			costsMember: true,
+			check: func(t *testing.T, res runResult) {
+				t.Helper()
+				if r := res.exit.GetReason(); r != v1.ExitReason_OOM_KILLED && r != v1.ExitReason_RUNTIME_FAILURE {
+					t.Fatalf("exit = %v, want OOM_KILLED or RUNTIME_FAILURE", res.exit)
+				}
+			},
+		},
+		{
+			name: "fork_chains",
+			run:  map[string]any{"command": "/usr/bin/python3", "args": []string{"-W", "ignore", "-c", forkChains, "16"}, "timeoutSeconds": "20"},
+		},
+		// pids.max holds Sentry threads here, so nothing but memory.max bounds this one.
+		{
+			name: "fork_bomb",
+			run:  shellRun(forkBombScript, 3),
+		},
+	},
+}
+
+var poolHosts = []poolHost{bwrapPoolHost, gvisorPoolHost}
+
+func openBwrapPoolBackend(t *testing.T, cfg *config.Config, logger *slog.Logger) (runtime.Backend, func(*testing.T, string)) {
+	t.Helper()
+	cgroups, err := cgroup.New(*cfg)
+	if err != nil {
+		t.Skipf("systemd user manager unavailable: %v", err)
+	}
+	backend, err := bwrap.New(*cfg, cgroups, logger)
+	if err != nil {
+		t.Fatalf("bwrap backend: %v", err)
+	}
+	return backend, func(t *testing.T, id string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		unit, err := cgroups.Attach(ctx, cgroup.UnitName(id))
+		if err != nil {
+			t.Fatalf("attach unit of %s: %v", id, err)
+		}
+		dir, err := unit.Dir(ctx)
+		if err != nil {
+			t.Fatalf("cgroup of %s: %v", id, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "cgroup.kill"), []byte("1"), 0o644); err != nil {
+			t.Fatalf("kill %s: %v", id, err)
+		}
+	}
+}
+
+func openGvisorPoolBackend(t *testing.T, cfg *config.Config, logger *slog.Logger) (runtime.Backend, func(*testing.T, string)) {
+	t.Helper()
+	requireGvisor(t)
+	cfg.GvisorPlatform = "kvm"
+	cfg.GvisorRunRoot = filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "vora-gvisor-pool")
+	subtree, err := cgroup.NewSubtree()
+	if err != nil {
+		t.Fatalf("cgroup subtree: %v", err)
+	}
+	backend, err := gvisor.New(*cfg, logger, subtree)
+	if err != nil {
+		t.Fatalf("gvisor backend: %v", err)
+	}
+	root := cfg.GvisorRunRoot
+	return backend, func(t *testing.T, id string) {
+		t.Helper()
+		m := gvisorMember{root: root, id: id}
+		if err := syscall.Kill(m.sentryPID(t), syscall.SIGKILL); err != nil {
+			t.Fatalf("kill the Sentry of %s: %v", id, err)
+		}
+	}
+}
+
+func forEachPoolHost(t *testing.T, test func(t *testing.T, p *poolPlane)) {
+	t.Helper()
+	for _, host := range poolHosts {
+		t.Run(host.name, func(t *testing.T) { test(t, startPoolPlaneOn(t, host, false)) })
+	}
+}
+
+// in is the plane for a subtest, so a failure and a cleanup land on the subtest.
+func (p *poolPlane) in(t *testing.T) *poolPlane {
+	c := *p
+	c.t = t
+	return &c
+}
+
+// declareOne declares a pool with one member, so the next run always lands on it, and gives
+// it runs enough to outlast the test.
+func (p *poolPlane) declareOne(name string, memoryBytes int64, maxRuns int) {
+	p.t.Helper()
+	shape := poolShapeOn(p.host.name, memoryBytes, 1, 1)
+	shape["maxRuns"] = maxRuns
+	p.declarePool(name, shape)
+	p.waitIdle(name, 1)
+}
+
+// runBody is what a client posts for an exec request.
+func runBody(req runtime.ExecRequest) map[string]any {
+	timeout := req.Timeout
+	if timeout == 0 {
+		timeout = time.Minute
+	}
+	body := map[string]any{"command": req.Command, "args": req.Args, "timeoutSeconds": strconv.Itoa(int(timeout / time.Second))}
+	if req.Cwd != "" {
+		body["cwd"] = req.Cwd
+	}
+	if len(req.Env) > 0 {
+		var env []string
+		for _, k := range slices.Sorted(maps.Keys(req.Env)) {
+			env = append(env, k+"="+req.Env[k])
+		}
+		body["env"] = env
+	}
+	return body
+}
+
+// memberRuns makes a member look like a backend to the matrix's helpers: every Exec is one
+// whole run on the pool, and every run must land on the same member, warm, one run later, or
+// what it finds says nothing about what the run before it left.
+type memberRuns struct {
+	// Exec is the only method the matrix's helpers call.
+	runtime.Backend
+	p      *poolPlane
+	pool   string
+	member string
+	last   uint32
+}
+
+func (m *memberRuns) run(req runtime.ExecRequest) runResult {
+	m.p.t.Helper()
+	res := m.p.runRetrying(m.pool, runBody(req))
+	res.mustComplete(m.p.t)
+	got, n := res.run.GetSandboxId(), res.run.GetSandboxRun()
+	switch {
+	case !res.run.GetWarm():
+		m.p.t.Fatalf("run %v was not warm, so it proves nothing about reuse", res.run)
+	case m.member != "" && got != m.member:
+		m.p.t.Fatalf("run landed on %s, not on %s, whose earlier run's reset was %v", got, m.member, res.done)
+	case m.member != "" && n != m.last+1:
+		m.p.t.Fatalf("sandbox_run = %d after %d", n, m.last)
+	case res.done.GetOutcome() != v1.PoolResetOutcome_POOL_RESET_OK:
+		m.p.t.Fatalf("this run's reset was %v, so the member will not come back", res.done)
+	}
+	m.member, m.last = got, n
+	return res
+}
+
+func (m *memberRuns) Exec(_ context.Context, _ runtime.Handle, req runtime.ExecRequest) (runtime.ExecStream, error) {
+	res := m.run(req)
+	return &replayedRun{chunks: []runtime.ExecChunk{
+		{Stdout: res.stdout},
+		{Stderr: res.stderr},
+		{Exit: &runtime.ExecResult{ExitCode: int(res.exit.GetExitCode())}},
+	}}, nil
+}
+
+type replayedRun struct{ chunks []runtime.ExecChunk }
+
+func (r *replayedRun) Recv() (runtime.ExecChunk, error) {
+	if len(r.chunks) == 0 {
+		return runtime.ExecChunk{}, io.EOF
+	}
+	c := r.chunks[0]
+	r.chunks = r.chunks[1:]
+	return c, nil
+}
+
+func (r *replayedRun) Close() error { return nil }
+
+// memberState is what a run finds on a member.
+type memberState struct {
+	files string
+	pids  []int
+}
+
+// probeProgram reads the state in one run, so a reset cannot come between the two reads.
+func (p *poolPlane) probeProgram() runtime.ExecRequest {
+	return runtime.ExecRequest{
+		Command: "/bin/sh",
+		Args:    append([]string{"-c", `snapshot=$1; pids=$2; shift 2; /usr/bin/python3 -c "$snapshot" "$@"; exec /usr/bin/python3 -c "$pids"`, "probe", fsSnapshot, printPIDs}, p.host.writable...),
+		Timeout: 30 * time.Second,
+	}
+}
+
+// stateOf parses a probe's output: the listing, then one line of PIDs.
+func (p *poolPlane) stateOf(res runResult) memberState {
+	p.t.Helper()
+	out := strings.TrimRight(string(res.stdout), "\n")
+	cut := strings.LastIndexByte(out, '\n')
+	var got struct {
+		Self int   `json:"self"`
+		PIDs []int `json:"pids"`
+	}
+	if err := json.Unmarshal([]byte(out[cut+1:]), &got); err != nil {
+		p.t.Fatalf("parse the probe %q (stderr %q): %v", out, res.stderr, err)
+	}
+	return memberState{files: out[:cut+1], pids: slices.DeleteFunc(got.PIDs, func(pid int) bool { return pid == got.Self })}
+}
+
+// mustMatch fails unless a next run finds the member as it was prepared.
+func (p *poolPlane) mustMatch(prepared, got memberState, after string) {
+	p.t.Helper()
+	if got.files != prepared.files {
+		p.t.Fatalf("after %s the writable mounts are not back to the prepared state:\n%s", after, lineDiff(prepared.files, got.files))
+	}
+	if !slices.Equal(got.pids, p.host.initPIDs) {
+		p.t.Fatalf("after %s a next run sees processes %v, want %v", after, got.pids, p.host.initPIDs)
+	}
+}
+
+var resetEvent = regexp.MustCompile(`reset: ok: killed (\d+), removed (\d+) entries`)
+
+// resetsOf reads what each of a member's resets reported, once it has this many.
+func (p *poolPlane) resetsOf(pool, member string, want int) (killed, removed []int) {
+	p.t.Helper()
+	waitFor(p.t, 5*time.Second, func() bool {
+		_, data := p.call(http.MethodGet, "/v1/pools/"+pool+"/sandboxes/"+member+"/events", p.tenant, nil)
+		matches := resetEvent.FindAllStringSubmatch(string(data), -1)
+		killed, removed = nil, nil
+		for _, m := range matches {
+			k, _ := strconv.Atoi(m[1])
+			r, _ := strconv.Atoi(m[2])
+			killed, removed = append(killed, k), append(removed, r)
+		}
+		return len(matches) >= want
+	})
+	return killed, removed
+}
+
+// TestPoolLeakMatrix runs every row twice on one member, as TestLeakMatrix does on a backend.
+func TestPoolLeakMatrix(t *testing.T) {
+	forEachPoolHost(t, func(t *testing.T, p *poolPlane) {
+		p.declareOne("leak", leakPoolMemory, 1000)
+		runs := &memberRuns{p: p, pool: "leak"}
+		s := leakSandbox{backend: runs, writable: p.host.writable, initPIDs: p.host.initPIDs}
+		prepared := p.stateOf(runs.run(p.probeProgram()))
+		p.mustMatch(prepared, prepared, "nothing")
+
+		for round := range 2 {
+			for _, row := range leakRows {
+				t.Run(fmt.Sprintf("%s/%d", row.name, round), func(t *testing.T) {
+					runs.p = p.in(t)
+					a := runs.run(row.pool.runA(s))
+					if row.pool.took != nil {
+						row.pool.took(t, a)
+					}
+					killed, removed := runs.p.resetsOf("leak", runs.member, int(runs.last))
+					if row.pool.killed && killed[len(killed)-1] == 0 {
+						t.Errorf("run A's reset killed nothing, so this row proves nothing about processes")
+					}
+					if row.pool.removed && removed[len(removed)-1] == 0 {
+						t.Errorf("run A's reset removed nothing, so this row proves nothing about files")
+					}
+					if row.pool.clean != nil {
+						row.pool.clean(t, s, string(a.stdout))
+					}
+					runs.p.mustMatch(prepared, runs.p.stateOf(runs.run(runs.p.probeProgram())), "run A")
+				})
+			}
+		}
+		runs.p = p
+		if st := p.getPool("leak").GetStats(); st.GetResetFailuresTotal() != 0 || st.GetDestroyedTotal() != 0 {
+			t.Errorf("stats %v, want every reset to have passed and no member lost", st)
+		}
+	})
+}
+
+// The filter a resetting pool asks for, proven by a run through the pool, as a reset could not
+// clean what these calls leave.
+func TestPoolMembersDenyIPC(t *testing.T) {
+	const probe = `
+import ctypes
+libc = ctypes.CDLL(None, use_errno=True)
+print("shmget", libc.shmget(0x766f7261, 4096, 0o1600), "semget", libc.semget(0x766f7261, 1, 0o1600), "msgget", libc.msgget(0x766f7261, 0o1600))
+`
+	forEachPoolHost(t, func(t *testing.T, p *poolPlane) {
+		p.declareOne("ipc", leakPoolMemory, 10)
+		res := p.run("ipc", p.tenant, map[string]any{"command": "/usr/bin/python3", "args": []string{"-c", probe}, "timeoutSeconds": "30"})
+		res.mustComplete(t)
+		if got, want := strings.TrimSpace(string(res.stdout)), "shmget -1 semget -1 msgget -1"; got != want {
+			t.Fatalf("output %q, want %q (stderr %q)", got, want, res.stderr)
+		}
+	})
+}
+
+// The PID counter is a residual channel the design accepts: a next run can tell a run came
+// before it. If this fails because the channel closed, say so in ADR 028 and delete the test.
+func TestPoolPIDCounterIsAnAcceptedResidual(t *testing.T) {
+	forEachPoolHost(t, func(t *testing.T, p *poolPlane) {
+		p.declareOne("pids", leakPoolMemory, 10)
+		runs := &memberRuns{p: p, pool: "pids"}
+		pid := func() int {
+			res := runs.run(runtime.ExecRequest{Command: "/bin/sh", Args: []string{"-c", "echo $$"}})
+			n, err := strconv.Atoi(strings.TrimSpace(string(res.stdout)))
+			if err != nil {
+				t.Fatalf("output %q: %v", res.stdout, err)
+			}
+			return n
+		}
+		if a, b := pid(), pid(); b <= a {
+			t.Fatalf("run A had pid %d and run B has %d, which the ADR says cannot be", a, b)
+		}
+	})
+}
+
+// A listed entry that changed is what a reset refuses to repair. The failed member must end
+// for good, and no later run may land on it.
+func TestPoolFailedResetNeverReturns(t *testing.T) {
+	forEachPoolHost(t, func(t *testing.T, p *poolPlane) {
+		p.declareOne("failing", leakPoolMemory, 1000)
+		res := p.run("failing", p.tenant, shellRun("chmod 0700 /workspace", 10))
+		res.mustComplete(t)
+		if res.exit.GetExitCode() != 0 {
+			t.Fatalf("the plant failed, so this proves nothing: %v %s", res.exit, res.stderr)
+		}
+		if res.done.GetOutcome() != v1.PoolResetOutcome_POOL_RESET_FAILED || res.done.GetRetireCause() != "reset_failed" {
+			t.Fatalf("run_done = %v, want a failed reset retiring the member", res.done)
+		}
+		failed := res.run.GetSandboxId()
+		for range 3 {
+			next := p.runRetrying("failing", shellRun("stat -c %a /workspace", 10))
+			next.mustComplete(t)
+			if next.run.GetSandboxId() == failed {
+				t.Fatalf("member %s came back after its reset failed", failed)
+			}
+			if strings.TrimSpace(string(next.stdout)) == "700" {
+				t.Fatalf("a next run reads what the failed one changed: %s", next.stdout)
+			}
+		}
+		if st := p.getPool("failing").GetStats(); st.GetResetFailuresTotal() != 1 {
+			t.Errorf("stats %v, want one failed reset", st)
+		}
+	})
+}
+
+// A workload that kills or wedges its member costs that member at most, and the next client
+// finds a clean sandbox.
+func TestPoolWorkloadThatEndsItsMember(t *testing.T) {
+	forEachPoolHost(t, func(t *testing.T, plane *poolPlane) {
+		for _, ending := range plane.host.endings {
+			t.Run(ending.name, func(t *testing.T) {
+				p := plane.in(t)
+				memory := ending.memoryBytes
+				if memory == 0 {
+					memory = leakPoolMemory
+				}
+				pool := strings.ReplaceAll(ending.name, "_", "-")
+				p.declareOne(pool, memory, 1000)
+				first := p.run(pool, p.tenant, runBody(p.probeProgram()))
+				first.mustComplete(t)
+				prepared, member := p.stateOf(first), first.run.GetSandboxId()
+
+				res := p.runRetrying(pool, ending.run)
+				if res.status != http.StatusOK || res.run.GetSandboxId() != member {
+					t.Fatalf("the workload did not run on %s: %d %s, %v", member, res.status, res.errBody, res.run)
+				}
+				t.Logf("run on %s: exit %v, run_done %v, error line %q", member, res.exit, res.done, res.errLine)
+				if ending.check != nil {
+					ending.check(t, res)
+				}
+
+				next := p.runRetrying(pool, runBody(p.probeProgram()))
+				next.mustComplete(t)
+				p.mustMatch(prepared, p.stateOf(next), ending.name)
+				gone := next.run.GetSandboxId() != member
+				if ending.costsMember && !gone {
+					t.Fatalf("member %s survived this, on run %d", member, next.run.GetSandboxRun())
+				}
+				if gone && next.run.GetSandboxRun() != 1 {
+					t.Fatalf("the replacement's first run reads as run %d", next.run.GetSandboxRun())
+				}
+				if !gone && !next.run.GetWarm() {
+					t.Fatalf("the member stayed, but the next run was not warm: %v", next.run)
+				}
+				t.Logf("next run on %s, warm %v, stats %v", next.run.GetSandboxId(), next.run.GetWarm(), p.getPool(pool).GetStats())
+			})
+		}
+	})
+}
+
+// A member that died while idle must cost nobody a run: the client sees a normal result from
+// another member, with the failed attempt on the audit trail. Without this a client pays for a
+// crash that happened before it asked.
+func TestPoolDeadMemberIsRetriedBeforeTheClientSeesIt(t *testing.T) {
+	forEachPoolHost(t, func(t *testing.T, p *poolPlane) {
+		p.declareOne("dead", leakPoolMemory, 1000)
+		first := p.run("dead", p.tenant, shellRun("true", 10))
+		first.mustComplete(t)
+		dead := first.run.GetSandboxId()
+		p.waitIdle("dead", 1)
+
+		p.crash(t, dead)
+		// Time for the host to notice the connection is gone, as the reused one would.
+		time.Sleep(200 * time.Millisecond)
+
+		res := p.run("dead", p.tenant, shellRun("echo alive", 10))
+		res.mustComplete(t)
+		if got := string(res.stdout); got != "alive\n" || res.exit.GetExitCode() != 0 || res.exit.GetReason() != v1.ExitReason_EXITED {
+			t.Fatalf("the run failed: stdout %q, exit %v", got, res.exit)
+		}
+		if res.run.GetSandboxId() == dead {
+			t.Fatalf("the run reads as landing on the dead member %s", dead)
+		}
+		code, data := p.call(http.MethodGet, "/v1/pools/dead/sandboxes/"+dead+"/execs", p.tenant, nil)
+		if code != http.StatusOK {
+			t.Fatalf("execs: %d %s", code, data)
+		}
+		execs := &v1.GetSandboxExecsResponse{}
+		if err := protojson.Unmarshal(data, execs); err != nil {
+			t.Fatal(err)
+		}
+		all := execs.GetExecs()
+		if len(all) != 2 || all[1].GetReason() != v1.ExitReason_RUNTIME_FAILURE {
+			t.Fatalf("records on the dead member = %v, want its good run and one RUNTIME_FAILURE", all)
+		}
+	})
+}
+
+// A workload that keeps forking and writing, with some of its processes in their own session
+// holding its stdout.
+const forkingWorkload = `
+setsid sh -c 'while :; do : > /tmp/planted-setsid; sleep 0.01; done' &
+setsid sh -c 'while :; do : > /workspace/planted-setsid; sleep 0.01; done' &
+echo planted > /root/planted
+echo planted > /dev/shm/planted
+echo started
+i=0
+while :; do
+	for j in 1 2 3 4; do
+		( echo planted > /tmp/planted-$i-$j ) &
+	done
+	echo planted > /workspace/planted-$i
+	wait $!
+	i=$((i+1))
+done
+`
+
+// disconnectRounds matches the 300 tries the hazard was measured over at the backend level:
+// 198 leaked with an exec left live during a reset, and none once it was cancelled first.
+const disconnectRounds = 300
+
+// When a client disconnects, a run's exec has to be finished or cancelled before its reset,
+// and none may start until the reset returns. This walks that through the whole path, at many
+// moments of a run, on a pool of one so the very next run lands on the abandoned member. A
+// client that skips the API and calls the runner directly is refused all the while.
+func TestPoolDisconnectMidRun(t *testing.T) {
+	forEachPoolHost(t, func(t *testing.T, p *poolPlane) {
+		p.declareOne("solo", leakPoolMemory, 4*disconnectRounds)
+		first := p.run("solo", p.tenant, runBody(p.probeProgram()))
+		first.mustComplete(t)
+		prepared := p.stateOf(first)
+		p.mustMatch(prepared, prepared, "nothing")
+
+		var member atomic.Value
+		member.Store(first.run.GetSandboxId())
+		stopPlain := p.refusePlainExecs(&member)
+		defer stopPlain()
+
+		moments := []struct {
+			name  string
+			lines int
+			delay time.Duration
+		}{
+			{"before the first frame", 0, 0},
+			{"before the first frame, a little later", 0, 3 * time.Millisecond},
+			{"at the run frame", 1, 0},
+			{"just after the run frame", 1, 2 * time.Millisecond},
+			{"at the first output", 2, 0},
+			{"well into the run", 2, 25 * time.Millisecond},
+		}
+		seen := map[string]bool{first.run.GetSandboxId(): true}
+		current := first.run.GetSandboxId()
+		var sawOutput, replaced int
+		began := time.Now()
+		for round := range disconnectRounds {
+			m := moments[round%len(moments)]
+			if p.abandonRun("solo", m.lines, m.delay+time.Duration(round%5)*time.Millisecond) {
+				sawOutput++
+			}
+			after := fmt.Sprintf("a disconnect %s (round %d)", m.name, round)
+			next := p.runRetrying("solo", runBody(p.probeProgram()))
+			next.mustComplete(t)
+			p.mustMatch(prepared, p.stateOf(next), after)
+			got := next.run.GetSandboxId()
+			if got != current {
+				if p.host.disconnectKeepsMember {
+					t.Fatalf("%s replaced member %s with %s", after, current, got)
+				}
+				if seen[got] {
+					t.Fatalf("%s: member %s came back after it was replaced", after, got)
+				}
+				replaced++
+				seen[got] = true
+				current = got
+				member.Store(got)
+			}
+		}
+		stats := p.getPool("solo").GetStats()
+		t.Logf("%d disconnects in %v: %d saw output, %d replaced the member, stats %v", disconnectRounds, time.Since(began), sawOutput, replaced, stats)
+		if sawOutput < disconnectRounds/3 {
+			t.Errorf("only %d of %d runs got as far as their output, so the disconnects tested little", sawOutput, disconnectRounds)
+		}
+		if reused := disconnectRounds - replaced; reused < disconnectRounds/10 {
+			t.Errorf("the member was reused after only %d of %d disconnects, so its reset was hardly tested", reused, disconnectRounds)
+		}
+		killed, removed := p.resetsOf("solo", current, 1)
+		if slices.Max(killed) == 0 || slices.Max(removed) == 0 {
+			t.Errorf("no reset killed or removed anything (%v, %v), so there was nothing to leak", killed, removed)
+		}
+	})
+}
+
+// abandonRun starts a forking run, reads this many lines of it, waits, and disconnects. It
+// reports whether the run's second line, its first output, arrived.
+func (p *poolPlane) abandonRun(pool string, lines int, delay time.Duration) bool {
+	p.t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := p.request(ctx, http.MethodPost, "/v1/pools/"+pool+"/run", p.tenant, shellRun(forkingWorkload, 60))
+	if lines == 0 {
+		time.AfterFunc(delay, cancel)
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			resp.Body.Close()
+		}
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		p.t.Fatalf("run: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	scanner := bufio.NewScanner(resp.Body)
+	read := 0
+	for read < lines && scanner.Scan() {
+		read++
+	}
+	time.Sleep(delay)
+	return read == 2
+}
+
+// refusePlainExecs calls the runner's ExecSandbox on the current member for as long as the
+// test runs, and fails the test on anything but a refusal. It returns the function that stops.
+func (p *poolPlane) refusePlainExecs(member *atomic.Value) (stop func()) {
+	p.t.Helper()
+	conn, err := grpc.NewClient(p.runnerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		p.t.Fatalf("dial the runner: %v", err)
+	}
+	client := v1.NewRunnerServiceClient(conn)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		exec := &v1.ExecRequest{Command: "/bin/sh", Args: []string{"-c", "echo planted > /tmp/planted-plain"}, TimeoutSeconds: 5}
+		for ctx.Err() == nil {
+			stream, err := client.ExecSandbox(ctx, &v1.ExecSandboxRequest{SandboxId: member.Load().(string), Exec: exec})
+			if err == nil {
+				_, err = stream.Recv()
+			}
+			if code := status.Code(err); code != codes.FailedPrecondition && ctx.Err() == nil {
+				p.t.Errorf("ExecSandbox on a pool member = %v, want FailedPrecondition", err)
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+		_ = conn.Close()
+	}
+}
