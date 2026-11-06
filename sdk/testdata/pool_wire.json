@@ -1,4 +1,11 @@
 {
+  "limits": {
+    "borrowTimeoutMaxMs": 300000,
+    "declareSeconds": 40,
+    "deleteSeconds": 30,
+    "runFirstFrameSeconds": 420,
+    "runTailSeconds": 60
+  },
   "runs": {
     "cold_first_run_nonzero_exit": {
       "status": 200,
@@ -45,6 +52,11 @@
         "{\"exit\":{\"reason\":\"EXITED\", \"usage\":{\"cpuMillis\":\"21\", \"memoryPeakBytes\":\"9437184\", \"memoryPeakScope\":\"PEAK_SCOPE_WINDOW\"}, \"executionId\":\"exe_01M6M3D3FRG49JM5BK3MD9Q0X0\"}}",
         "{\"runDone\":{\"outcome\":\"POOL_RESET_OK\"}}"
       ]
+    },
+    "no_first_frame": {
+      "status": 504,
+      "retryAfter": "1",
+      "body": "{\"error\":\"the runner did not answer in time; retry\"}\n"
     },
     "not_loaded": {
       "status": 409,
@@ -137,15 +149,44 @@
     }
   },
   "answers": {
+    "declare_borrow_too_long": {
+      "status": 400,
+      "body": "{\"error\":\"pool: invalid spec: borrow_timeout must be between 1ms and 5m0s\"}\n"
+    },
     "declare_different_spec": {
       "status": 409,
       "body": "{\"error\":\"pool py exists with a different spec\"}\n"
+    },
+    "declare_lost_pool": {
+      "status": 200,
+      "body": "{\"id\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0X1\", \"spec\":{\"name\":\"py\", \"tenantId\":\"tenant-a\", \"sandbox\":{\"image\":\"vora/base\", \"backend\":\"bwrap\", \"resources\":{\"cpuMillis\":\"100\", \"memoryBytes\":\"1048576\"}}}, \"state\":\"POOL_ACTIVE\", \"stats\":{}}"
+    },
+    "declare_no_resources": {
+      "status": 400,
+      "body": "{\"error\":\"sandbox.resources must set cpu_millis and memory_bytes above 0\"}\n"
+    },
+    "declare_other_agent": {
+      "status": 404,
+      "body": "{\"error\":\"pool not found\"}\n"
+    },
+    "declare_runner_down": {
+      "status": 503,
+      "retryAfter": "1",
+      "body": "{\"error\":\"no sandbox could start, or the runner is unavailable or still starting; retry shortly\"}\n"
     },
     "delete_draining": {
       "status": 202
     },
     "delete_gone": {
       "status": 204
+    },
+    "delete_not_on_runner": {
+      "status": 204
+    },
+    "delete_runner_row_gone": {
+      "status": 503,
+      "retryAfter": "1",
+      "body": "{\"error\":\"the pool's runner is unavailable; retry shortly\"}\n"
     },
     "get_active": {
       "status": 200,
@@ -159,13 +200,29 @@
       "status": 200,
       "body": "{\"id\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0WY\", \"spec\":{\"name\":\"py\", \"tenantId\":\"tenant-a\"}, \"state\":\"POOL_NOT_LOADED\", \"stats\":{}, \"notLoadedReason\":\"backend_missing\"}"
     },
+    "get_not_on_runner": {
+      "status": 200,
+      "body": "{\"id\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0WY\", \"spec\":{\"name\":\"py\", \"tenantId\":\"tenant-a\"}, \"state\":\"POOL_NOT_ON_RUNNER\"}"
+    },
     "global_admin_without_tenant": {
       "status": 400,
       "body": "{\"error\":\"a global administrator must pass tenant_id\"}\n"
     },
+    "listing_not_on_runner": {
+      "status": 200,
+      "body": "{\"pools\":[{\"id\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0WY\", \"spec\":{\"name\":\"py\", \"tenantId\":\"tenant-a\"}, \"state\":\"POOL_NOT_ON_RUNNER\"}]}"
+    },
     "listing_runner_silent": {
       "status": 200,
       "body": "{\"pools\":[{\"id\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0WY\", \"spec\":{\"name\":\"py\", \"tenantId\":\"tenant-a\"}}]}"
+    },
+    "listing_unsafe_unanswered": {
+      "status": 200,
+      "body": "{\"pools\":[{\"id\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0WY\", \"spec\":{\"name\":\"py\", \"tenantId\":\"tenant-a\"}}, {\"id\":\"pool_01M6M3D3FRG49JM5BK3MD9Q0X2\", \"spec\":{\"name\":\"unsafe\", \"tenantId\":\"tenant-a\", \"reuse\":\"POOL_REUSE_UNSAFE_NO_RESET\"}}]}"
+    },
+    "run_not_on_runner": {
+      "status": 409,
+      "body": "{\"error\":\"the pool's runner has no record of it; declare it again, or delete it to release its reservation\"}\n"
     }
   },
   "messages": {

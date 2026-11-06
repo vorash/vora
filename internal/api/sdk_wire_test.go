@@ -18,6 +18,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	v1 "github.com/vorash/vora/api/proto/v1"
+	"github.com/vorash/vora/internal/pool"
 )
 
 // sdkWireGolden is what the Python and TypeScript SDK suites decode. It is written
@@ -30,7 +31,16 @@ const sdkWireGolden = "../../sdk/testdata/pool_wire.json"
 // sdkRunBodyLimit is mirrored by each SDK's check on a run's encoded body.
 const sdkRunBodyLimit = 1 << 20
 
-const wirePoolID = "pool_01M6M3D3FRG49JM5BK3MD9Q0WY"
+const (
+	wirePoolID = "pool_01M6M3D3FRG49JM5BK3MD9Q0WY"
+	// wireRedeclaredID is the id a route gets when its runner lost the pool and a
+	// declare creates it again.
+	wireRedeclaredID = "pool_01M6M3D3FRG49JM5BK3MD9Q0X1"
+	wireUnsafeID     = "pool_01M6M3D3FRG49JM5BK3MD9Q0X2"
+)
+
+// wireResources is what a declare must set, or the API refuses it before any runner.
+const wireResources = `"resources":{"cpuMillis":"100","memoryBytes":"1048576"}`
 
 type wireAnswer struct {
 	Status     int      `json:"status"`
@@ -40,6 +50,9 @@ type wireAnswer struct {
 }
 
 type wireGolden struct {
+	// Limits are the API's own bounds, so an SDK's client timeout test fails when one
+	// of them moves past what that SDK waits for.
+	Limits   map[string]int64           `json:"limits"`
 	Runs     map[string]wireAnswer      `json:"runs"`
 	Answers  map[string]wireAnswer      `json:"answers"`
 	Messages map[string]json.RawMessage `json:"messages"`
@@ -48,8 +61,11 @@ type wireGolden struct {
 // wireRunner adds the plain calls a scenario needs to the scripted streamRunner.
 type wireRunner struct {
 	*streamRunner
-	get     func() (*v1.Pool, error)
-	drained bool
+	get       func() (*v1.Pool, error)
+	drained   bool
+	deleteErr error
+	// create overrides CreatePool once the fixture's own declare has gone through.
+	create func(*v1.CreatePoolRequest) (*v1.Pool, error)
 }
 
 func (r *wireRunner) GetPool(context.Context, *v1.GetPoolRequest) (*v1.Pool, error) {
@@ -57,13 +73,16 @@ func (r *wireRunner) GetPool(context.Context, *v1.GetPoolRequest) (*v1.Pool, err
 }
 
 func (r *wireRunner) DeletePool(context.Context, *v1.DeletePoolRequest) (*v1.DeletePoolResponse, error) {
-	return &v1.DeletePoolResponse{Drained: r.drained}, nil
+	return &v1.DeletePoolResponse{Drained: r.drained}, r.deleteErr
 }
 
 // CreatePool answers as the real runner does for a name it already has: the fixture
 // declares vora/base, and any other image is a different spec. The id is fixed, as
 // the golden shows it.
 func (r *wireRunner) CreatePool(_ context.Context, req *v1.CreatePoolRequest) (*v1.Pool, error) {
+	if r.create != nil {
+		return r.create(req)
+	}
 	if req.GetSpec().GetSandbox().GetImage() != "vora/base" {
 		return nil, status.Errorf(codes.AlreadyExists, "pool %s exists with a different spec", req.GetSpec().GetName())
 	}
@@ -183,13 +202,21 @@ func readAnswer(t *testing.T, resp *http.Response) wireAnswer {
 
 func captureCall(t *testing.T, runner *wireRunner, method, path, body string) wireAnswer {
 	t.Helper()
+	return captureAfter(t, runner, func(f *streamFixture) string { return f.key }, method, path, body)
+}
+
+// captureAfter makes one call as the key prepare returns. prepare runs once the
+// fixture has declared "py", so what it changes applies to that existing pool.
+func captureAfter(t *testing.T, runner *wireRunner, prepare func(*streamFixture) string, method, path, body string) wireAnswer {
+	t.Helper()
 	f := newStreamFixture(t, runner, 5*time.Second)
+	key := prepare(f)
 	var r io.Reader
 	if body != "" {
 		r = strings.NewReader(body)
 	}
 	req, _ := http.NewRequest(method, f.ts.URL+path, r)
-	req.Header.Set("Authorization", "Bearer "+f.key)
+	req.Header.Set("Authorization", "Bearer "+key)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -236,7 +263,30 @@ func TestSDKWireGolden(t *testing.T) {
 		}
 	}
 
+	notOnRunner := func() (*v1.Pool, error) { return nil, status.Error(codes.NotFound, "pool not found") }
+	silent := func() (*v1.Pool, error) { return nil, status.Error(codes.Internal, "boom") }
+	wellFormed := `{"sandbox":{"image":"vora/base","backend":"bwrap",` + wireResources + `}}`
+	createAnswers := func(answer func(*v1.CreatePoolRequest) (*v1.Pool, error)) func(*streamFixture, *wireRunner) string {
+		return func(f *streamFixture, runner *wireRunner) string {
+			runner.create = answer
+			return f.key
+		}
+	}
+	captureCreate := func(prepare func(*streamFixture, *wireRunner) string) wireAnswer {
+		runner := &wireRunner{streamRunner: &streamRunner{}}
+		return captureAfter(t, runner, func(f *streamFixture) string { return prepare(f, runner) }, http.MethodPut, "/v1/pools/py", wellFormed)
+	}
+
 	got := wireGolden{
+		Limits: map[string]int64{
+			"runFirstFrameSeconds": int64(defaultRunFirstFrameTimeout / time.Second),
+			"runTailSeconds":       int64(runTailGrace / time.Second),
+			"deleteSeconds":        int64(poolDeleteDeadline / time.Second),
+			// A declare that loses its route spends its call on the create and then
+			// removes the pool it made, each under its own deadline.
+			"declareSeconds":     int64((poolCallTimeout + poolDeleteDeadline) / time.Second),
+			"borrowTimeoutMaxMs": pool.MaxBorrowTimeout.Milliseconds(),
+		},
 		Runs: map[string]wireAnswer{
 			"every_field": captureRun(t, allKinds, nil),
 			"warm_reset":  captureRun(t, []*v1.RunChunk{runFrame(warmRun), outFrame("42\n"), errFrame("warn\n"), exitFrame(okExit), doneFrame(&v1.PoolRunDone{Outcome: v1.PoolResetOutcome_POOL_RESET_OK, ResetMs: 3})}, nil),
@@ -262,17 +312,47 @@ func TestSDKWireGolden(t *testing.T) {
 			"draining":        captureRun(t, nil, status.Error(codes.FailedPrecondition, "pool: draining")),
 			"not_loaded":      captureRun(t, nil, status.Error(codes.FailedPrecondition, "pool pool_01M6M3D3FRG49JM5BK3MD9Q0WY is not loaded on this runner: backend_missing")),
 			"runner_too_slow": captureRun(t, nil, status.Error(codes.DeadlineExceeded, "context deadline exceeded")),
+			"no_first_frame":  captureNoFirstFrame(t),
 		},
 		Answers: map[string]wireAnswer{
 			"delete_draining": captureCall(t, &wireRunner{streamRunner: &streamRunner{}, drained: false}, http.MethodDelete, "/v1/pools/py", ""),
 			"delete_gone":     captureCall(t, &wireRunner{streamRunner: &streamRunner{}, drained: true}, http.MethodDelete, "/v1/pools/py", ""),
 			"declare_different_spec": captureCall(t, &wireRunner{
 				streamRunner: &streamRunner{},
-			}, http.MethodPut, "/v1/pools/py", `{"sandbox":{"image":"vora/other","backend":"bwrap"}}`),
+			}, http.MethodPut, "/v1/pools/py", `{"sandbox":{"image":"vora/other","backend":"bwrap",`+wireResources+`}}`),
+			"declare_no_resources": captureCall(t, &wireRunner{streamRunner: &streamRunner{}}, http.MethodPut, "/v1/pools/py", `{"sandbox":{"image":"vora/base","backend":"bwrap"}}`),
+			"declare_borrow_too_long": captureCreate(createAnswers(func(*v1.CreatePoolRequest) (*v1.Pool, error) {
+				return nil, status.Error(codes.InvalidArgument, "pool: invalid spec: borrow_timeout must be between 1ms and 5m0s")
+			})),
+			"declare_runner_down": captureCreate(createAnswers(func(*v1.CreatePoolRequest) (*v1.Pool, error) {
+				return nil, status.Error(codes.Unavailable, "pools are not loaded yet")
+			})),
+			"declare_lost_pool": captureCreate(createAnswers(func(req *v1.CreatePoolRequest) (*v1.Pool, error) {
+				return &v1.Pool{Id: wireRedeclaredID, Spec: req.GetSpec(), State: v1.PoolState_POOL_ACTIVE, Stats: &v1.PoolStats{}}, nil
+			})),
+			"declare_other_agent": captureAgentBoundary(t),
+			"get_not_on_runner":   captureCall(t, &wireRunner{streamRunner: &streamRunner{}, get: notOnRunner}, http.MethodGet, "/v1/pools/py", ""),
+			"run_not_on_runner": captureCall(t, &wireRunner{
+				streamRunner: &streamRunner{run: scripted(nil, status.Error(codes.NotFound, "pool not found"))},
+				get:          notOnRunner,
+			}, http.MethodPost, "/v1/pools/py/run", `{"command":"true","timeoutSeconds":"30"}`),
+			"delete_not_on_runner": captureCall(t, &wireRunner{
+				streamRunner: &streamRunner{},
+				deleteErr:    status.Error(codes.NotFound, "pool not found"),
+			}, http.MethodDelete, "/v1/pools/py", ""),
+			"delete_runner_row_gone": captureAfter(t, &wireRunner{streamRunner: &streamRunner{}}, func(f *streamFixture) string {
+				mem := f.s.store.(*MemStore)
+				mem.mu.Lock()
+				defer mem.mu.Unlock()
+				delete(mem.runners, "run_test")
+				return f.key
+			}, http.MethodDelete, "/v1/pools/py", ""),
+			"listing_not_on_runner": captureCall(t, &wireRunner{streamRunner: &streamRunner{}, get: notOnRunner}, http.MethodGet, "/v1/pools", ""),
+			"listing_unsafe_unanswered": captureUnsafeListing(t, silent),
 			"global_admin_without_tenant": adminWithoutTenant(t),
 			"listing_runner_silent": captureCall(t, &wireRunner{
 				streamRunner: &streamRunner{},
-				get:          func() (*v1.Pool, error) { return nil, status.Error(codes.Internal, "boom") },
+				get:          silent,
 			}, http.MethodGet, "/v1/pools", ""),
 			"get_not_loaded": captureCall(t, &wireRunner{
 				streamRunner: &streamRunner{},
@@ -374,6 +454,50 @@ func canonicalValue(t *testing.T, s string) string {
 		t.Fatal(err)
 	}
 	return string(out)
+}
+
+// captureNoFirstFrame is a runner that never sends a run's first frame, so the API
+// gives up on its own bound and the client still gets a status.
+func captureNoFirstFrame(t *testing.T) wireAnswer {
+	t.Helper()
+	f := newStreamFixture(t, &streamRunner{run: func(_ *v1.RunInPoolRequest, stream grpc.ServerStreamingServer[v1.RunChunk]) error {
+		<-stream.Context().Done()
+		return stream.Context().Err()
+	}}, 5*time.Second)
+	f.s.runFirstFrameTimeout = 50 * time.Millisecond
+	resp, err := http.DefaultClient.Do(runRequest(context.Background(), f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return readAnswer(t, resp)
+}
+
+// captureAgentBoundary redeclares, with another agent's key, a name one agent owns.
+func captureAgentBoundary(t *testing.T) wireAnswer {
+	t.Helper()
+	return captureAfter(t, &wireRunner{streamRunner: &streamRunner{}}, func(f *streamFixture) string {
+		declare(t, f.ts, mintKey(t, f.s, "tenant-a", "agent-1", ScopeSandbox), "owned", poolBody(1, 1))
+		return mintKey(t, f.s, "tenant-a", "agent-2", ScopeSandbox)
+	}, http.MethodPut, "/v1/pools/owned", `{"sandbox":{"image":"vora/base","backend":"bwrap",`+wireResources+`}}`)
+}
+
+// captureUnsafeListing lists a pool an admin declared as unsafe, with its runner not
+// answering. The route alone has to say that nothing is reset between its runs.
+func captureUnsafeListing(t *testing.T, get func() (*v1.Pool, error)) wireAnswer {
+	t.Helper()
+	runner := &wireRunner{streamRunner: &streamRunner{}, get: get}
+	return captureAfter(t, runner, func(f *streamFixture) string {
+		runner.create = func(req *v1.CreatePoolRequest) (*v1.Pool, error) {
+			return &v1.Pool{Id: wireUnsafeID, Spec: req.GetSpec(), State: v1.PoolState_POOL_ACTIVE}, nil
+		}
+		body := poolBody(1, 1)
+		body["reuse"] = "POOL_REUSE_UNSAFE_NO_RESET"
+		body["tenantId"] = "tenant-a"
+		if got := call(t, http.MethodPut, f.ts.URL+"/v1/pools/unsafe", bootstrap, body); got.code != http.StatusCreated {
+			t.Fatalf("admin declare = %d %s", got.code, got.body)
+		}
+		return f.key
+	}, http.MethodGet, "/v1/pools", "")
 }
 
 func adminWithoutTenant(t *testing.T) wireAnswer {
