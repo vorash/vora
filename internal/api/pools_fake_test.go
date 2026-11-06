@@ -33,10 +33,12 @@ type fakePools struct {
 	// createdThenErr makes CreatePool create the pool and lose the answer.
 	createdThenErr error
 	getErr         error
-	deleteErr      error
-	deleteBusy     bool
-	runErr         error
-	runChunks      []*v1.RunChunk
+	// getHook runs before GetPool's own answer, outside the lock.
+	getHook    func(context.Context)
+	deleteErr  error
+	deleteBusy bool
+	runErr     error
+	runChunks  []*v1.RunChunk
 }
 
 func (f *fakePools) CreatePool(ctx context.Context, req *v1.CreatePoolRequest) (*v1.Pool, error) {
@@ -81,7 +83,13 @@ func (f *fakePools) CreatePool(ctx context.Context, req *v1.CreatePoolRequest) (
 	return proto.Clone(p).(*v1.Pool), nil
 }
 
-func (f *fakePools) GetPool(_ context.Context, poolID, tenantID string) (*v1.Pool, error) {
+func (f *fakePools) GetPool(ctx context.Context, poolID, tenantID string) (*v1.Pool, error) {
+	if f.getHook != nil {
+		f.getHook(ctx)
+		if err := ctx.Err(); err != nil {
+			return nil, status.FromContextError(err).Err()
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++

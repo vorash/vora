@@ -9,7 +9,9 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -40,6 +42,11 @@ const (
 	// borrow_timeout, so it allows the largest, and two cold starts at the pool's 60 s
 	// for a start that fails and is retried on another member.
 	defaultRunFirstFrameTimeout = pool.MaxBorrowTimeout + 2*time.Minute
+	// poolListConcurrency and defaultPoolListDeadline bound a listing, which asks a
+	// runner about each pool. The deadline leaves room inside the server's 30 s
+	// WriteTimeout for the answer, and what it cuts off shows as unanswered.
+	poolListConcurrency     = 8
+	defaultPoolListDeadline = 20 * time.Second
 )
 
 var (
@@ -433,15 +440,28 @@ func (s *Server) listPools(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	out := &v1.ListPoolsResponse{}
-	for _, route := range routes {
-		if !s.canAccessPool(key, route) {
+	routes = slices.DeleteFunc(routes, func(route PoolRoute) bool { return !s.canAccessPool(key, route) })
+	out := &v1.ListPoolsResponse{Pools: make([]*v1.Pool, len(routes))}
+	ctx, cancel := context.WithTimeout(r.Context(), s.poolListDeadline)
+	defer cancel()
+	slots := make(chan struct{}, poolListConcurrency)
+	var asking sync.WaitGroup
+	for i, route := range routes {
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			out.Pools[i] = routedPool(route, v1.PoolState_POOL_STATE_UNSPECIFIED)
+			hidePoolRunner(key, out.Pools[i])
 			continue
 		}
-		p := s.poolForListing(r.Context(), route)
-		hidePoolRunner(key, p)
-		out.Pools = append(out.Pools, p)
+		asking.Go(func() {
+			defer func() { <-slots }()
+			p := s.poolForListing(ctx, route)
+			hidePoolRunner(key, p)
+			out.Pools[i] = p
+		})
 	}
+	asking.Wait()
 	writeProto(w, http.StatusOK, out)
 }
 

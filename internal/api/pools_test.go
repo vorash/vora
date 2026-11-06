@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -793,6 +795,92 @@ func TestPoolDeleteKeepsItsRouteUntilTheRunnerSaysGone(t *testing.T) {
 			kept(t, s, p)
 		}
 	})
+}
+
+// A listing asks a runner about every pool. A runner that accepts the calls and
+// never answers must not hold a tenant's listing past the server's WriteTimeout,
+// and one tenant's listing must not open a call per pool at once.
+func TestListingIsBoundedInTimeAndConcurrency(t *testing.T) {
+	fr := &fakeRunner{}
+	s, ts := newTestServer(t, fr)
+	key := tenantKey(t, s, "tenant-a")
+	names := make([]string, poolListConcurrency*2+1)
+	for i := range names {
+		names[i] = fmt.Sprintf("py-%02d", i)
+		declare(t, ts, key, names[i], poolBody(0, 1))
+	}
+	s.poolListDeadline = 200 * time.Millisecond
+	var inFlight, peak atomic.Int32
+	fr.getHook = func(ctx context.Context) {
+		now := inFlight.Add(1)
+		defer inFlight.Add(-1)
+		for {
+			seen := peak.Load()
+			if now <= seen || peak.CompareAndSwap(seen, now) {
+				break
+			}
+		}
+		<-ctx.Done()
+	}
+
+	start := time.Now()
+	got := call(t, http.MethodGet, ts.URL+"/v1/pools", key, nil)
+	took := time.Since(start)
+	if got.code != http.StatusOK {
+		t.Fatalf("list = %d %s", got.code, got.body)
+	}
+	// One call's own deadline is 10 s, so this holds only if the listing's cuts it off.
+	if took > 5*time.Second {
+		t.Fatalf("list took %s against a 200 ms deadline", took)
+	}
+	if p := peak.Load(); p > poolListConcurrency || p < 2 {
+		t.Fatalf("peak concurrent calls = %d, want between 2 and %d", p, poolListConcurrency)
+	}
+	list := &v1.ListPoolsResponse{}
+	if err := protojson.Unmarshal([]byte(got.body), list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.GetPools()) != len(names) {
+		t.Fatalf("listed %d pools, want %d", len(list.GetPools()), len(names))
+	}
+	for i, p := range list.GetPools() {
+		if p == nil || p.GetSpec().GetName() != names[i] || p.GetState() != v1.PoolState_POOL_STATE_UNSPECIFIED || p.GetRunnerId() != "" {
+			t.Fatalf("pool %d = %v, want %s with no state and no runner", i, p, names[i])
+		}
+	}
+}
+
+// Asking concurrently must not change what a listing says of pools that do answer.
+func TestListingKeepsOrderAndAnswers(t *testing.T) {
+	fr := &fakeRunner{}
+	s, ts := newTestServer(t, fr)
+	key := tenantKey(t, s, "tenant-a")
+	names := make([]string, poolListConcurrency+3)
+	for i := range names {
+		names[i] = fmt.Sprintf("py-%02d", i)
+		declare(t, ts, key, names[i], poolBody(0, 1))
+	}
+	bound := mintKey(t, s, "tenant-a", "agent-2", ScopeSandbox)
+	declare(t, ts, bound, "agents", poolBody(0, 1))
+
+	list := &v1.ListPoolsResponse{}
+	got := call(t, http.MethodGet, ts.URL+"/v1/pools", bound, nil)
+	if err := protojson.Unmarshal([]byte(got.body), list); err != nil || len(list.GetPools()) != 1 || list.GetPools()[0].GetSpec().GetName() != "agents" {
+		t.Fatalf("an agent's listing = %d %s, %v, want its one pool", got.code, got.body, err)
+	}
+	got = call(t, http.MethodGet, ts.URL+"/v1/pools", key, nil)
+	if err := protojson.Unmarshal([]byte(got.body), list); err != nil {
+		t.Fatal(err)
+	}
+	want := append([]string{"agents"}, names...)
+	if len(list.GetPools()) != len(want) {
+		t.Fatalf("listed %d, want %d", len(list.GetPools()), len(want))
+	}
+	for i, p := range list.GetPools() {
+		if p.GetSpec().GetName() != want[i] || p.GetState() != v1.PoolState_POOL_ACTIVE {
+			t.Fatalf("pool %d = %v, want %s active", i, p, want[i])
+		}
+	}
 }
 
 // A runner that lost a pool's record leaves a route holding a reservation and a

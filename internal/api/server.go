@@ -107,6 +107,7 @@ type Server struct {
 	conns                runnerConns
 	runWriteTimeout      time.Duration
 	runFirstFrameTimeout time.Duration
+	poolListDeadline     time.Duration
 }
 
 // New builds a control-plane server.
@@ -140,7 +141,7 @@ func New(opts Options) *Server {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	return &Server{opts: opts, store: opts.Store, logger: opts.Logger, now: opts.Now, runWriteTimeout: defaultRunWriteTimeout, runFirstFrameTimeout: defaultRunFirstFrameTimeout}
+	return &Server{opts: opts, store: opts.Store, logger: opts.Logger, now: opts.Now, runWriteTimeout: defaultRunWriteTimeout, runFirstFrameTimeout: defaultRunFirstFrameTimeout, poolListDeadline: defaultPoolListDeadline}
 }
 
 // Close releases the store and the pool routes' runner connections.
