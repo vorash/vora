@@ -18,15 +18,15 @@ async with vora.Vora() as client:
         await sandbox.destroy()
 ```
 
-This mirrors [`@vorash/sdk`](../typescript) (the TypeScript SDK) endpoint for
-endpoint and semantic for semantic — the wire encoding, the exec exit-chunk
-contract and the error shapes are pinned against it by the test suite.
+This SDK has the same endpoints and semantics as
+[`@vorash/sdk`](../typescript), the TypeScript SDK. The test suite pins the wire
+encoding, the exec exit-chunk contract, and the error shapes against it.
 
 ## What you get
 
 | Call | What it does |
 | --- | --- |
-| `client.sandboxes.create(image=..., memory=..., cpu=..., pids=..., disk=..., network=..., env=..., ttl=...)` | create + start, returns a `Sandbox` |
+| `client.sandboxes.create(image=..., memory=..., cpu=..., pids=..., disk=..., network=..., env=..., ttl=...)` | create and start a sandbox, returns a `Sandbox` |
 | `client.sandboxes.get/list/destroy` | sandbox lifecycle |
 | `sandbox.exec(command, args=None, cwd=, env=, stdin=, timeout_seconds=)` | run and collect `ExecResult(stdout, stderr, exit_code, reason)` |
 | `sandbox.stream_exec(...)` | stream `ExecChunk`s (`stdout`/`stderr` data, final `exit` with `execution_id` and `usage: ExecUsage`) |
@@ -37,10 +37,10 @@ contract and the error shapes are pinned against it by the test suite.
 
 ### Exec semantics
 
-`exec("ls | wc -l")` is a shell line run via `/bin/sh -c`; pass `args` (even
-empty) to run `command` literally: `exec("echo", ["hi"])`. Output that arrives
-on a stream **without an exit record is a killed run**, not a success:
-`exec` raises `VoraError` carrying whatever output there was.
+`exec("ls | wc -l")` is a shell line that runs through `/bin/sh -c`. To run
+`command` literally, pass `args`, even if empty: `exec("echo", ["hi"])`. Output
+that arrives on a stream **without an exit record is a killed run**, not a
+success. `exec` raises `VoraError` carrying whatever output there was.
 
 ### Pools
 
@@ -143,12 +143,12 @@ with Vora() as client:
     sandbox.destroy()
 ```
 
-The facade drives a private event loop per call — single-threaded convenience
-only; use the asyncio client for concurrent work.
+The facade drives a private event loop per call, so it suits single-threaded
+use only. Use the asyncio client for concurrent work.
 
 ## Typed
 
-Full annotations and a `py.typed` marker ship with the package; `mypy --strict`
+Full annotations and a `py.typed` marker ship with the package. `mypy --strict`
 is clean and runs in CI.
 
 ## Configuration
@@ -160,8 +160,8 @@ is clean and runs in CI.
 | `client` | a fresh `httpx.AsyncClient` | Reuse a client (custom transports, tests) |
 
 Resource strings follow container-runtime quoting: `"512Mi"` is powers of 1024,
-`"500M"` is powers of 1000 (`parse_size`, `parse_cpu`, `parse_duration` are
-exported for reuse).
+and `"500M"` is powers of 1000. `parse_size`, `parse_cpu`, and `parse_duration`
+are exported for reuse.
 
 ### Errors
 
@@ -187,8 +187,8 @@ subclasses say what to do next:
 The SDK tells the 409s apart by reading the pool's state, which costs one extra `GET`.
 
 Pool calls that are safe to repeat retry 429 and 503, honouring `Retry-After`, under
-the client's `retry` (a `RetryPolicy`, default 4 attempts; `None` turns it off).
-`delete` rides out 429, 503 and 504 for up to `max_wait_seconds`, whatever the policy. A
+the client's `retry` (a `RetryPolicy`, default 4 attempts). `None` turns it off.
+`delete` keeps retrying 429, 503 and 504 for up to `max_wait_seconds`, whatever the policy. A
 run retries only if you pass `retry=RetryPolicy()`, because a repeated run isn't
 idempotent. It then repeats a 429 or 503, and never repeats a run past its first frame. A
 429 means nothing ran. A 503 usually means the same, but a runner lost just after the
@@ -208,9 +208,9 @@ python examples/basic.py   # needs VORA_API_URL / VORA_API_KEY
 ```
 
 The tests drive everything through an `httpx.MockTransport` stand-in for
-`vora-api` — no server, no network. The pool tests use a local socket that answers
+`vora-api`, with no server and no network. The pool tests use a local socket that answers
 with `../testdata/pool_wire.json`, which `TestSDKWireGolden` in `internal/api` writes
 from the real handlers. `tests/test_pools_e2e.py` runs against a real API when
 `VORA_API_URL` and `VORA_API_KEY` are set, and is skipped otherwise. `python -m build` produces the sdist and
-wheel; `twine upload dist/*` publishes to PyPI once a token is configured (the
-release workflow attaches the built artifacts to the GitHub release).
+wheel. `twine upload dist/*` publishes to PyPI once a token is configured. The
+release workflow attaches the built artifacts to the GitHub release.

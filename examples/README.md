@@ -1,9 +1,9 @@
 # Vora in the real world
 
-Runnable recipes, not API tours. Each directory is a small, self-contained
-application that solves a concrete problem — running code you do **not** trust —
-with the `vora` CLI and the [TypeScript SDK](../sdk/typescript). Read them as
-starting points to adapt.
+These are runnable recipes, not API tours. Each directory is a small,
+self-contained application that uses the `vora` CLI and the
+[TypeScript SDK](../sdk/typescript) to solve a concrete problem: running code you
+do **not** trust. Read them as starting points to adapt.
 
 | Recipe | The problem it solves | Interface |
 | ------ | --------------------- | --------- |
@@ -26,7 +26,7 @@ vora sandbox create --image vora/base && vora sandbox destroy sbx_...   # sanity
 ```
 
 Recipes marked **API** also need the control plane and an API key
-(`vora-api`, `vora keys create`, `VORA_API_KEY`); the release-bot recipe needs
+(`vora-api`, `vora keys create`, `VORA_API_KEY`). The release-bot recipe needs
 `VORA_MASTER_KEY` for the secret store. See the [README](../README.md) for
 setting up the API and images, and [docs/configuration.md](../docs/configuration.md)
 for every setting.
@@ -43,14 +43,14 @@ node codegen-gate/server.mjs
 
 - **Cleanup is part of the example**: every recipe destroys what it creates
   (`trap` in shell, `try/finally` in JS) and does not leave sandboxes behind.
-- **A pinned, portable backend**: recipes run on `bwrap` (available on any
-  host, unprivileged) — set `VORA_BACKEND=gvisor` to run them on a hosted
+- **A pinned, portable backend**: recipes run on `bwrap`, which is available on
+  any host and unprivileged. Set `VORA_BACKEND=gvisor` to run them on a hosted
   runner with gVisor.
-- **Least privilege by default**: `--network none` unless the job genuinely
-  needs egress — then `restricted` with an explicit allowlist, or brokered
-  credentials.
+- **Least privilege by default**: recipes use `--network none` unless the job
+  needs egress. A job that needs egress uses `restricted` with an explicit
+  allowlist, or brokered credentials.
 - **Budgets are not optional**: memory, pids and TTL are always set. A runaway
-  workload gets `OOMKilled` / `PidsLimitExceeded` / `TimeoutExceeded`, not your
+  workload gets `OOMKilled`, `PidsLimitExceeded`, or `TimeoutExceeded`, not your
   host.
-- **Read the audit trail**: `vora logs`, `vora stats` and the exec/egress
+- **Read the audit trail**: `vora logs`, `vora stats`, and the exec and egress
   records are how you explain, after the fact, exactly what untrusted code did.

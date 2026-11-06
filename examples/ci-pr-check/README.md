@@ -6,14 +6,15 @@ machine you care about: it has cloud credentials, SSH keys, and reachability
 into your network. Running `npm test` from that PR executes whatever the
 author wrote, on that machine.
 
-**The move.** Check the PR out into a Vora sandbox instead: no network, capped
-CPU/memory/PIDs, read-only image rootfs, and the whole execution recorded.
+**The move.** Check the PR out into a Vora sandbox instead. The sandbox has no
+network and a read-only image rootfs. CPU, memory, and PIDs are capped, and Vora
+records the whole execution.
 The runner machine only ever copies bytes in and out.
 
 `run.sh` takes a directory (the PR checkout), copies it into a fresh sandbox,
 runs the test command under limits, and reports exit code, output and resource
-usage. Failures and explosions (`OOMKilled`, `PidsLimitExceeded`) come back as
-first-class results.
+usage. Failures and runaway workloads (`OOMKilled`, `PidsLimitExceeded`) come
+back as ordinary results.
 
 ## Run it
 
@@ -27,22 +28,23 @@ first-class results.
 VORA_IMAGE=vora/python ./run.sh ~/src/pr-5678 python -m pytest
 ```
 
-Output is the streamed test log followed by a summary; the exit code is the
+Output is the streamed test log followed by a summary. The exit code is the
 test command's, so CI fails exactly when the PR's tests fail.
 
 ## Wiring into GitHub Actions
 
-[`github-action.yml`](github-action.yml) is a complete workflow: check out the
-PR's head onto a self-hosted machine, run `run.sh`, stream logs to the job.
-The trusted parts of the workflow (checkout, reporting) run on the host; the
+[`github-action.yml`](github-action.yml) is a complete workflow. It checks out
+the PR's head onto a self-hosted machine, runs `run.sh`, and streams logs to the
+job. The trusted parts of the workflow (checkout, reporting) run on the host. The
 PR's *code* only ever runs inside the sandbox.
 
 ## What to notice
 
-- `--network none` — a PR cannot exfiltrate your secrets or phone home.
-- `--memory/--cpu/--pids/--disk/--ttl` — a fork bomb or memory bomb becomes a
-  `PidsLimitExceeded` / `OOMKilled` result, not a dead runner.
-- `vora logs` + `vora stats` at the end — the audit record of what ran and what
-  it consumed. In a dispute ("CI killed my PR unfairly") this is the evidence.
+- With `--network none`, a PR cannot exfiltrate your secrets or phone home.
+- With `--memory/--cpu/--pids/--disk/--ttl`, a fork bomb or memory bomb becomes a
+  `PidsLimitExceeded` or `OOMKilled` result, not a dead runner.
+- `vora logs` and `vora stats` at the end give the audit record of what ran and
+  what it consumed. In a dispute ("CI killed my PR unfairly"), this record is the
+  evidence.
 - The test command runs through `vora exec`, which streams stdout/stderr live,
   so the CI log fills in real time.

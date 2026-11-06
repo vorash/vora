@@ -3,13 +3,13 @@
 Run [OpenAI Agents](https://openai.github.io/openai-agents-js/) code inside
 [Vora](https://github.com/vorash/vora) sandboxes.
 
-This is an **integration**, not part of the Vora core: it depends on
+This is an **integration**, not part of the Vora core. It depends on
 [`@vorash/sdk`](../typescript) and the Agents SDK, and nothing in Vora depends
 on it.
 
 ## What it gives an agent
 
-One tool, `run_code`:
+The agent gets one tool, `run_code`:
 
 ```text
 run_code { code: "print(sum(range(10)))", language: "python" }
@@ -20,9 +20,9 @@ run_code { code: "print(sum(range(10)))", language: "python" }
 ```
 
 It executes the snippet inside a disposable Linux sandbox and returns stdout,
-stderr and the exit code. The sandbox is created on first use, reused across
-calls (so files and installed packages persist between tool calls), and
-destroyed on `dispose()`.
+stderr and the exit code. The client creates the sandbox on first use, reuses it
+across calls (so files and installed packages persist between tool calls), and
+destroys it on `dispose()`.
 
 ## Install
 
@@ -30,7 +30,7 @@ destroyed on `dispose()`.
 npm install @vorash/openai-agents @openai/agents zod
 ```
 
-`@openai/agents` and `zod` are peer dependencies — your agent already has them.
+`@openai/agents` and `zod` are peer dependencies, which your agent already has.
 
 ## Use
 
@@ -54,8 +54,8 @@ try {
 }
 ```
 
-The sandbox is provisioned lazily, so constructing the client is cheap. A
-complete runnable version is in [`examples/agent.ts`](examples/agent.ts).
+The client creates the sandbox only when it is first needed, so constructing the
+client is cheap. A complete runnable version is in [`examples/agent.ts`](examples/agent.ts).
 
 ## Configuration
 
@@ -63,13 +63,13 @@ complete runnable version is in [`examples/agent.ts`](examples/agent.ts).
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `client` | `new Vora()` | Reuse an existing client; otherwise `VORA_API_URL` / `VORA_API_KEY` are read |
-| `image` | `vora/python` | Rootfs image; the default matches the default language |
-| `memory`, `cpu`, `pids`, `disk` | — | Resource limits (`"512Mi"`, `1`, `"500m"`) |
-| `network` | — | `"none"` for default-deny egress |
-| `env`, `ttl`, `backend` | — | Passed through to `sandbox create` |
+| `client` | `new Vora()` | Reuse an existing client. Otherwise the client reads `VORA_API_URL` and `VORA_API_KEY` |
+| `image` | `vora/python` | Rootfs image. The default matches the default language |
+| `memory`, `cpu`, `pids`, `disk` | not set | Resource limits (`"512Mi"`, `1`, `"500m"`) |
+| `network` | not set | `"none"` for default-deny egress |
+| `env`, `ttl`, `backend` | not set | Passed through to `sandbox create` |
 | `workdir` | `/workspace` | Working directory for `run_code` |
-| `sandboxId` | — | Run against an existing sandbox instead of creating one |
+| `sandboxId` | not set | Run against an existing sandbox instead of creating one |
 
 ### Languages
 
@@ -80,9 +80,9 @@ Python, `vora/node` for JavaScript, `vora/base` for shell.
 
 ### Lifecycle
 
-- `start()` provisions the sandbox once; concurrent calls share one creation.
+- `start()` creates the sandbox once. Concurrent calls share one creation.
 - `dispose()` destroys a sandbox the client created and is safe to call twice.
-- A sandbox passed via `sandboxId` is **adopted**: `dispose()` leaves it
+- A sandbox passed through `sandboxId` is **adopted**: `dispose()` leaves it
   running, because the client does not own it.
 
 ### Errors
@@ -101,5 +101,5 @@ node --experimental-strip-types examples/agent.ts   # needs OPENAI_API_KEY
 ```
 
 The tests drive the tool through the Agents SDK's own `FunctionTool.invoke`
-against a stand-in `vora-api`, so the model-facing path (schema, invocation,
-error text) is covered without calling OpenAI.
+against a stand-in `vora-api`, so they cover the model-facing path (schema,
+invocation, error text) without calling OpenAI.

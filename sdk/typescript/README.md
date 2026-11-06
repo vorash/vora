@@ -2,9 +2,9 @@
 
 TypeScript client for the [Vora](https://github.com/vorash/vora) sandbox API.
 
-Wraps [`vora-api`](../../docs/architecture/overview.md) over HTTP/JSON with the
-API key, and exposes sandbox lifecycle, exec (streaming), files, stats and the
-audit surfaces (`events`, `execs`, `egress`). It has **no runtime
+It wraps [`vora-api`](../../docs/architecture/overview.md) over HTTP and JSON with
+the API key. It exposes sandbox lifecycle, streaming exec, files, stats, and the
+audit routes (`events`, `execs`, `egress`). It has **no runtime
 dependencies** and runs on Node 18+ and in browsers that provide `fetch`.
 
 ## Install
@@ -45,7 +45,7 @@ await sandbox.destroy();
 
 ## Streaming
 
-`exec` collects output; `streamExec` yields it as it arrives:
+`exec` collects output. `streamExec` yields it as it arrives:
 
 ```ts
 for await (const chunk of sandbox.streamExec("apt-get update")) {
@@ -61,7 +61,7 @@ and `pidsLimitHits`, all measured over that exec only.
 
 ## stdin
 
-Pass `stdin` to feed the child; it sees EOF once the input is consumed.
+Pass `stdin` to feed the child process. The child sees EOF once the input is consumed.
 
 ```ts
 const result = await sandbox.exec("wc -c", { stdin: "hello" });
@@ -176,8 +176,8 @@ The SDK tells the 409s apart by reading the pool's state, which costs one extra 
 ### Retries
 
 Pool calls that are safe to repeat retry 429 and 503, honouring `Retry-After`, under the
-client's `retry` (a `RetryPolicy`, default 4 attempts; `null` turns it off). `delete`
-rides out 429, 503 and 504 for up to `maxWaitSeconds`, whatever the policy. A run retries
+client's `retry` (a `RetryPolicy`, default 4 attempts). `null` turns it off. `delete`
+keeps retrying 429, 503 and 504 for up to `maxWaitSeconds`, whatever the policy. A run retries
 only if you pass `retry: {}`, because a repeated run isn't idempotent. It then repeats a
 429 or 503, and never repeats a run past its first frame. A 429 means nothing ran. A 503
 usually means the same, but a runner lost just after the program started also answers
@@ -201,7 +201,7 @@ do not retry.
 | `sandbox.events()` | `GET /v1/sandboxes/{id}/events` |
 | `sandbox.execs()` | `GET /v1/sandboxes/{id}/execs` |
 | `sandbox.egress()` | `GET /v1/sandboxes/{id}/egress` |
-| `sandbox.refresh()` / `sandbox.destroy()` | record re-read / teardown |
+| `sandbox.refresh()` / `sandbox.destroy()` | re-read the record, destroy the sandbox |
 | `vora.pools.declare(name, options)` | `PUT /v1/pools/{name}` |
 | `vora.pools.get(name, { tenantId })` / `list({ tenantId })` | `GET /v1/pools/{name}`, `GET /v1/pools` |
 | `pool.run(commandOrOptions)` | `POST /v1/pools/{name}/run` (NDJSON) |
@@ -210,18 +210,18 @@ do not retry.
 | `pool.execs(sandboxId)` / `pool.events(sandboxId)` | `GET /v1/pools/{name}/sandboxes/{id}/execs`, `/events` |
 | `pool.delete({ maxWaitSeconds })` | `DELETE /v1/pools/{name}`, repeated until gone |
 
-Admin endpoints (`/v1/keys`, `/v1/secrets`, `/v1/runners`) are not wrapped; use
-the `vora` CLI for those.
+The SDK does not wrap the admin endpoints (`/v1/keys`, `/v1/secrets`,
+`/v1/runners`). Use the `vora` CLI for those.
 
 ## Wire notes
 
-`vora-api` speaks [protojson](https://protobuf.dev/programming-guides/json/):
+`vora-api` uses [protojson](https://protobuf.dev/programming-guides/json/):
 camelCase fields, enums as names (`"RUNNING"`), bytes as base64, and **int64 as
 strings** (`"cpuMillis": "1000"`). This SDK is the only layer that knows those
-rules — everything above it uses plain numbers and `Uint8Array`s. Sizes and
-durations are converted for you (`"512Mi"` → bytes, `"1h30m"` → seconds).
+rules. Everything above it uses plain numbers and `Uint8Array`s. The SDK converts
+sizes and durations for you (`"512Mi"` to bytes, `"1h30m"` to seconds).
 
-Errors are thrown as `VoraError` with `status` and the parsed `body`
+The SDK throws errors as `VoraError` with `status` and the parsed `body`
 (`{"error": "..."}` from the API).
 
 ## Development

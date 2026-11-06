@@ -2,18 +2,19 @@
 
 **The problem.** An agent proposes five candidate patches for a failing test.
 Which one actually fixes it? Checking each candidate means resetting to the
-same repo state, applying one patch, running the suite — serially, or on five
-checkouts that drift apart. And the patches are agent-written, i.e. untrusted.
+same repo state, applying one patch, and running the suite, either serially or on
+five checkouts that drift apart. The patches are also agent-written, so they are
+untrusted.
 
-**The move.** Snapshot the prepared repo state **once** — live, while its
-sandbox runs — then fork it once per candidate. Each fork is an independent
-sandbox that starts from exactly the same state (crash-consistent copy of
-`/workspace` + `/root`, same image; [ADR 023](../docs/adr/023-snapshot-fork.md)).
+**The move.** Snapshot the prepared repo state **once**, live, while its sandbox
+runs. Then fork it once per candidate. Each fork is an independent sandbox that
+starts from exactly the same state: a crash-consistent copy of `/workspace` and
+`/root`, on the same image ([ADR 023](../docs/adr/023-snapshot-fork.md)).
 Apply one patch per fork, run the tests **concurrently**, collect a verdict
-table, tear everything down.
+table, and tear everything down.
 
-This is the shape the snapshot/fork feature exists for: fan out from one state,
-evaluate, throw the copies away.
+The snapshot and fork feature exists for this pattern: fan out from one state,
+evaluate, and throw the copies away.
 
 ## Run it
 
@@ -25,12 +26,12 @@ node patch-fanout/fanout.mjs
 ## What to notice
 
 - `vora.snapshots.create(sandbox.id)` takes the snapshot **while the source
-  keeps running** — the copy is live and crash-consistent, no quiescing step.
-- `snapshot.fork()` is an ordinary sandbox under the hood: same spec, fresh id,
-  fresh TTL. Budgets and no-network apply to every fork identically.
-- Forks diverge from their first write — edit `solution.py` in fork A and fork
-  B never sees it. Sibling isolation is what makes parallel evaluation sound.
+  keeps running**. The copy is live and crash-consistent, with no quiescing step.
+- `snapshot.fork()` creates an ordinary sandbox with the same spec, a fresh id,
+  and a fresh TTL. Budgets and no-network apply to every fork identically.
+- Forks diverge from their first write. If you edit `solution.py` in fork A, fork
+  B never sees it. Parallel evaluation is sound because sibling forks are isolated.
 - Snapshots **outlive their source**: the example destroys the source sandbox
   before forking, which is exactly what an overnight fan-out does.
-- Cost accounting: `stats()` per fork tells you which candidate was not just
-  wrong but expensive.
+- For cost accounting, `stats()` per fork tells you which candidate was both
+  wrong and expensive.
