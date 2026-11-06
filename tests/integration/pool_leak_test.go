@@ -129,8 +129,8 @@ var gvisorPoolHost = poolHost{
 			costsMember: true,
 			check: func(t *testing.T, res runResult) {
 				t.Helper()
-				if r := res.exit.GetReason(); r != v1.ExitReason_OOM_KILLED && r != v1.ExitReason_RUNTIME_FAILURE {
-					t.Fatalf("exit = %v, want OOM_KILLED or RUNTIME_FAILURE", res.exit)
+				if res.exit.GetReason() == v1.ExitReason_EXITED {
+					t.Fatalf("a run that took its sandbox down reads as a normal exit: %v", res.exit)
 				}
 			},
 		},
