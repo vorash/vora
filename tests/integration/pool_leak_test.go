@@ -13,6 +13,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -193,9 +194,27 @@ func openBwrapPoolBackend(t *testing.T, cfg *config.Config, logger *slog.Logger)
 	}
 }
 
+// unlinkImages replaces the images symlink with a tree of hard links. runsc's gofer
+// refuses a mount whose target path crosses a symlink, so a rootfs reached through one
+// cannot start. Removing the tree at the end leaves the linked files where they were.
+func unlinkImages(t *testing.T, images string) {
+	t.Helper()
+	target, err := os.Readlink(images)
+	if err != nil {
+		t.Fatalf("read images link: %v", err)
+	}
+	if err := os.Remove(images); err != nil {
+		t.Fatalf("remove images link: %v", err)
+	}
+	if out, err := exec.Command("cp", "-al", target, images).CombinedOutput(); err != nil {
+		t.Fatalf("link images: %v: %s", err, out)
+	}
+}
+
 func openGvisorPoolBackend(t *testing.T, cfg *config.Config, logger *slog.Logger) (runtime.Backend, func(*testing.T, string)) {
 	t.Helper()
 	requireGvisor(t)
+	unlinkImages(t, cfg.ImagesDir())
 	cfg.GvisorPlatform = "kvm"
 	cfg.GvisorRunRoot = filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "vora-gvisor-pool")
 	subtree, err := cgroup.NewSubtree()

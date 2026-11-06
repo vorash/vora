@@ -64,7 +64,9 @@ func startPoolPlaneOn(t *testing.T, host poolHost, unsafeReuse bool) *poolPlane 
 		t.Fatalf("symlink images: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	cfg := config.Config{StateDir: stateDir, SystemdMode: config.SystemdUser, DefaultTTL: time.Minute, PoolUnsafeReuse: unsafeReuse}
+	// vora/base exists only in the local cache. With a containerd socket in reach, auto mode
+	// would try a pull first, and its retries outlast the wait for a member to start.
+	cfg := config.Config{StateDir: stateDir, SystemdMode: config.SystemdUser, ImagesMode: config.ImagesCache, DefaultTTL: time.Minute, PoolUnsafeReuse: unsafeReuse}
 	backend, crash := host.open(t, &cfg, logger)
 	reg := runtime.NewRegistry()
 	if err := reg.Register(backend); err != nil {
