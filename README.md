@@ -646,7 +646,7 @@ its flag is removed:
   ([ADR 011](docs/adr/011-rootless-containerd.md)).
 - **On gVisor, `pids` doesn't limit guest processes.** It counts the Sentry's
   host threads: 800 guest processes held `pids.current` at 38 on vora-mini. That
-  leaves `memory.max` to stop a fork bomb, which one logged run saw at a 256 MiB limit.
+  leaves `memory.max` to stop a fork bomb, which 6 logged runs saw at a 256 MiB limit.
   Reaching `pids` ends the whole sandbox. A limit of 26 or less can't start,
   and 28 to 36 died under load ([ADR 028](docs/adr/028-warm-pools.md)).
 - **Warm pools are new.** Through a runner, the leak suite has passed on `bwrap` and
