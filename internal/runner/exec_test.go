@@ -37,8 +37,8 @@ func TestEgressInWindowCountsOnlyTheExecution(t *testing.T) {
 	}
 
 	allowed, denied := s.egressInWindow("sbx_e", base, base.Add(time.Second))
-	if allowed != 1 || denied != 1 {
-		t.Fatalf("allowed=%d denied=%d, want 1/1", allowed, denied)
+	if allowed == nil || denied == nil || *allowed != 1 || *denied != 1 {
+		t.Fatalf("allowed=%v denied=%v, want 1/1", allowed, denied)
 	}
 }
 

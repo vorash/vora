@@ -115,6 +115,7 @@ export interface SandboxExec {
   reason?: ExitReason;
   stdoutBytes?: number;
   stderrBytes?: number;
+  /** Absent when not measured, as are the other usage fields here. A measured zero is `0`. */
   cpuMillis?: number;
   /** The peak during this exec's window; `memoryPeakScope` says which window. */
   memoryPeakBytes?: number;

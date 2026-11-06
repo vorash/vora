@@ -126,7 +126,7 @@ func TestClientThatStopsReadingCannotHoldAMember(t *testing.T) {
 // however much output it was behind on.
 func TestClientThatKeepsReadingGetsEveryFrameInOrder(t *testing.T) {
 	h := newWarmHarness(t)
-	const n = 512
+	const n = 128 // 8 MiB, far past gRPC's initial flow-control windows
 	h.backend.set(func(b *poolBackend) { b.execHook = bigOutput(n) })
 	p := h.create(poolSpec(1, 1))
 	h.waitIdle(p.GetId(), 1)
@@ -188,11 +188,13 @@ func TestExecEndingAtItsDeadlineLeaksNoReader(t *testing.T) {
 	})
 	p := h.create(poolSpec(1, 1))
 	h.waitIdle(p.GetId(), 1)
-	before := goroutinesIn("recvAsync")
+	// An earlier test's reader may still be on its way out, and counting it would
+	// make its exit look like this one's.
+	waitFor(t, func() bool { return goroutinesIn("recvAsync") == 0 }, "earlier tests' readers to end")
 	if _, err := h.run(h.ctx(), p.GetId(), 1); err != nil {
 		t.Fatalf("RunInPool: %v", err)
 	}
-	waitFor(t, func() bool { return goroutinesIn("recvAsync") == before }, "the exec's reader to end")
+	waitFor(t, func() bool { return goroutinesIn("recvAsync") == 0 }, "the exec's reader to end")
 }
 
 // A client that goes away before the exit still gets its run on the audit trail.

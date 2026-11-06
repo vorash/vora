@@ -42,6 +42,7 @@ var pooledSandboxRPCs = map[string]struct {
 	"CreatePool":     {noSandbox, nil},
 	"GetPool":        {noSandbox, nil},
 	"DeletePool":     {noSandbox, nil},
+	"GetPoolEvents":  {noSandbox, nil},
 	"RunInPool":      {noSandbox, nil},
 
 	"GetSandbox": {allows, func(ctx context.Context, c v1.RunnerServiceClient, id string) error {

@@ -178,3 +178,13 @@ func TestExecForwardsEmptyStdinWhenNotATerminal(t *testing.T) {
 		t.Fatalf("stdin = %q, want empty", got)
 	}
 }
+
+func TestMeasuredDoesNotPrintAGapAsZero(t *testing.T) {
+	zero := int64(0)
+	if got := measured(&zero); got != "0" {
+		t.Errorf("a measured zero printed %q", got)
+	}
+	if got := measured(nil); got != "-" {
+		t.Errorf("not measured printed %q", got)
+	}
+}

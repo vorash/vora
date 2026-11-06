@@ -219,7 +219,11 @@ const (
 // the sandbox's resident baseline (its init, and on gVisor the sentry and
 // gofer). Windows are per sandbox, not per process: concurrent execs in one
 // sandbox have overlapping windows and each sees the other's usage.
+//
+// Measured says the window was read. Without it the zeros are not measurements:
+// the exec ran unmetered, or the sandbox died before the window closed.
 type Usage struct {
+	Measured      bool
 	CPUMillis     int64
 	MemoryPeak    int64
 	PeakScope     PeakScope
