@@ -75,7 +75,7 @@ the agent or to `runsc`. What covers that gap differs by backend:
 
 `tests/integration/leak_test.go` holds the rows.
 `tests/integration/pool_leak_test.go` runs them through a real API and runner. It has
-rows for both backends and has run only on bwrap, as `Consequences` says.
+rows for both backends, and CI can only run the bwrap ones, as `Consequences` says.
 
 **5. A pool is single-tenant by construction, and these channels stay open.** A
 pool belongs to one tenant, its routes are tenant-scoped, and a member never
@@ -112,7 +112,7 @@ workload one, and an exec loop passed 150 of 150 there (bwrap, vora-mini,
 
 Under gVisor it counts the Sentry's host threads, not guest tasks: 800 guest
 processes held `pids.current` at 38. So it doesn't bound guest tasks, which leaves
-`memory.max` to stop a fork bomb, and no logged run has measured one stopping there.
+`memory.max` to stop a fork bomb. One logged run saw that: through a pool with a 256 MiB limit, a fork bomb ended `OOM_KILLED` at a 256 MiB peak and cost the member (gVisor, vora-mini, 2026-11-06).
 Reaching `pids` ends the whole sandbox. Limits from 12 to 26
 can't start, 28 to 36 died under load, and 48, 64 and 128 each passed 60 cycles
 (gVisor, vora-mini, 2026-11-05). Thread growth has no measured plateau, so the
@@ -148,9 +148,11 @@ The agent or `runsc` answers, so the client sees an ordinary `EXITED` exit, with
   p50 29 ms, p99 about 32 ms, limited by starting `runsc` three times. A template
   of 5133 entries takes gVisor's reset to 1.38 s. These are backend-level
   numbers, not a pool's throughput, which no logged run has measured.
-- Through a runner, the pool has run only on CI, with bwrap, on 2 vCPUs. It hasn't
-  run on vora-mini, so `pool_leak_test.go` has never run against gVisor, and
-  nothing here says how a pool behaves under real load.
+- Through a runner, `pool_leak_test.go` passed on both backends on vora-mini on
+  2026-11-06. Its 300-round disconnect test kept the member in every round, over 4
+  runs on gVisor and 11 on bwrap. CI runs only the bwrap rows, on 2 vCPUs, so a
+  gVisor regression needs a host to show. This tests safety, not load: nothing here
+  says how a pool behaves under real load.
 - On gVisor, guest code runs between kill passes, so forking chains can outlast
   them and cost the member. That fails closed. In `TestGvisorDeadSandbox` an OOM
   also takes the sandbox down, which costs the member.

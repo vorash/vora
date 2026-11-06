@@ -646,12 +646,12 @@ its flag is removed:
   ([ADR 011](docs/adr/011-rootless-containerd.md)).
 - **On gVisor, `pids` doesn't limit guest processes.** It counts the Sentry's
   host threads: 800 guest processes held `pids.current` at 38 on vora-mini. That
-  leaves `memory.max` to stop a fork bomb, and no logged run has measured one stopping
-  there. Reaching `pids` ends the whole sandbox. A limit of 26 or less can't start,
+  leaves `memory.max` to stop a fork bomb, which one logged run saw at a 256 MiB limit.
+  Reaching `pids` ends the whole sandbox. A limit of 26 or less can't start,
   and 28 to 36 died under load ([ADR 028](docs/adr/028-warm-pools.md)).
-- **Warm pools have barely run.** Through a runner, a pool has run only in CI, on
-  `bwrap` with 2 vCPUs. It has never run on gVisor or on vora-mini, and no logged run
-  has measured one under load.
+- **Warm pools are new.** Through a runner, the leak suite has passed on `bwrap` and
+  gVisor on vora-mini, and on `bwrap` in CI. CI can't run the gVisor rows. No logged
+  run has measured a pool under load.
 - **Sandboxes outlive a dead runner briefly**, then exit; orphans are cleaned
   up at the next start.
 - **The API store is in memory by default.** Set `VORA_API_DSN` for anything
