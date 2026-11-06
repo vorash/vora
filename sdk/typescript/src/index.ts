@@ -23,6 +23,7 @@ export {
   GatewayTimeoutError,
   PoolDrainingError,
   PoolNotLoadedError,
+  PoolNotOnRunnerError,
   PoolRunError,
   PoolSpecConflictError,
   RateLimitedError,

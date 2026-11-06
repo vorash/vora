@@ -6,6 +6,7 @@ import {
   Pool,
   PoolDrainingError,
   PoolNotLoadedError,
+  PoolNotOnRunnerError,
   PoolRunError,
   PoolSpecConflictError,
   RateLimitedError,
@@ -421,7 +422,7 @@ describe("retries", () => {
     const { policy, waited } = noWait();
     const { vora, server } = await boot(sequence(runReply("runner_loading"), answerReply("get_active")), policy);
 
-    const pool = await vora.pools.declare("py", { image: "vora/base" });
+    const pool = await vora.pools.declare("py", { image: "vora/base", cpu: "100m", memory: "1Mi" });
 
     expect(pool.info.state).toBe("POOL_ACTIVE");
     expect(server.requests).toHaveLength(2);
@@ -457,7 +458,7 @@ describe("409s, told apart by the pool's state", () => {
   it("declaring over a different spec is typed", async () => {
     const { vora } = await boot((sent) => answerReply(sent.method === "PUT" ? "declare_different_spec" : "get_active"));
 
-    const error = await caught(() => vora.pools.declare("py", { image: "vora/other" }), PoolSpecConflictError);
+    const error = await caught(() => vora.pools.declare("py", { image: "vora/other", cpu: "100m", memory: "1Mi" }), PoolSpecConflictError);
 
     expect(error.status).toBe(409);
     expect(error.message).toContain("different spec");
@@ -468,7 +469,7 @@ describe("409s, told apart by the pool's state", () => {
       sent.method === "PUT" ? { status: 409, body: '{"error":"pool py is draining; retry once it is gone"}' } : answerReply("get_draining"),
     );
 
-    await caught(() => vora.pools.declare("py", { image: "vora/base" }), PoolDrainingError);
+    await caught(() => vora.pools.declare("py", { image: "vora/base", cpu: "100m", memory: "1Mi" }), PoolDrainingError);
   });
 
   it("a conflict the record cannot explain stays a plain conflict", async () => {
@@ -478,10 +479,241 @@ describe("409s, told apart by the pool's state", () => {
         : { status: 404, body: '{"error":"pool not found"}' },
     );
 
-    const error = await caught(() => vora.pools.declare("py", { image: "vora/base", reuse: "unsafe_no_reset" }), ConflictError);
+    const error = await caught(() => vora.pools.declare("py", { image: "vora/base", cpu: "100m", memory: "1Mi", reuse: "unsafe_no_reset" }), ConflictError);
 
     expect(error.constructor).toBe(ConflictError);
     expect(error.message).toContain("unsafe reuse");
+  });
+});
+
+describe("a pool its runner lost", () => {
+  it("reads as its state with nothing measured", async () => {
+    const { vora } = await boot(() => answerReply("get_not_on_runner"));
+
+    const pool = await vora.pools.get("py");
+
+    expect(pool.info.state).toBe("POOL_NOT_ON_RUNNER");
+    expect(pool.info).not.toHaveProperty("stats");
+    expect(await pool.stats()).toBeUndefined();
+    expect(pool.info.spec?.name).toBe("py");
+    expect(pool.info.spec).not.toHaveProperty("sandbox");
+    expect(pool.info).not.toHaveProperty("createdAtUnixMs");
+  });
+
+  it("a run is typed and never retried", async () => {
+    const { policy, waited } = noWait();
+    const { server } = await boot((sent) => answerReply(sent.method === "POST" ? "run_not_on_runner" : "get_not_on_runner"));
+
+    const error = await caught(() => handle(server).run({ command: "true", ...run, retry: policy }), PoolNotOnRunnerError);
+
+    expect(error).toBeInstanceOf(ConflictError);
+    expect(error.status).toBe(409);
+    expect(error.message).toContain("declare it again");
+    expect(server.requests.map((sent) => sent.method)).toEqual(["POST", "GET"]);
+    expect(waited).toEqual([]);
+  });
+
+  it("redeclaring moves to the new id, and no id is cached", async () => {
+    const reads = sequence(answerReply("get_not_on_runner"), answerReply("declare_lost_pool"));
+    const { vora, server } = await boot((sent) => {
+      if (sent.method === "PUT") return answerReply("declare_lost_pool");
+      if (sent.method === "POST") return runReply("warm_reset");
+      return reads();
+    });
+
+    const held = await vora.pools.get("py");
+    const oldId = held.id;
+
+    const declared = await vora.pools.declare("py", { image: "vora/base", cpu: "100m", memory: "1Mi" });
+    expect(declared.id).not.toBe(oldId);
+    expect(declared.info.state).toBe("POOL_ACTIVE");
+
+    await held.run({ command: "true", ...run });
+    expect(await held.refresh()).toEqual(declared.info);
+    expect(held.id).toBe(declared.id);
+
+    for (const sent of server.requests) {
+      expect(sent.url).not.toContain(oldId);
+      expect(sent.url).not.toContain(declared.id);
+    }
+  });
+
+  it("a conflict on declaring it stays a plain conflict", async () => {
+    const { vora } = await boot((sent) =>
+      sent.method === "PUT" ? { status: 409, body: '{"error":"pool id is taken"}' } : answerReply("get_not_on_runner"),
+    );
+
+    const error = await caught(() => vora.pools.declare("py", { image: "vora/base", cpu: "100m", memory: "1Mi" }), ConflictError);
+
+    expect(error.constructor).toBe(ConflictError);
+  });
+
+  it("deleting it needs one call", async () => {
+    const { policy, waited } = noWait();
+    const { server } = await boot(() => answerReply("delete_not_on_runner"));
+
+    await handle(server, policy).delete();
+
+    expect(server.requests).toHaveLength(1);
+    expect(waited).toEqual([]);
+  });
+
+  it("stays listed with nothing measured", async () => {
+    const { vora } = await boot(() => answerReply("listing_not_on_runner"));
+
+    const pools = await vora.pools.list();
+
+    expect(pools.map((pool) => pool.name)).toEqual(["py"]);
+    expect(pools[0]?.info.state).toBe("POOL_NOT_ON_RUNNER");
+    expect(pools[0]?.info).not.toHaveProperty("stats");
+  });
+});
+
+describe("what declare refuses", () => {
+  it("cpu and memory are required", async () => {
+    const { vora } = await boot(() => answerReply("declare_no_resources"));
+
+    // @ts-expect-error cpu and memory are required, so this cannot compile.
+    const error = await caught(() => vora.pools.declare("py", { image: "vora/base" }), VoraError);
+
+    expect(error.status).toBe(400);
+    expect(error.message).toContain("cpu_millis and memory_bytes");
+  });
+
+  it("a borrow timeout past the cap is the API's 400", async () => {
+    const { vora, server } = await boot(() => answerReply("declare_borrow_too_long"));
+
+    const error = await caught(
+      () =>
+        vora.pools.declare("py", {
+          image: "vora/base",
+          cpu: "100m",
+          memory: "1Mi",
+          borrowTimeoutMs: (GOLDEN.limits.borrowTimeoutMaxMs ?? 0) + 1,
+        }),
+      VoraError,
+    );
+
+    expect(error.status).toBe(400);
+    expect(error.message).toContain("borrow_timeout");
+    expect(JSON.parse(server.requests[0]?.body.toString() ?? "")).toMatchObject({ borrowTimeoutMs: "300001" });
+  });
+
+  it("another agent's pool name is a plain 404 with no further calls", async () => {
+    const { policy, waited } = noWait();
+    const { vora, server } = await boot(() => answerReply("declare_other_agent"), policy);
+
+    const error = await caught(() => vora.pools.declare("owned", { image: "vora/base", cpu: "100m", memory: "1Mi" }), VoraError);
+
+    expect(error.constructor).toBe(VoraError);
+    expect(error.status).toBe(404);
+    expect(server.requests).toHaveLength(1);
+    expect(waited).toEqual([]);
+  });
+
+  it("a refusal for now honours Retry-After, or says so with no policy", async () => {
+    const { policy, waited } = noWait();
+    const { vora, server } = await boot(sequence(answerReply("declare_runner_down"), answerReply("declare_lost_pool")), policy);
+
+    const pool = await vora.pools.declare("py", { image: "vora/base", cpu: "100m", memory: "1Mi" });
+
+    expect(pool.info.state).toBe("POOL_ACTIVE");
+    expect(server.requests).toHaveLength(2);
+    expect(waited).toHaveLength(1);
+    expect(waited[0]).toBeGreaterThanOrEqual(1000);
+
+    const { vora: plain } = await boot(() => answerReply("declare_runner_down"));
+    const error = await caught(() => plain.pools.declare("py", { image: "vora/base", cpu: "100m", memory: "1Mi" }), UnavailableError);
+    expect(error.retryAfterSeconds).toBe(1);
+  });
+});
+
+describe("when Node's fetch stops waiting before the API answers", () => {
+  // The shapes Node 26's fetch rejected with, against a local server silent for 320 s.
+  const gaveUp = (message: string, code: string): TypeError =>
+    Object.assign(new TypeError(message), { cause: Object.assign(new Error("timed out"), { code }) });
+  const poolOver = (fetch: typeof globalThis.fetch): Pool =>
+    new Pool(new Transport({ baseUrl: "http://vora.test", fetch }), null, "py", decodePoolInfo({ id: "pool_test" }), undefined);
+
+  it("waiting for the first frame says so, and says nothing is known", async () => {
+    const failure = gaveUp("fetch failed", "UND_ERR_HEADERS_TIMEOUT");
+    const pool = poolOver(() => Promise.reject(failure));
+
+    const error = await caught(() => pool.run({ command: "true", ...run }), VoraError);
+
+    expect(error.message).toContain("headersTimeout");
+    expect(error.message).toContain("not known whether anything ran");
+    expect(error.cause).toBe(failure);
+    expect(error.status).toBeUndefined();
+  });
+
+  it("between frames ends the run with a typed error that names the setting", async () => {
+    const failure = gaveUp("terminated", "UND_ERR_BODY_TIMEOUT");
+    const encoder = new TextEncoder();
+    const lines = GOLDEN.runs.warm_reset?.lines ?? [];
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(`${lines[0] ?? ""}\n`));
+      },
+      pull(controller) {
+        controller.error(failure);
+      },
+    });
+    const pool = poolOver(() => Promise.resolve(new Response(body)));
+
+    const error = await caught(() => pool.run({ command: "sleep 600", timeoutSeconds: 600 }), PoolRunError);
+
+    expect(error.code).toBe("stream_ended");
+    expect(error.message).toContain("bodyTimeout");
+  });
+
+  it("any other failure keeps its own words", async () => {
+    const pool = poolOver(() => Promise.reject(new TypeError("fetch failed")));
+
+    const error = await caught(() => pool.run({ command: "true", ...run }), VoraError);
+
+    expect(error.message).toBe("pool run: fetch failed");
+  });
+});
+
+describe("what a later consumer relies on", () => {
+  it("an admin declares for a tenant, whose key then runs and reads each frame", async () => {
+    const runs = sequence(runReply("unsafe_no_reset"), runReply("warm_reset"), runReply("cold_first_run_nonzero_exit"));
+    const { vora: admin, server } = await boot((sent) => {
+      if (sent.method === "PUT") return { status: 201, body: answerReply("get_active").body ?? "" };
+      if (sent.method === "GET") return answerReply("get_active");
+      return runs();
+    });
+
+    await admin.pools.declare("py", { image: "vora/base", cpu: "100m", memory: "1Mi", tenantId: "tenant-a", reuse: "unsafe_no_reset" });
+    expect(JSON.parse(server.requests[0]?.body.toString() ?? "")).toMatchObject({
+      tenantId: "tenant-a",
+      reuse: "POOL_REUSE_UNSAFE_NO_RESET",
+    });
+
+    const tenant = new Vora({ baseUrl: server.url, apiKey: "vora_tenant" });
+    const pool = await tenant.pools.get("py");
+    expect(server.requests.at(-1)?.url).toBe("/v1/pools/py");
+    expect(server.requests.at(-1)?.headers.authorization).toBe("Bearer vora_tenant");
+
+    const seen: unknown[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      const frames: Partial<Record<RunChunk["type"], RunChunk>> = {};
+      for await (const chunk of pool.streamRun({ command: "true", ...run })) {
+        frames[chunk.type] = chunk;
+      }
+      const started = frames.run?.type === "run" ? frames.run.run : undefined;
+      const exited = frames.exit?.type === "exit" ? frames.exit.exit : undefined;
+      const done = frames.runDone?.type === "runDone" ? frames.runDone.done : undefined;
+      seen.push([started?.warm, exited?.executionId, exited?.exitCode, started?.resetMs, done?.resetMs, done?.outcome]);
+    }
+
+    const executionId = "exe_01M6M3D3FRG49JM5BK3MD9Q0X0";
+    expect(seen).toEqual([
+      [true, executionId, 0, undefined, undefined, "POOL_RESET_SKIPPED"],
+      [true, executionId, 0, 7, 3, "POOL_RESET_OK"],
+      [false, executionId, 7, undefined, undefined, "POOL_RESET_RETIRED"],
+    ]);
   });
 });
 
@@ -510,6 +742,21 @@ describe("delete", () => {
     const { server } = await boot(() => ({ status: 404, body: '{"error":"pool not found"}' }));
 
     await handle(server).delete();
+  });
+
+  it("waits out a missing runner row, and then says so", async () => {
+    const { policy, waited } = noWait();
+    const { server } = await boot(() => answerReply("delete_runner_row_gone"));
+
+    const error = await caught(() => handle(server, policy).delete({ maxWaitSeconds: 0 }), UnavailableError);
+
+    expect(error.retryAfterSeconds).toBe(1);
+    expect(server.requests).toHaveLength(1);
+
+    const { server: back } = await boot(sequence(answerReply("delete_runner_row_gone"), answerReply("delete_gone")));
+    await handle(back, policy).delete();
+    expect(back.requests).toHaveLength(2);
+    expect(waited).toEqual([1000]);
   });
 
   it("rides out a runner that is down", async () => {
@@ -581,6 +828,18 @@ describe("what a request looks like", () => {
     });
   });
 
+  it("no first frame is typed, and a run does not retry it", async () => {
+    const { policy, waited } = noWait();
+    const { server } = await boot(() => runReply("no_first_frame"));
+
+    const error = await caught(() => handle(server).run({ command: "true", ...run, retry: policy }), GatewayTimeoutError);
+
+    expect(error.status).toBe(504);
+    expect(error.retryAfterSeconds).toBe(1);
+    expect(server.requests).toHaveLength(1);
+    expect(waited).toEqual([]);
+  });
+
   it("a bare string is a shell line, as in exec", async () => {
     const { server } = await boot(() => runReply("warm_reset"));
 
@@ -607,7 +866,7 @@ describe("what a request looks like", () => {
       return answerReply("get_active");
     });
 
-    const pool = await vora.pools.declare("py", { image: "vora/base", tenantId: "tenant-a" });
+    const pool = await vora.pools.declare("py", { image: "vora/base", cpu: "100m", memory: "1Mi", tenantId: "tenant-a" });
     await vora.pools.get("py", { tenantId: "tenant-a" });
     await vora.pools.list({ tenantId: "tenant-a" });
     await pool.stats();
@@ -658,13 +917,37 @@ describe("listings", () => {
     expect(pools[0]?.info).not.toHaveProperty("stats");
   });
 
-  it("a not-loaded pool reads as its state", async () => {
+  it("an unanswered entry still says whether it resets", async () => {
+    const { vora } = await boot(() => answerReply("listing_unsafe_unanswered"));
+
+    const pools = await vora.pools.list();
+    const unsafe = pools.find((pool) => pool.name === "unsafe")?.info;
+
+    expect(unsafe).not.toHaveProperty("state");
+    expect(unsafe).not.toHaveProperty("stats");
+    expect(unsafe?.spec?.reuse).toBe("POOL_REUSE_UNSAFE_NO_RESET");
+    expect(pools.find((pool) => pool.name === "py")?.info.spec).not.toHaveProperty("reuse");
+  });
+
+  it("a handle from a listing of every tenant reaches its own tenant", async () => {
+    const { vora, server } = await boot((sent) => answerReply(sent.url === "/v1/pools" ? "listing_runner_silent" : "get_active"));
+
+    const [pool] = await vora.pools.list();
+    await pool?.refresh();
+
+    expect(server.requests.at(-1)?.url).toBe("/v1/pools/py?tenant_id=tenant-a");
+  });
+
+  it("a not-loaded pool has no stats, though the wire sends an empty one", async () => {
     const { vora } = await boot(() => answerReply("get_not_loaded"));
+    expect(JSON.parse(GOLDEN.answers.get_not_loaded?.body ?? "")).toMatchObject({ stats: {} });
 
     const pool = await vora.pools.get("py");
 
     expect(pool.info.state).toBe("POOL_NOT_LOADED");
     expect(pool.info.notLoadedReason).toBe("backend_missing");
+    expect(pool.info).not.toHaveProperty("stats");
+    expect(await pool.stats()).toBeUndefined();
   });
 
   it("counters a runner reported read as numbers", async () => {

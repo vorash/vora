@@ -111,9 +111,18 @@ What a result tells you:
 - protojson leaves out zeros, so an absent duration or usage value was not measured or
   was zero. The SDK does not guess which.
 
-Read `pool.info.state` before `pool.info.stats`. In a listing, a pool whose runner did
-not answer has neither. A `POOL_NOT_LOADED` pool has zero counters, and
-`notLoadedReason` says why.
+Read `pool.info.state` before `pool.info.stats`. Only `POOL_ACTIVE` and `POOL_DRAINING`
+have stats. Otherwise `stats` is absent, because nothing was measured:
+
+| `state` | Meaning | What to do |
+| --- | --- | --- |
+| `POOL_NOT_ON_RUNNER` | The route holds the reservation and the name, and the runner has no such pool. A run throws `PoolNotOnRunnerError`. | `declare` creates it again under a new id. `delete` releases the reservation. |
+| `POOL_NOT_LOADED` | The runner refused it at boot. `notLoadedReason` says why. | Fix the cause, or `delete` it. |
+| absent, in a listing | The runner did not answer. | Read `spec.reuse` if it matters. It comes from the route. |
+
+Both `POOL_NOT_ON_RUNNER` and an unanswered entry have only the route's part of `spec`:
+the name, tenant, agent and reuse. Lost pools stay listed until deleted, as they hold a
+reservation. Keep the pool's name, not its `id`, across a `declare`.
 
 Limits on a run:
 
@@ -121,9 +130,24 @@ Limits on a run:
   stdin. A larger one throws `RequestTooLargeError` without being sent.
 - A client that reads slower than about 1.5 KiB/s while output is flowing is cut off
   with `client_stalled`.
-- Node's `fetch` drops a response body that is silent for 300 s. For a command that may
-  stay silent that long, pass a `fetch` that uses an undici `Agent` with a longer
-  `bodyTimeout`. Otherwise the run ends in `PoolRunError` with code `stream_ended`.
+- A run can wait up to 7 minutes for its first frame, which then throws
+  `GatewayTimeoutError`. Node's `fetch` stops waiting at 300 s, both for that answer and
+  between frames of a silent command. The first throws a `VoraError` that says so,
+  without the API's status, and the second a `PoolRunError` with code `stream_ended`. A
+  pool with a long `borrowTimeoutMs`, or a command that stays silent that long, needs a
+  `fetch` that waits:
+
+  ```ts
+  import { Agent, fetch as undiciFetch } from "undici";
+
+  const patient = new Agent({ headersTimeout: 0, bodyTimeout: 0 });
+  const vora = new Vora({
+    fetch: ((url, init) => undiciFetch(url, { ...init, dispatcher: patient })) as typeof fetch,
+  });
+  ```
+
+`declare` needs `cpu` and `memory`, as the API has no default for them.
+`borrowTimeoutMs` is at most 300000. Another agent's pool name answers 404.
 
 `delete` returns once the pool is gone. Each request can block for up to about 25 s, and
 `delete` repeats it for up to `maxWaitSeconds` (default 600).
@@ -141,6 +165,7 @@ next:
 | `ConflictError` | 409 | The resource's state refuses the call. The next three are its subclasses. |
 | `PoolDrainingError` | 409 | The pool is being deleted. Retry later, or declare it again once it is gone. |
 | `PoolNotLoadedError` | 409 | The runner refused to load the pool. Do not retry. `reason` is its `notLoadedReason`. |
+| `PoolNotOnRunnerError` | 409 | The runner has no such pool, and the route still holds its reservation. Don't retry: `declare` it again, or `delete` it. |
 | `PoolSpecConflictError` | 409 | A live pool of this name has a different spec. |
 | `PoolRunError` | none | A run failed after its first frame and before `exit`, so the command may have run. It has `code`, `run`, `stdout` and `stderr`. |
 | `RequestTooLargeError` | none | A run's body is over the API's limit. It was not sent. |

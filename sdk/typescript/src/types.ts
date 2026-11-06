@@ -207,7 +207,7 @@ export type ExecCallOptions = Omit<ExecOptions, "command" | "args">;
 
 export type PoolReuse = "POOL_REUSE_RESET" | "POOL_REUSE_UNSAFE_NO_RESET";
 export type PoolReuseShorthand = "reset" | "unsafe_no_reset";
-export type PoolState = "POOL_ACTIVE" | "POOL_DRAINING" | "POOL_NOT_LOADED";
+export type PoolState = "POOL_ACTIVE" | "POOL_DRAINING" | "POOL_NOT_LOADED" | "POOL_NOT_ON_RUNNER";
 export type PoolResetOutcome = "POOL_RESET_OK" | "POOL_RESET_FAILED" | "POOL_RESET_SKIPPED" | "POOL_RESET_RETIRED";
 
 /** A pool's definition. Unset limits are absent until the runner fills in defaults. */
@@ -227,9 +227,10 @@ export interface PoolSpec {
 }
 
 /**
- * A runner's snapshot of one pool. Counters reset when the runner restarts. The
- * runner fills all of them from memory on every answer, so a key protojson left out
- * is a zero the runner did report.
+ * A runner's snapshot of one pool. Counters reset when the runner restarts.
+ * `PoolInfo.stats` is set only for a pool the runner has live, and the runner fills all
+ * of them from memory on every such answer, so a key protojson left out is a zero the
+ * runner did report.
  */
 export interface PoolStats {
   starting: number;
@@ -249,9 +250,18 @@ export interface PoolStats {
 }
 
 /**
- * A pool's record. Read `state` before `stats`. In a listing, a pool whose runner did
- * not answer has neither. A `POOL_NOT_LOADED` pool has all-zero stats, and
- * `notLoadedReason` says why it has no members.
+ * A pool's record. Read `state` before `stats`. `stats` is set for `POOL_ACTIVE` and
+ * `POOL_DRAINING` only, and is absent, never zeros, when nothing was measured:
+ *
+ * - `POOL_NOT_ON_RUNNER`: the route holds the reservation and the name, and the runner
+ *   has no such pool. `declare` creates it again under a new id, and `delete` releases
+ *   the reservation.
+ * - `POOL_NOT_LOADED`: the runner refused it at boot. `notLoadedReason` says why.
+ * - no `state`, in a listing: the runner did not answer.
+ *
+ * In the first and last case `spec` holds only what the route knows: the name, tenant,
+ * agent and reuse. An absent `reuse` is treated as a reset. `id` changes when a lost
+ * pool is declared again, so don't keep it across a declare.
  */
 export interface PoolInfo {
   id: string;
@@ -332,7 +342,11 @@ export interface PoolRunResult {
   streamError?: RunStreamError;
 }
 
-export interface DeclarePoolOptions extends Omit<CreateSandboxOptions, "ttl" | "network"> {
+export interface DeclarePoolOptions extends Omit<CreateSandboxOptions, "ttl" | "network" | "cpu" | "memory"> {
+  /** Required: the API has no default for a pool. Cores or millicores, as in `create`. */
+  cpu: CPUInput;
+  /** Required: the API has no default for a pool. Bytes or a suffixed string, as in `create`. */
+  memory: SizeInput;
   /** Pools support `"none"` only in this version, which is the default. */
   network?: NetworkOption;
   /** Warm target; `0` starts every run cold. */
@@ -341,6 +355,7 @@ export interface DeclarePoolOptions extends Omit<CreateSandboxOptions, "ttl" | "
   maxRuns?: number;
   maxAgeSeconds?: number;
   maxRunSeconds?: number;
+  /** At most 300000. */
   borrowTimeoutMs?: number;
   idleExpirySeconds?: number;
   /** `"unsafe_no_reset"` needs an admin key and a runner that grants it. */
@@ -705,9 +720,14 @@ export function decodePoolInfo(raw: unknown): PoolInfo {
   const source = asObject(raw) ?? {};
   const info: PoolInfo = { id: asString(source.id) ?? "" };
   assign(info, "spec", decodePoolSpec(source.spec));
-  assign(info, "state", asString(source.state) as PoolState | undefined);
+  const state = asString(source.state) as PoolState | undefined;
+  assign(info, "state", state);
   assign(info, "runnerId", asString(source.runnerId));
-  assign(info, "stats", decodePoolStats(source.stats));
+  // A POOL_NOT_LOADED answer carries an empty `stats` that no pool filled, and its zeros
+  // must not read as measured.
+  if (state === "POOL_ACTIVE" || state === "POOL_DRAINING") {
+    assign(info, "stats", decodePoolStats(source.stats));
+  }
   assign(info, "createdAtUnixMs", asNumber(source.createdAtUnixMs));
   assign(info, "notLoadedReason", asString(source.notLoadedReason));
   return info;

@@ -4,6 +4,7 @@ import {
   GatewayTimeoutError,
   PoolDrainingError,
   PoolNotLoadedError,
+  PoolNotOnRunnerError,
   PoolRunError,
   PoolSpecConflictError,
   RateLimitedError,
@@ -41,6 +42,26 @@ import type {
 // The API reads this much of a body and parses what it got.
 const RUN_BODY_LIMIT = 1 << 20;
 const DRAIN_POLL_MS = 1000;
+
+// Node's fetch stops waiting at 300 s, and the API can take 420 s to answer a run's
+// first frame, or longer between frames of a silent command. Without this, either
+// reads as a bare "fetch failed" or "terminated".
+const FETCH_GAVE_UP: Record<string, string> = {
+  UND_ERR_HEADERS_TIMEOUT:
+    "fetch stopped waiting for the API's answer, so it is not known whether anything ran. " +
+    "Pass a `fetch` with a longer headersTimeout: see the README",
+  UND_ERR_BODY_TIMEOUT:
+    "fetch stopped waiting for a silent command's next frame. " +
+    "Pass a `fetch` with a longer bodyTimeout: see the README",
+};
+
+function fetchFailure(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+  const cause = error.cause as { code?: unknown } | undefined;
+  return (typeof cause?.code === "string" ? FETCH_GAVE_UP[cause.code] : undefined) ?? error.message;
+}
 
 export interface TenantOptions {
   /** A global admin must name the tenant. */
@@ -80,6 +101,8 @@ async function namedConflict(
       return new PoolNotLoadedError(error.message, { ...options, reason: info.notLoadedReason });
     case "POOL_ACTIVE":
       return declaring ? new PoolSpecConflictError(error.message, options) : error;
+    case "POOL_NOT_ON_RUNNER":
+      return declaring ? error : new PoolNotOnRunnerError(error.message, options);
     default:
       return error;
   }
@@ -102,11 +125,13 @@ export class Pools {
   /**
    * Declare a pool, returning a handle to it. Idempotent for an equal spec.
    * `size: 0` starts every run cold. `reuse: "unsafe_no_reset"` needs an admin key
-   * and a runner that grants it. A global admin must pass `tenantId`.
+   * and a runner that grants it. A global admin must pass `tenantId`. A pool the runner
+   * lost is created again under a new id, so read `id` from what this returns.
    *
    * Throws `PoolSpecConflictError` when the name has a different spec,
-   * `PoolDrainingError` while a pool of the name is being deleted, and
-   * `PoolNotLoadedError` when the runner refused to load it.
+   * `PoolDrainingError` while a pool of the name is being deleted, `PoolNotLoadedError`
+   * when the runner refused to load it, and `VoraError` with status 400 for a spec the
+   * API refuses, or 404 when another agent of the tenant owns the name.
    */
   async declare(name: string, options: DeclarePoolOptions): Promise<Pool> {
     const spec = encodePoolSpec(name, options);
@@ -139,7 +164,8 @@ export class Pools {
     );
     return (raw.pools ?? []).map((item) => {
       const info = decodePoolInfo(item);
-      return new Pool(this.transport, this.retry, info.spec?.name ?? "", info, options.tenantId);
+      // A global admin may list every tenant, and its handles must name their own.
+      return new Pool(this.transport, this.retry, info.spec?.name ?? "", info, options.tenantId ?? info.spec?.tenantId);
     });
   }
 }
@@ -168,6 +194,7 @@ export class Pool {
     this.tenantId = tenantId;
   }
 
+  /** The id as of the last call. A handle reaches its pool by name, not by this. */
   get id(): string {
     return this.info.id;
   }
@@ -246,10 +273,11 @@ export class Pool {
    * ran. The default is not to retry: a repeated run isn't idempotent, so it's the
    * caller's choice. A failure after the first frame is never retried.
    *
-   * Throws `RateLimitedError` when the pool is full, `UnavailableError` when no
-   * sandbox could start, `PoolDrainingError`, `PoolNotLoadedError`,
-   * `RequestTooLargeError` for a body over the API's 1 MiB limit, and `PoolRunError`
-   * for a failure after the first frame and before `exit`.
+   * Throws `RateLimitedError` when the pool is full, `UnavailableError` when no sandbox
+   * could start, `GatewayTimeoutError` when no first frame came within the API's 7
+   * minutes, `PoolDrainingError`, `PoolNotLoadedError`, `PoolNotOnRunnerError`,
+   * `RequestTooLargeError` for a body over the API's 1 MiB limit, and `PoolRunError` for
+   * a failure after the first frame and before `exit`.
    */
   streamRun(command: string, options: PoolRunCallOptions): AsyncIterable<RunChunk>;
   streamRun(options: PoolRunOptions): AsyncIterable<RunChunk>;
@@ -275,8 +303,9 @@ export class Pool {
    * Drain and delete the pool, returning once it is gone. Idempotent. Each call to
    * the API waits up to about 25 s for running commands to finish, and the wait is
    * repeated until the pool is gone or `maxWaitSeconds` has passed, which throws
-   * `PoolDrainingError`. A runner that is down is waited out the same way, and its last
-   * refusal is thrown. Runs in progress finish. Calling `delete` again picks up the same
+   * `PoolDrainingError`. A runner that is down, or whose row the API no longer has, is
+   * waited out the same way, and its last refusal is thrown. Runs in progress finish.
+   * Calling `delete` again picks up the same drain. A pool its runner lost has nothing to
    * drain.
    */
   async delete(options: DeletePoolOptions = {}): Promise<void> {
@@ -342,7 +371,7 @@ export class Pool {
       if (error instanceof VoraError || (error instanceof Error && error.name === "AbortError")) {
         throw error;
       }
-      throw new VoraError(`pool run: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      throw new VoraError(`pool run: ${fetchFailure(error)}`, { cause: error });
     }
   }
 
@@ -383,7 +412,7 @@ export class Pool {
       cause = error;
       failure = {
         code: "stream_ended",
-        message: `pool run: the stream broke: ${error instanceof Error ? error.message : String(error)}`,
+        message: `pool run: the stream broke: ${fetchFailure(error)}`,
       };
     } finally {
       // A plain `break` releases the reader without closing the connection, and only

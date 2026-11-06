@@ -11,6 +11,7 @@ export interface Scenario {
 }
 
 interface Golden {
+  limits: Record<string, number>;
   runs: Record<string, Scenario>;
   answers: Record<string, Scenario>;
   messages: Record<string, Record<string, unknown>>;
