@@ -311,9 +311,13 @@ func (p *poolPlane) probeProgram() runtime.ExecRequest {
 	}
 }
 
-// stateOf parses a probe's output: the listing, then one line of PIDs.
+// stateOf parses a probe's output: the listing, then one line of PIDs. An exec left running on
+// the member holds its exec lock, so a probe that never got to run is a leak too.
 func (p *poolPlane) stateOf(res runResult) memberState {
 	p.t.Helper()
+	if res.exit.GetExitCode() != 0 || res.exit.GetReason() != v1.ExitReason_EXITED {
+		p.t.Fatalf("the probe on %s ended with %v, stderr %q", res.run.GetSandboxId(), res.exit, res.stderr)
+	}
 	out := strings.TrimRight(string(res.stdout), "\n")
 	cut := strings.LastIndexByte(out, '\n')
 	var got struct {
