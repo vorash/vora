@@ -235,6 +235,10 @@ func (s *Server) putPool(w http.ResponseWriter, r *http.Request) {
 			s.logger.Info("pool placed", "pool_id", route.PoolID, "runner_id", runner.ID, "reason", reason)
 		case errors.Is(err, ErrPoolRouteExists):
 			route, err = s.store.PoolRoute(ctx, spec.GetTenantId(), name)
+			if errors.Is(err, ErrNotFound) {
+				writeDeclareRaced(w)
+				return
+			}
 		}
 	}
 	if err != nil {

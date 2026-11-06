@@ -213,6 +213,37 @@ func TestDeclareThatLosesItsRouteRemovesItsPool(t *testing.T) {
 	})
 }
 
+// vanishingRouteStore has a route beat the insert and be gone by the read after it.
+type vanishingRouteStore struct{ Store }
+
+func (vanishingRouteStore) InsertPoolRoute(context.Context, PoolRoute) error {
+	return ErrPoolRouteExists
+}
+
+func (vanishingRouteStore) PoolRoute(context.Context, string, string) (PoolRoute, error) {
+	return PoolRoute{}, ErrNotFound
+}
+
+// Losing the insert to a route that a delete then released is a race, not a failure:
+// the same declare a moment later finds the name free.
+func TestDeclareThatFindsTheWinningRouteGoneAsksForARetry(t *testing.T) {
+	fr := &fakeRunner{}
+	s, ts := newTestServer(t, fr)
+	key := tenantKey(t, s, "tenant-a")
+	real := s.store
+	s.store = vanishingRouteStore{real}
+	resp := do(t, http.MethodPut, ts.URL+"/v1/pools/py", key, poolBody(1, 1))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable || resp.Header.Get("Retry-After") == "" {
+		t.Fatalf("declare = %d, Retry-After %q, want 503 with Retry-After", resp.StatusCode, resp.Header.Get("Retry-After"))
+	}
+	if fr.callCount() != 0 {
+		t.Fatalf("%d runner calls with no route", fr.callCount())
+	}
+	s.store = real
+	declare(t, ts, key, "py", poolBody(1, 1))
+}
+
 // changedRouteStore has every final write find the route changed.
 type changedRouteStore struct{ Store }
 
