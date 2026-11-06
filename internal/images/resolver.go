@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	ctrclient "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/mount"
@@ -18,6 +19,12 @@ import (
 	"github.com/vorash/vora/internal/config"
 	vctr "github.com/vorash/vora/internal/containerd"
 )
+
+// containerdRetryAfter is how long a ref the local cache served stays out of
+// containerd's reach. A pull of an image no registry has spends seconds in retries,
+// on every start of every sandbox, so it can't be tried each time. It is not forever,
+// because the same ref can be pulled into containerd later.
+const containerdRetryAfter = 5 * time.Minute
 
 // Resolver resolves an image reference to a read-only rootfs directory. It
 // prefers the containerd image store (ADR 009) and falls back to the local
@@ -33,8 +40,14 @@ type Resolver struct {
 	policy      *Policy
 	policyErr   error
 
+	// fromContainerd is containerdRootfs when a client is connected.
+	fromContainerd func(ctx context.Context, ref string) (string, error)
+
 	mu   sync.Mutex
 	refs map[string]string
+	// cacheOnly holds when each ref the cache served after containerd failed may try
+	// containerd again.
+	cacheOnly map[string]time.Time
 }
 
 // NewResolver builds a resolver. It never fails: when containerd is
@@ -50,6 +63,7 @@ func NewResolver(cfg config.Config, logger *slog.Logger) *Resolver {
 		dataRoot:    containerdDataRoot(),
 		logger:      logger,
 		refs:        map[string]string{},
+		cacheOnly:   map[string]time.Time{},
 	}
 	r.policy, r.policyErr = NewPolicy(cfg, logger)
 	if r.mode == "" {
@@ -66,6 +80,7 @@ func NewResolver(cfg config.Config, logger *slog.Logger) *Resolver {
 			r.logger.Warn("containerd unavailable; using the local image cache", "error", err)
 		} else {
 			r.cli = cli
+			r.fromContainerd = r.containerdRootfs
 		}
 	default:
 		if r.mode == config.ImagesContainerd {
@@ -122,11 +137,13 @@ func (r *Resolver) Resolve(ctx context.Context, ref string) (string, error) {
 		return cached, nil
 	}
 
-	if r.cli != nil {
-		path, err := r.containerdRootfs(ctx, ref)
+	tried := r.fromContainerd != nil && r.containerdDue(ref)
+	if tried {
+		path, err := r.fromContainerd(ctx, ref)
 		if err == nil {
 			r.mu.Lock()
 			r.refs[ref] = path
+			delete(r.cacheOnly, ref)
 			r.mu.Unlock()
 			return path, nil
 		}
@@ -135,7 +152,21 @@ func (r *Resolver) Resolve(ctx context.Context, ref string) (string, error) {
 		}
 		r.logger.Debug("containerd resolve failed; falling back to the image cache", "image", ref, "error", err)
 	}
-	return r.cache.Resolve(ref)
+	path, err := r.cache.Resolve(ref)
+	if err == nil && tried {
+		r.mu.Lock()
+		r.cacheOnly[ref] = time.Now().Add(containerdRetryAfter)
+		r.mu.Unlock()
+	}
+	return path, err
+}
+
+// containerdDue reports whether ref may try containerd. A mode or policy that accepts
+// nothing but containerd returns before the cache, so it never holds a ref back.
+func (r *Resolver) containerdDue(ref string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return time.Now().After(r.cacheOnly[ref])
 }
 
 func (r *Resolver) containerdRootfs(ctx context.Context, ref string) (string, error) {
