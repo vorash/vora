@@ -126,7 +126,7 @@ reservation. Keep the pool's name, not its `id`, across a `declare`.
 
 Limits on a run:
 
-- The encoded request must fit the API's 1 MiB body limit, which leaves about 786 KiB of
+- The encoded request must fit the API's 1 MiB body limit, which leaves about 768 KiB of
   stdin. A larger one throws `RequestTooLargeError` without being sent.
 - A client that reads slower than about 1.5 KiB/s while output is flowing is cut off
   with `client_stalled`.
@@ -154,13 +154,14 @@ Limits on a run:
 
 ### Errors
 
-Every error is a `VoraError` with `status` and `body`. These subclasses say what to do
-next:
+Every error is a `VoraError`. `status` and `body` are set when the API answered. A
+network failure has neither, and keeps the original error as `cause`. Aborting a `signal`
+throws the abort's own error instead, unwrapped. These subclasses say what to do next:
 
 | Error | Status | Meaning |
 | --- | --- | --- |
 | `RateLimitedError` | 429 | The pool is full or capacity is reached. Nothing ran. `retryAfterSeconds` has the API's wait. |
-| `UnavailableError` | 503 | No sandbox could start, or a runner is down or still starting. Nothing ran. `retryAfterSeconds` has the API's wait. |
+| `UnavailableError` | 503 | No sandbox could start, or a runner is down or still starting. On a run, probably nothing ran, but it isn't certain: the runner may have been lost after the program started. `retryAfterSeconds` has the API's wait. |
 | `GatewayTimeoutError` | 504 | The runner did not answer in time. It is not known whether anything ran. |
 | `ConflictError` | 409 | The resource's state refuses the call. The next three are its subclasses. |
 | `PoolDrainingError` | 409 | The pool is being deleted. Retry later, or declare it again once it is gone. |
@@ -175,10 +176,13 @@ The SDK tells the 409s apart by reading the pool's state, which costs one extra 
 ### Retries
 
 Pool calls that are safe to repeat retry 429 and 503, honouring `Retry-After`, under the
-client's `retry` (a `RetryPolicy`, default 4 attempts; `null` turns it off). A run
-retries only if you pass `retry: {}`, because a repeated run isn't idempotent. It then
-repeats a 429 or 503, which mean nothing ran, and never repeats a run past its first
-frame. A `Retry-After` longer than `maxDelayMs` throws instead of waiting. Sandbox routes
+client's `retry` (a `RetryPolicy`, default 4 attempts; `null` turns it off). `delete`
+rides out 429, 503 and 504 for up to `maxWaitSeconds`, whatever the policy. A run retries
+only if you pass `retry: {}`, because a repeated run isn't idempotent. It then repeats a
+429 or 503, and never repeats a run past its first frame. A 429 means nothing ran. A 503
+usually means the same, but a runner lost just after the program started also answers
+503, so a retry can run the program twice. Use `retry` only for a program that is safe to
+repeat. A `Retry-After` longer than `maxDelayMs` throws instead of waiting. Sandbox routes
 do not retry.
 
 ## Surface

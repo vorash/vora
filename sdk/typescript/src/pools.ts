@@ -12,7 +12,7 @@ import {
   UnavailableError,
   VoraError,
 } from "./errors.js";
-import { retrying } from "./http.js";
+import { fetchFailure, isAbort, retrying } from "./http.js";
 import type { RetryPolicy, Transport } from "./http.js";
 import {
   decodePoolInfo,
@@ -42,26 +42,6 @@ import type {
 // The API reads this much of a body and parses what it got.
 const RUN_BODY_LIMIT = 1 << 20;
 const DRAIN_POLL_MS = 1000;
-
-// Node's fetch stops waiting at 300 s, and the API can take 420 s to answer a run's
-// first frame, or longer between frames of a silent command. Without this, either
-// reads as a bare "fetch failed" or "terminated".
-const FETCH_GAVE_UP: Record<string, string> = {
-  UND_ERR_HEADERS_TIMEOUT:
-    "fetch stopped waiting for the API's answer, so it is not known whether anything ran. " +
-    "Pass a `fetch` with a longer headersTimeout: see the README",
-  UND_ERR_BODY_TIMEOUT:
-    "fetch stopped waiting for a silent command's next frame. " +
-    "Pass a `fetch` with a longer bodyTimeout: see the README",
-};
-
-function fetchFailure(error: unknown): string {
-  if (!(error instanceof Error)) {
-    return String(error);
-  }
-  const cause = error.cause as { code?: unknown } | undefined;
-  return (typeof cause?.code === "string" ? FETCH_GAVE_UP[cause.code] : undefined) ?? error.message;
-}
 
 export interface TenantOptions {
   /** A global admin must name the tenant. */
@@ -110,8 +90,9 @@ async function namedConflict(
 
 /**
  * Warm pools, reached through `vora.pools`. `declare`, `get`, `list`, `refresh`,
- * `stats` and `delete` are safe to repeat, so they retry 429 and 503 under the
- * client's `retry` policy.
+ * `stats`, `execs` and `events` are safe to repeat, so they retry 429 and 503 under the
+ * client's `retry` policy. `delete` rides out 429, 503 and 504 for up to
+ * `maxWaitSeconds`, whatever the policy.
  */
 export class Pools {
   private readonly transport: Transport;
@@ -269,9 +250,11 @@ export class Pool {
    * reading slower than about 1.5 KiB/s while output is flowing is cut off with
    * `client_stalled`.
    *
-   * `retry` repeats a 429 or 503, which come before the first frame and mean nothing
-   * ran. The default is not to retry: a repeated run isn't idempotent, so it's the
-   * caller's choice. A failure after the first frame is never retried.
+   * `retry` repeats a 429 or 503, which come before the first frame. A 429 means nothing
+   * ran. A 503 usually means the same, but a runner lost just after the program started
+   * also answers 503, so a retry can run the program twice. Use it only for a program
+   * that is safe to repeat. The default is not to retry. A failure after the first frame
+   * is never retried.
    *
    * Throws `RateLimitedError` when the pool is full, `UnavailableError` when no sandbox
    * could start, `GatewayTimeoutError` when no first frame came within the API's 7
@@ -352,7 +335,7 @@ export class Pool {
     if (size > RUN_BODY_LIMIT) {
       throw new RequestTooLargeError(
         `pool run: the encoded request is ${size} bytes, and the API takes ${RUN_BODY_LIMIT}. ` +
-          "stdin is base64 inside it, so about 786 KiB of stdin fits.",
+          "stdin is base64 inside it, so about 768 KiB of stdin fits.",
       );
     }
     try {
@@ -368,10 +351,7 @@ export class Pool {
       if (error instanceof ConflictError) {
         throw await namedConflict(this.transport, this.name, this.tenantId, error, false);
       }
-      if (error instanceof VoraError || (error instanceof Error && error.name === "AbortError")) {
-        throw error;
-      }
-      throw new VoraError(`pool run: ${fetchFailure(error)}`, { cause: error });
+      throw error;
     }
   }
 
@@ -406,7 +386,9 @@ export class Pool {
         }
       }
     } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
+      // Past `exit` the command has finished, and a caller who retries on an abort would
+      // run it again, so the result stands, as it does when the stream breaks.
+      if (!sawExit && isAbort(error, options.signal)) {
         throw error;
       }
       cause = error;

@@ -11,13 +11,14 @@ import {
   PoolSpecConflictError,
   RateLimitedError,
   RequestTooLargeError,
+  Sandbox,
   UnavailableError,
   Vora,
   VoraError,
 } from "../src/index.js";
 import type { RetryPolicy, RunChunk } from "../src/index.js";
 import { parseRetryAfter, Transport } from "../src/http.js";
-import { decodePoolInfo, decodeSandboxExec, decodeSandboxInfo } from "../src/types.js";
+import { decodePoolInfo, decodeSandboxExec, decodeSandboxInfo, encodeExecRequest } from "../src/types.js";
 import { answerReply, GOLDEN, runReply, startWire } from "./wire.js";
 import type { Reply, Sent, WireServer } from "./wire.js";
 
@@ -327,6 +328,124 @@ describe("a failure after the first frame", () => {
   });
 });
 
+describe("a run's signal", () => {
+  it("already aborted, sends nothing and throws the abort", async () => {
+    const { server } = await boot(() => runReply("warm_reset"));
+
+    const error = await caught(() => handle(server).run({ command: "true", ...run, signal: AbortSignal.abort() }), DOMException);
+
+    expect(error.name).toBe("AbortError");
+    expect(server.requests).toEqual([]);
+  });
+
+  it("aborted before exit, throws the abort and disconnects so the API cancels the run", async () => {
+    const { server } = await boot(() => runReply("warm_reset", { cutAfter: 1, hold: true }));
+    const controller = new AbortController();
+
+    const reading = (async () => {
+      for await (const chunk of handle(server).streamRun("sleep 60", { timeoutSeconds: 60, signal: controller.signal })) {
+        expect(chunk.type).toBe("run");
+        controller.abort();
+      }
+    })();
+
+    const error = await caught(() => reading, DOMException);
+    expect(error.name).toBe("AbortError");
+    await server.clientLeft;
+  });
+
+  it("timed out before exit, throws the timeout rather than a PoolRunError", async () => {
+    const { server } = await boot(() => runReply("warm_reset", { cutAfter: 1, hold: true }));
+
+    const error = await caught(() => handle(server).run("sleep 60", { timeoutSeconds: 60, signal: AbortSignal.timeout(50) }), DOMException);
+
+    expect(error.name).toBe("TimeoutError");
+  });
+
+  it("aborted after exit, keeps the result, so a caller who retries on abort reruns nothing", async () => {
+    // Up to exit, then silence: the abort lands while the reset's frame is due.
+    const { server } = await boot(() => runReply("warm_reset", { cutAfter: 4, hold: true }));
+    const controller = new AbortController();
+    const seen: RunChunk[] = [];
+
+    for await (const chunk of handle(server).streamRun("true", { ...run, signal: controller.signal })) {
+      seen.push(chunk);
+      if (chunk.type === "exit") {
+        controller.abort();
+      }
+    }
+
+    const last = seen.at(-1);
+    expect(seen.map((chunk) => chunk.type)).toContain("exit");
+    expect(last?.type).toBe("streamError");
+    expect(last?.type === "streamError" ? last.error.code : undefined).toBe("stream_ended");
+    await server.clientLeft;
+  });
+
+  it("aborted after exit, run returns the finished result", async () => {
+    const lines = GOLDEN.runs.warm_reset?.lines?.slice(0, 4) ?? [];
+    const aborted = new DOMException("This operation was aborted", "AbortError");
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(lines.map((line) => `${line}\n`).join("")));
+      },
+      pull(controller) {
+        controller.error(aborted);
+      },
+    });
+    const transport = new Transport({ baseUrl: "http://vora.test", fetch: () => Promise.resolve(new Response(body)) });
+    const pool = new Pool(transport, null, "py", decodePoolInfo({ id: "pool_test" }), undefined);
+
+    const result = await pool.run({ command: "true", ...run });
+
+    expect(result.exit.reason).toBe("EXITED");
+    expect(result.stdout).toBe("42\n");
+    expect(result.done).toBeUndefined();
+    expect(result.streamError?.code).toBe("stream_ended");
+  });
+});
+
+describe("a delete's signal", () => {
+  it("stops the wait for a drain", async () => {
+    const { server } = await boot(() => answerReply("delete_draining"));
+    const controller = new AbortController();
+    const policy: RetryPolicy = {
+      sleep: () => {
+        controller.abort();
+        return Promise.resolve();
+      },
+    };
+
+    const error = await caught(() => handle(server, policy).delete({ maxWaitSeconds: 2, signal: controller.signal }), DOMException);
+
+    expect(error.name).toBe("AbortError");
+    expect(server.requests).toHaveLength(1);
+  });
+
+  it("already aborted, sends nothing", async () => {
+    const { server } = await boot(() => answerReply("delete_gone"));
+
+    const error = await caught(() => handle(server).delete({ signal: AbortSignal.abort() }), DOMException);
+
+    expect(error.name).toBe("AbortError");
+    expect(server.requests).toEqual([]);
+  });
+});
+
+describe("the client's default retry policy", () => {
+  it("retries a refused declare with no policy passed", async () => {
+    const replies = sequence(runReply("runner_loading", { retryAfter: undefined }), answerReply("get_active"));
+    const server = await startWire(replies);
+    open.push(server);
+    const vora = new Vora({ baseUrl: server.url, apiKey: "vora_test" });
+
+    const pool = await vora.pools.declare("py", { image: "vora/base", cpu: "100m", memory: "1Mi" });
+
+    expect(pool.info.state).toBe("POOL_ACTIVE");
+    expect(server.requests).toHaveLength(2);
+  });
+});
+
 describe("retries", () => {
   it("a run is not retried unless the caller asks", async () => {
     const { policy } = noWait();
@@ -432,6 +551,15 @@ describe("retries", () => {
 
 describe("409s, told apart by the pool's state", () => {
   const runThenGet = (refusal: string, record: Reply) => (sent: Sent) => (sent.method === "POST" ? runReply(refusal) : record);
+
+  it("a run refused on an active pool stays a plain conflict", async () => {
+    const { server } = await boot(runThenGet("draining", answerReply("get_active")));
+
+    const error = await caught(() => handle(server).run({ command: "true", ...run }), ConflictError);
+
+    expect(error.constructor).toBe(ConflictError);
+    expect(error.status).toBe(409);
+  });
 
   it("a draining pool is typed and not retried", async () => {
     const { policy, waited } = noWait();
@@ -672,7 +800,92 @@ describe("when Node's fetch stops waiting before the API answers", () => {
 
     const error = await caught(() => pool.run({ command: "true", ...run }), VoraError);
 
-    expect(error.message).toBe("pool run: fetch failed");
+    expect(error.message).toBe("fetch failed");
+  });
+});
+
+describe("a failure to reach the API, on any route", () => {
+  const failure = new TypeError("fetch failed");
+  const vora = new Vora({ baseUrl: "http://vora.test", fetch: () => Promise.reject(failure) });
+  const sandbox = new Sandbox(new Transport({ baseUrl: "http://vora.test", fetch: () => Promise.reject(failure) }), decodeSandboxInfo({ id: "sbx_1" }));
+  const calls: Record<string, () => Promise<unknown>> = {
+    "sandboxes.create": () => vora.sandboxes.create({ image: "vora/base" }),
+    "sandboxes.get": () => vora.sandboxes.get("sbx_1"),
+    "sandboxes.list": () => vora.sandboxes.list(),
+    "snapshots.list": () => vora.snapshots.list(),
+    "pools.get": () => vora.pools.get("py"),
+    "sandbox.exec": () => sandbox.exec("true"),
+    "sandbox.readFile": () => sandbox.readFile("/x"),
+    "sandbox.writeFile": () => sandbox.writeFile("/x", "y"),
+    "sandbox.destroy": () => sandbox.destroy(),
+  };
+
+  it.each(Object.keys(calls))("%s throws a VoraError that keeps the original", async (name) => {
+    const error = await caught(calls[name] as () => Promise<unknown>, VoraError);
+
+    expect(error.message).toBe("fetch failed");
+    expect(error.cause).toBe(failure);
+    expect(error.status).toBeUndefined();
+  });
+
+  it("names the setting when Node's fetch stopped waiting on a sandbox route", async () => {
+    const gaveUp = Object.assign(new TypeError("fetch failed"), {
+      cause: Object.assign(new Error("timed out"), { code: "UND_ERR_HEADERS_TIMEOUT" }),
+    });
+    const slow = new Vora({ baseUrl: "http://vora.test", fetch: () => Promise.reject(gaveUp) });
+
+    const error = await caught(() => slow.sandboxes.get("sbx_1"), VoraError);
+
+    expect(error.message).toContain("headersTimeout");
+    expect(error.cause).toBe(gaveUp);
+  });
+
+  it("a body that breaks mid-read is a VoraError too", async () => {
+    const broken = new TypeError("terminated");
+    const breaking = (): Promise<Response> =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              controller.error(broken);
+            },
+          }),
+        ),
+      );
+    const transport = new Transport({ baseUrl: "http://vora.test", fetch: breaking });
+    const reading = new Sandbox(transport, decodeSandboxInfo({ id: "sbx_1" }));
+    const reads: (() => Promise<unknown>)[] = [
+      () => transport.json("/x"),
+      () => transport.bytes("/x"),
+      () => reading.exec("true"),
+      () => reading.writeFile("/x", "y"),
+    ];
+
+    for (const read of reads) {
+      const error = await caught(read, VoraError);
+      expect(error.cause).toBe(broken);
+    }
+  });
+
+  it("the caller's abort stays the caller's, whatever it carries", async () => {
+    const rejecting: typeof globalThis.fetch = (_input, init) => Promise.reject(init?.signal?.reason as Error);
+    const transport = new Transport({ baseUrl: "http://vora.test", fetch: rejecting });
+    const mine = new RangeError("mine");
+
+    await expect(transport.request("/x", { signal: AbortSignal.abort(mine) })).rejects.toBe(mine);
+    await expect(transport.json("/x", { signal: AbortSignal.abort() })).rejects.toMatchObject({ name: "AbortError" });
+    await expect(transport.bytes("/x", { signal: AbortSignal.abort(new DOMException("slow", "TimeoutError")) })).rejects.toMatchObject({
+      name: "TimeoutError",
+    });
+  });
+
+  it("an abort or timeout from a fetch with no signal of ours is not wrapped", async () => {
+    for (const name of ["AbortError", "TimeoutError"]) {
+      const thrown = new DOMException("gave up", name);
+      const transport = new Transport({ baseUrl: "http://vora.test", fetch: () => Promise.reject(thrown) });
+
+      await expect(transport.request("/x")).rejects.toBe(thrown);
+    }
   });
 });
 
@@ -895,13 +1108,32 @@ describe("what a request looks like", () => {
 
   it("the most stdin the limit allows is sent", async () => {
     const { server } = await boot(() => runReply("warm_reset"));
+    const limit = GOLDEN.limits.runBodyBytes ?? 0;
     const overhead = JSON.stringify({ command: "cat", timeoutSeconds: "10", stdin: "" }).length;
-    const fits = Math.floor(((1 << 20) - overhead) / 4) * 3;
+    const fits = Math.floor((limit - overhead) / 4) * 3;
 
     await handle(server).run({ command: "cat", stdin: new Uint8Array(fits), ...run });
 
     expect(server.requests).toHaveLength(1);
-    expect(server.requests[0]?.body.length).toBeLessThanOrEqual(1 << 20);
+    expect(server.requests[0]?.body.length).toBeLessThanOrEqual(limit);
+    // The README's "about 768 KiB", which the envelope takes a little of.
+    expect(fits).toBeGreaterThan(767 * 1024);
+    expect(fits).toBeLessThan(768 * 1024);
+
+    await caught(() => handle(server).run({ command: "cat", stdin: new Uint8Array(fits + 3), ...run }), RequestTooLargeError);
+    expect(server.requests).toHaveLength(1);
+  });
+
+  it("a body of exactly the API's limit is sent, and one byte more is not", async () => {
+    const { server } = await boot(() => runReply("warm_reset"));
+    const limit = GOLDEN.limits.runBodyBytes ?? 0;
+    const envelope = JSON.stringify(encodeExecRequest({ command: "true", cwd: "a", ...run })).length - 1;
+
+    await handle(server).run({ command: "true", cwd: "a".repeat(limit - envelope), ...run });
+
+    expect(server.requests[0]?.body.length).toBe(limit);
+    await caught(() => handle(server).run({ command: "true", cwd: "a".repeat(limit - envelope + 1), ...run }), RequestTooLargeError);
+    expect(server.requests).toHaveLength(1);
   });
 });
 

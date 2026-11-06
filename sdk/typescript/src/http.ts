@@ -71,6 +71,40 @@ function retryDelayMs(
   return Math.min(baseDelayMs * 2 ** (attempt - 1), maxDelayMs);
 }
 
+// Node's fetch stops waiting at 300 s, and the API can take 420 s to answer a run's
+// first frame, or longer between frames of a silent command. Without this, either
+// reads as a bare "fetch failed" or "terminated".
+const FETCH_GAVE_UP: Record<string, string> = {
+  UND_ERR_HEADERS_TIMEOUT:
+    "fetch stopped waiting for the API's answer, so it is not known whether anything ran. " +
+    "Pass a `fetch` with a longer headersTimeout: see the README",
+  UND_ERR_BODY_TIMEOUT:
+    "fetch stopped waiting for a silent command's next frame. " +
+    "Pass a `fetch` with a longer bodyTimeout: see the README",
+};
+
+export function fetchFailure(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+  const cause = error.cause as { code?: unknown } | undefined;
+  return (typeof cause?.code === "string" ? FETCH_GAVE_UP[cause.code] : undefined) ?? error.message;
+}
+
+/** The caller's own abort or timeout. `signal` catches an abort with a custom reason. */
+export function isAbort(error: unknown, signal?: AbortSignal): boolean {
+  return (
+    signal?.aborted === true || (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"))
+  );
+}
+
+/** A failure to reach the API or read its answer, as a `VoraError` unless the caller aborted. */
+export function asVoraError(error: unknown, signal?: AbortSignal): unknown {
+  return error instanceof VoraError || isAbort(error, signal)
+    ? error
+    : new VoraError(fetchFailure(error), { cause: error });
+}
+
 /** Thin HTTP layer: base URL, bearer auth, and error normalisation. */
 export class Transport {
   readonly baseUrl: string;
@@ -96,12 +130,17 @@ export class Transport {
     if (options.contentType !== undefined) {
       headers["Content-Type"] = options.contentType;
     }
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      method: options.method ?? "GET",
-      headers,
-      body: options.body,
-      signal: options.signal,
-    });
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}${path}`, {
+        method: options.method ?? "GET",
+        headers,
+        body: options.body,
+        signal: options.signal,
+      });
+    } catch (error) {
+      throw asVoraError(error, options.signal);
+    }
     if (!response.ok) {
       throw await toVoraError(response);
     }
@@ -116,12 +155,20 @@ export class Transport {
       contentType: body === undefined ? undefined : "application/json",
       signal: options.signal,
     });
-    return (await response.json()) as T;
+    try {
+      return (await response.json()) as T;
+    } catch (error) {
+      throw asVoraError(error, options.signal);
+    }
   }
 
   async bytes(path: string, options: RequestOptions = {}): Promise<Uint8Array> {
     const response = await this.request(path, options);
-    return new Uint8Array(await response.arrayBuffer());
+    try {
+      return new Uint8Array(await response.arrayBuffer());
+    } catch (error) {
+      throw asVoraError(error, options.signal);
+    }
   }
 }
 

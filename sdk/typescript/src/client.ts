@@ -15,8 +15,8 @@ export interface VoraOptions {
   fetch?: typeof globalThis.fetch;
   /**
    * How pool calls that are safe to repeat handle 429 and 503. `null` turns it off.
-   * A pool run has its own `retry` option, off by default, and sandbox routes do not
-   * retry.
+   * A pool run has its own `retry` option, off by default, `delete` waits by its own
+   * `maxWaitSeconds` whatever this is, and sandbox routes do not retry.
    */
   retry?: RetryPolicy | null;
 }

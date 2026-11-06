@@ -8,7 +8,7 @@ export interface VoraErrorOptions {
 
 /** A failed Vora API call, or a malformed request built by this SDK. */
 export class VoraError extends Error {
-  /** HTTP status, when the failure came from the API. */
+  /** HTTP status, when the failure came from the API. A network failure has none. */
   readonly status?: number;
   /** Parsed response body (`{"error": "..."}`), when the API returned one. */
   readonly body?: unknown;
@@ -47,7 +47,11 @@ export class RateLimitedError extends RetryLaterError {
   }
 }
 
-/** 503: no sandbox could start, or a runner is down or still starting. Nothing ran. */
+/**
+ * 503: no sandbox could start, or a runner is down or still starting. On a run, probably
+ * nothing ran, but it isn't certain: the runner may have been lost after the program
+ * started.
+ */
 export class UnavailableError extends RetryLaterError {
   constructor(message: string, options: RetryLaterErrorOptions = {}) {
     super(message, options);

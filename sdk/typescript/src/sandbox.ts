@@ -1,5 +1,6 @@
 import { decodeText, ndjson } from "./codec.js";
 import { VoraError } from "./errors.js";
+import { asVoraError } from "./http.js";
 import type { Transport } from "./http.js";
 import {
   decodeExecChunk,
@@ -118,8 +119,12 @@ export class Sandbox {
       body: body as BodyInit,
       contentType: "application/octet-stream",
     });
-    const result = (await response.json()) as { bytes_written?: number };
-    return result.bytes_written ?? body.byteLength;
+    try {
+      const result = (await response.json()) as { bytes_written?: number };
+      return result.bytes_written ?? body.byteLength;
+    } catch (error) {
+      throw asVoraError(error);
+    }
   }
 
   async readFile(path: string): Promise<Uint8Array> {
@@ -164,11 +169,15 @@ export class Sandbox {
     if (response.body === null) {
       return;
     }
-    for await (const raw of ndjson<unknown>(response.body)) {
-      const chunk = decodeExecChunk(raw);
-      if (chunk !== undefined) {
-        yield chunk;
+    try {
+      for await (const raw of ndjson<unknown>(response.body)) {
+        const chunk = decodeExecChunk(raw);
+        if (chunk !== undefined) {
+          yield chunk;
+        }
       }
+    } catch (error) {
+      throw asVoraError(error);
     }
   }
 

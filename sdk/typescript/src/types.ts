@@ -366,11 +366,16 @@ export interface DeclarePoolOptions extends Omit<CreateSandboxOptions, "ttl" | "
 export interface PoolRunOptions extends ExecOptions {
   timeoutSeconds: number;
   /**
-   * Repeat a 429 or 503, which mean nothing ran. Absent means no retry, as a repeated
-   * run isn't idempotent. A failure after the first frame is never retried.
+   * Repeat a 429 or 503. A 429 means nothing ran. A 503 usually means the same, but a
+   * runner lost just after the program started also answers 503, so a retry can run the
+   * program twice: use this only for a program that is safe to repeat. Absent means no
+   * retry. A failure after the first frame is never retried.
    */
   retry?: RetryPolicy;
-  /** Aborting before `exit` cancels the run. */
+  /**
+   * Aborting before `exit` cancels the run and throws the abort's own error. After `exit`
+   * the result stands, with `streamError` set.
+   */
   signal?: AbortSignal;
 }
 
