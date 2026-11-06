@@ -28,7 +28,7 @@ from ._errors import (
     VoraError,
 )
 from ._http import RetryPolicy
-from ._pools import Pool, Pools
+from ._pools import Pool, Pools, RunStream
 from ._sandbox import Sandbox
 from ._snapshots import Snapshot, Snapshots
 from ._types import (
@@ -89,6 +89,7 @@ __all__ = [
     "RetryPolicy",
     "RunChunk",
     "RunExit",
+    "RunStream",
     "RunStreamError",
     "Sandbox",
     "SandboxEgress",

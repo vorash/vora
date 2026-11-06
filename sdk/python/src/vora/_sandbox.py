@@ -81,6 +81,11 @@ class Sandbox:
 
         With ``args=None`` the command is a shell line run via ``/bin/sh -c``;
         pass ``args`` (even empty) to run ``command`` literally.
+
+        ``timeout_seconds`` also bounds the wait for output, at that plus 30 s, past which
+        this raises ``httpx.ReadTimeout``. Without it, a client you passed keeps its own read
+        timeout, and a client the SDK built has none, so a background process holding the
+        pipes (``exec("server &")``) or a dead connection waits indefinitely.
         """
         stdout = bytearray()
         stderr = bytearray()
@@ -88,7 +93,7 @@ class Sandbox:
         reason: str | None = None
         saw_exit = False
         request = exec_request(command, args, cwd, env, stdin, timeout_seconds)
-        async for chunk in self._stream(request):
+        async for chunk in self._stream(request, timeout_seconds):
             if chunk.kind == "stdout":
                 stdout += chunk.data
             elif chunk.kind == "stderr":
@@ -121,13 +126,16 @@ class Sandbox:
         stdin: str | bytes | None = None,
         timeout_seconds: int | None = None,
     ) -> AsyncGenerator[ExecChunk, None]:
-        """Stream exec output as chunks, ending with an ``exit`` chunk."""
+        """Stream exec output as chunks, ending with an ``exit`` chunk.
+
+        ``timeout_seconds`` bounds the wait for output as it does in ``exec``.
+        """
         request = exec_request(command, args, cwd, env, stdin, timeout_seconds)
-        async for chunk in self._stream(request):
+        async for chunk in self._stream(request, timeout_seconds):
             yield chunk
 
-    async def _stream(self, request: dict[str, Any]) -> AsyncGenerator[ExecChunk, None]:
-        async for raw in self._transport.ndjson(self._path("/exec"), json_body=request):
+    async def _stream(self, request: dict[str, Any], timeout_seconds: int | None) -> AsyncGenerator[ExecChunk, None]:
+        async for raw in self._transport.ndjson(self._path("/exec"), json_body=request, timeout_seconds=timeout_seconds):
             chunk = decode_exec_chunk(raw)
             if chunk is not None:
                 yield chunk

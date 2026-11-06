@@ -25,6 +25,9 @@ from ._errors import (
 
 T = TypeVar("T")
 
+# The agent kills an exec's process group at its timeout, so its exit is due right after.
+_EXEC_READ_MARGIN_SECONDS = 30.0
+
 
 def path_segment(id: str) -> str:
     if not id or any(part in (".", "..") for part in id.split("/")):
@@ -173,17 +176,23 @@ class Transport:
         response = await self.request(path)
         return response.content
 
-    async def ndjson(self, path: str, *, json_body: Any) -> AsyncIterator[Any]:
-        """Stream one parsed JSON value per newline-delimited line."""
+    def _exec_timeout(self, timeout_seconds: int | None) -> Any:
+        # httpx times each read, and a silent command gives no bytes to read until it exits.
+        if timeout_seconds is not None and timeout_seconds > 0:
+            return httpx.Timeout(30.0, read=timeout_seconds + _EXEC_READ_MARGIN_SECONDS)
+        if self._owns_client:
+            return httpx.Timeout(30.0, read=None)
+        return httpx.USE_CLIENT_DEFAULT
+
+    async def ndjson(self, path: str, *, json_body: Any, timeout_seconds: int | None) -> AsyncIterator[Any]:
+        """Stream one parsed JSON value per newline-delimited line of an exec."""
         body = json.dumps(json_body).encode("utf-8")
         async with self._client.stream(
             "POST",
             self.base_url + path,
             headers=self._headers("application/json"),
             content=body,
-            # A silent command sends nothing to read until it exits, and httpx's default
-            # 5 s would end it early. The exec's own timeout_seconds is its bound.
-            timeout=httpx.Timeout(30.0, read=None),
+            timeout=self._exec_timeout(timeout_seconds),
         ) as response:
             if response.is_error:
                 await response.aread()

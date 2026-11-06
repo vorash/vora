@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
-from typing import Callable
+from typing import Any, Awaitable, Callable
 
 import httpx
 import pytest
@@ -27,7 +28,7 @@ from vora import (
     VoraError,
 )
 from vora._pools import Pool
-from vora._sandbox import Sandbox
+from vora._sandbox import Sandbox, exec_request
 from vora._types import SandboxInfo, decode_pool_info, decode_sandbox_exec, decode_sandbox_info
 
 from wire_server import GOLDEN, Reply, Sent, WireServer, answer_reply, run_reply
@@ -360,6 +361,62 @@ async def test_leaving_the_stream_before_exit_disconnects_so_the_api_cancels_the
     await asyncio.wait_for(server.client_left.wait(), timeout=5)
 
 
+def remembering_responses(opened: list[httpx.Response]) -> httpx.AsyncClient:
+    async def remember(response: httpx.Response) -> None:
+        opened.append(response)
+
+    return httpx.AsyncClient(event_hooks={"response": [remember]})
+
+
+async def test_breaking_out_with_the_stream_still_held_closes_the_response() -> None:
+    # A stream kept in a variable must not hold the connection, and with it the pool
+    # member, until the variable goes. Dropping httpx's generators closes the socket on
+    # their own, so only `is_closed` says the SDK closed its response.
+    opened: list[httpx.Response] = []
+    server = WireServer(lambda _: run_reply("warm_reset", cut_after=1, hold=True))
+    await server.start()
+    async with remembering_responses(opened) as http:
+        client = Vora(base_url=server.url, client=http)
+        stream = handle(client).stream_run("sleep 60", timeout_seconds=60)
+        async for chunk in stream:
+            assert chunk.kind == "run"
+            break
+
+        await asyncio.wait_for(server.client_left.wait(), timeout=5)
+
+        assert opened[0].is_closed
+        assert stream is not None
+    await server.stop()
+
+
+async def test_aclosing_the_iterator_closes_the_response_before_it_returns() -> None:
+    opened: list[httpx.Response] = []
+    server = WireServer(lambda _: run_reply("warm_reset", cut_after=1, hold=True))
+    await server.start()
+    async with remembering_responses(opened) as http:
+        client = Vora(base_url=server.url, client=http)
+        chunks = aiter(handle(client).stream_run("sleep 60", timeout_seconds=60))
+        async with contextlib.aclosing(chunks):
+            async for _ in chunks:
+                break
+            assert not opened[0].is_closed
+
+        assert opened[0].is_closed
+        await asyncio.wait_for(server.client_left.wait(), timeout=5)
+    await server.stop()
+
+
+async def test_a_stream_runs_its_command_once(wire) -> None:
+    client, server = await wire(lambda _: run_reply("warm_reset"))
+    stream = handle(client).stream_run("true", [], timeout_seconds=10)
+    assert [chunk.kind async for chunk in stream][-1] == "run_done"
+
+    with pytest.raises(VoraError):
+        aiter(stream)
+
+    assert len(server.requests) == 1
+
+
 # --- Retries ---------------------------------------------------------------------
 
 
@@ -481,6 +538,17 @@ async def test_declare_retries_by_default_as_it_is_idempotent(wire) -> None:
 
 def run_then_get(refusal: str, record: Reply) -> Callable[[Sent], Reply]:
     return lambda sent: run_reply(refusal) if sent.method == "POST" else record
+
+
+async def test_a_run_refused_on_an_active_pool_stays_a_plain_conflict(wire) -> None:
+    # A spec conflict is a declare's answer, and a run has no spec to differ.
+    client, _ = await wire(lambda sent: run_reply("draining") if sent.method == "POST" else answer_reply("get_active"))
+
+    with pytest.raises(ConflictError) as excinfo:
+        await handle(client).run("true", [], timeout_seconds=10)
+
+    assert type(excinfo.value) is ConflictError
+    assert excinfo.value.status == 409
 
 
 async def test_a_draining_pool_is_typed_and_not_retried(wire) -> None:
@@ -878,17 +946,161 @@ async def test_a_silent_pool_run_is_not_cut_off_by_the_clients_read_timeout() ->
     assert result.stdout == "42\n"
 
 
-async def test_a_silent_exec_is_not_cut_off_by_the_clients_read_timeout() -> None:
-    server = WireServer(lambda _: Reply(lines=['{"exit":{"exitCode":0,"reason":"EXITED"}}'], delay=0.3))
-    await server.start()
-    try:
-        async with httpx.AsyncClient(timeout=0.05) as http:
-            client = Vora(base_url=server.url, client=http)
-            result = await Sandbox(client._transport, SandboxInfo(id="sbx_1")).exec("sleep 7")
-    finally:
-        await server.stop()
+async def test_plain_calls_outlast_the_apis_own_bound_whatever_the_clients_default() -> None:
+    seen: list[httpx.Request] = []
+    client = recording_client(seen, httpx.Response(200, json={"id": "pool_1"}))
+    pool = handle(client)
 
-    assert result.exit_code == 0
+    await client.pools.get("py")
+    await client.pools.list()
+    await pool.refresh()
+    await pool.stats()
+    await pool.execs("sbx_1")
+    await pool.events("sbx_1")
+
+    assert len(seen) == 6
+    # httpx's default 5 s would turn the API's answer into a bare read error.
+    assert all(request.extensions["timeout"]["read"] > LIMITS["callSeconds"] for request in seen)
+
+
+# --- A plain exec's read timeout -------------------------------------------------
+
+
+EXITED = '{"exit":{"exitCode":0,"reason":"EXITED"}}'
+
+
+async def _exec(sandbox: Sandbox, **options: Any) -> Any:
+    return await sandbox.exec("sleep 7", **options)
+
+
+async def _stream_exec(sandbox: Sandbox, **options: Any) -> Any:
+    return [chunk async for chunk in sandbox.stream_exec("sleep 7", **options)]
+
+
+both_exec_calls = pytest.mark.parametrize("call", [_exec, _stream_exec], ids=["exec", "stream_exec"])
+ExecCall = Callable[..., Awaitable[Any]]
+
+
+def on(client: Vora) -> Sandbox:
+    return Sandbox(client._transport, SandboxInfo(id="sbx_1"))
+
+
+def recording_http(seen: list[httpx.Request], **options: Any) -> httpx.AsyncClient:
+    def route(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, text=EXITED + "\n")
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(route), **options)
+
+
+def client_the_sdk_built(http: httpx.AsyncClient, base_url: str = "http://vora.test") -> Vora:
+    client = Vora(base_url=base_url)
+    client._transport._client = http
+    return client
+
+
+@both_exec_calls
+@pytest.mark.parametrize("own_read_timeout", [7.0, 6000.0], ids=["client_shorter", "client_longer"])
+async def test_an_execs_timeout_sets_its_read_timeout_over_a_callers_client(call: ExecCall, own_read_timeout: float) -> None:
+    seen: list[httpx.Request] = []
+    client = Vora(base_url="http://vora.test", client=recording_http(seen, timeout=own_read_timeout))
+
+    await call(on(client), timeout_seconds=600)
+
+    # The agent kills the group at 600 s, so its exit is due then. The margin is not a
+    # second timeout: too short cuts off a run the agent is still ending.
+    assert 600 + 10 <= seen[0].extensions["timeout"]["read"] <= 600 + 120
+
+
+@both_exec_calls
+async def test_an_execs_timeout_sets_its_read_timeout_on_a_client_the_sdk_built(call: ExecCall) -> None:
+    seen: list[httpx.Request] = []
+    client = client_the_sdk_built(recording_http(seen))
+
+    await call(on(client), timeout_seconds=600)
+
+    assert 600 + 10 <= seen[0].extensions["timeout"]["read"] <= 600 + 120
+
+
+@both_exec_calls
+@pytest.mark.parametrize("options", [{}, {"timeout_seconds": 0}], ids=["absent", "zero_means_no_limit_to_the_agent"])
+async def test_with_no_exec_timeout_a_callers_client_keeps_its_own(call: ExecCall, options: dict[str, int]) -> None:
+    seen: list[httpx.Request] = []
+    client = Vora(base_url="http://vora.test", client=recording_http(seen, timeout=7.0))
+
+    await call(on(client), **options)
+
+    assert seen[0].extensions["timeout"]["read"] == 7.0
+
+
+@both_exec_calls
+@pytest.mark.parametrize("options", [{}, {"timeout_seconds": 0}], ids=["absent", "zero_means_no_limit_to_the_agent"])
+async def test_with_no_exec_timeout_a_client_the_sdk_built_waits(call: ExecCall, options: dict[str, int]) -> None:
+    seen: list[httpx.Request] = []
+    client = client_the_sdk_built(recording_http(seen))
+
+    await call(on(client), **options)
+
+    assert seen[0].extensions["timeout"]["read"] is None
+
+
+@both_exec_calls
+async def test_silence_past_the_margin_raises_instead_of_hanging(call: ExecCall, monkeypatch) -> None:
+    monkeypatch.setattr("vora._http._EXEC_READ_MARGIN_SECONDS", 0.2)
+    # Headers, then nothing, as `exec("server &")` looks once its output is read.
+    server = WireServer(lambda _: Reply(lines=[], hold=True))
+    await server.start()
+    async with httpx.AsyncClient(timeout=60.0) as http:
+        client = Vora(base_url=server.url, client=http)
+        with pytest.raises(httpx.ReadTimeout):
+            await asyncio.wait_for(call(on(client), timeout_seconds=1), timeout=10)
+    await server.stop()
+
+
+@both_exec_calls
+async def test_a_silent_exec_outlasts_a_callers_read_timeout_when_it_has_its_own(call: ExecCall) -> None:
+    server = WireServer(lambda _: Reply(lines=[EXITED], delay=0.3))
+    await server.start()
+    async with httpx.AsyncClient(timeout=0.05) as http:
+        client = Vora(base_url=server.url, client=http)
+        await call(on(client), timeout_seconds=10)
+    await server.stop()
+
+
+@both_exec_calls
+async def test_a_callers_read_timeout_ends_a_silent_exec_with_none_of_its_own(call: ExecCall) -> None:
+    server = WireServer(lambda _: Reply(lines=[EXITED], delay=0.3))
+    await server.start()
+    async with httpx.AsyncClient(timeout=0.05) as http:
+        client = Vora(base_url=server.url, client=http)
+        with pytest.raises(httpx.ReadTimeout):
+            await call(on(client))
+    await server.stop()
+
+
+@both_exec_calls
+async def test_a_client_the_sdk_built_outlasts_its_default_on_a_silent_exec(call: ExecCall) -> None:
+    server = WireServer(lambda _: Reply(lines=[EXITED], delay=0.3))
+    await server.start()
+    # An SDK-built client with a default shorter than the silence, to keep this test short.
+    client = client_the_sdk_built(httpx.AsyncClient(timeout=0.05), server.url)
+
+    await call(on(client))
+
+    await client.aclose()
+    await server.stop()
+
+
+async def test_a_batch_client_with_its_own_timeout_keeps_working() -> None:
+    # A caller that bounds its client past the exec's own timeout, and passes that too.
+    server = WireServer(lambda _: Reply(lines=[EXITED], delay=0.3))
+    await server.start()
+    async with httpx.AsyncClient(timeout=httpx.Timeout(10 + 30.0)) as http:
+        client = Vora(base_url=server.url, client=http)
+        chunks = [chunk async for chunk in on(client).stream_exec("x", [], stdin="{}", timeout_seconds=10)]
+    await server.stop()
+
+    assert [chunk.kind for chunk in chunks] == ["exit"]
 
 
 # --- What a request looks like ---------------------------------------------------
@@ -1004,12 +1216,31 @@ async def test_the_most_stdin_the_limit_allows_is_sent(wire) -> None:
     client, server = await wire(lambda _: run_reply("warm_reset"))
     # The envelope with the shortest stdin, and how many raw bytes fill the rest.
     overhead = len(json.dumps({"command": "cat", "timeoutSeconds": "10", "stdin": ""}))
-    fits = (((1 << 20) - overhead) // 4) * 3
+    fits = ((LIMITS["runBodyBytes"] - overhead) // 4) * 3
 
     await handle(client).run("cat", [], stdin=b"x" * fits, timeout_seconds=10)
 
     assert len(server.requests) == 1
-    assert len(server.requests[0].body) <= 1 << 20
+    assert len(server.requests[0].body) <= LIMITS["runBodyBytes"]
+    # The README's "about 768 KiB", which the envelope takes a little of.
+    assert 767 * 1024 < fits < 768 * 1024
+
+    with pytest.raises(RequestTooLargeError):
+        await handle(client).run("cat", [], stdin=b"x" * (fits + 3), timeout_seconds=10)
+    assert len(server.requests) == 1
+
+
+async def test_a_body_of_exactly_the_apis_limit_is_sent_and_one_byte_more_is_not(wire) -> None:
+    client, server = await wire(lambda _: run_reply("warm_reset"))
+    limit = LIMITS["runBodyBytes"]
+    envelope = len(json.dumps(exec_request("true", [], "", None, None, 10)))
+
+    await handle(client).run("true", [], cwd="a" * (limit - envelope), timeout_seconds=10)
+
+    assert len(server.requests[0].body) == limit
+    with pytest.raises(RequestTooLargeError):
+        await handle(client).run("true", [], cwd="a" * (limit - envelope + 1), timeout_seconds=10)
+    assert len(server.requests) == 1
 
 
 # --- Listings --------------------------------------------------------------------

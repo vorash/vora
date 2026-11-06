@@ -49,9 +49,9 @@ _RUN_BODY_LIMIT = 1 << 20
 
 # httpx defaults to 5 s for everything, which is less than any of these calls may
 # take. Each number is above the API's own bound for that call, so the API's answer
-# arrives before the client gives up: 10 s for a plain pool call, 40 s for a declare
-# that loses its route and removes what it made, 30 s for one DELETE, and 420 s for a
-# run's first frame, then the run's timeout plus 60 s for its stream.
+# arrives before the client gives up: 10 s for a plain pool call, 20 s for a listing,
+# 40 s for a declare that loses its route and removes what it made, 30 s for one DELETE,
+# and 420 s for a run's first frame, then the run's timeout plus 60 s for its stream.
 _CALL_TIMEOUT = httpx.Timeout(30.0)
 _DECLARE_TIMEOUT = httpx.Timeout(50.0)
 _DELETE_TIMEOUT = httpx.Timeout(40.0)
@@ -101,8 +101,10 @@ async def _named_conflict(
 class Pools:
     """Warm pools, reached through ``vora.pools``.
 
-    ``declare``, ``get``, ``list``, ``refresh``, ``stats`` and ``delete`` are safe to
-    repeat, so they retry 429 and 503 under the client's ``retry`` policy.
+    ``declare``, ``get``, ``list``, ``refresh``, ``stats``, ``execs`` and ``events`` are
+    safe to repeat, so they retry 429 and 503 under the client's ``retry`` policy.
+    ``delete`` rides out 429, 503 and 504 for up to ``max_wait_seconds``, whatever the
+    policy.
     """
 
     def __init__(self, transport: Transport, retry: RetryPolicy | None) -> None:
@@ -201,6 +203,21 @@ class Pools:
         return pools
 
 
+class RunStream:
+    """A run's chunks, from ``Pool.stream_run``. Iterate it once."""
+
+    def __init__(self, chunks: AsyncGenerator[RunChunk, None]) -> None:
+        self._chunks: AsyncGenerator[RunChunk, None] | None = chunks
+
+    def __aiter__(self) -> AsyncGenerator[RunChunk, None]:
+        # Keep no reference to what the loop iterates. `async for` does not close it on
+        # break, so only dropping it does, however long the caller holds this object.
+        chunks, self._chunks = self._chunks, None
+        if chunks is None:
+            raise VoraError("pool run: a stream can be iterated once")
+        return chunks
+
+
 class Pool:
     """A handle to one pool. Reached through ``vora.pools``."""
 
@@ -293,7 +310,7 @@ class Pool:
             stream_error=stream_error,
         )
 
-    async def stream_run(
+    def stream_run(
         self,
         command: str,
         args: Sequence[str] | None = None,
@@ -303,17 +320,29 @@ class Pool:
         env: Sequence[str] | None = None,
         stdin: str | bytes | None = None,
         retry: RetryPolicy | None = None,
-    ) -> AsyncGenerator[RunChunk, None]:
+    ) -> RunStream:
         """Run a command, yielding ``run``, output, ``exit``, then ``run_done``.
 
         With ``args=None`` the command is a shell line run via ``/bin/sh -c``. A run
-        with ``exit`` is complete; ``run_done`` reports the reset that follows. Leaving
-        the loop before ``exit`` cancels the run. A client reading slower than about
-        1.5 KiB/s while output is flowing is cut off with ``client_stalled``.
+        with ``exit`` is complete; ``run_done`` reports the reset that follows. A client
+        reading slower than about 1.5 KiB/s while output is flowing is cut off with
+        ``client_stalled``.
 
-        ``retry`` repeats a 429 or 503, which come before the first frame and mean
-        nothing ran. The default is not to retry: a repeated run isn't idempotent, so
-        it's the caller's choice. A failure after the first frame is never retried.
+        Leaving the loop before ``exit`` cancels the run once the iterator closes.
+        ``async for`` does not close it on ``break``. CPython drops it as the loop ends,
+        which closes it on the event loop's next turn, even if you still hold what this
+        returns. If you hold the iterator from ``aiter()``, or use another interpreter,
+        it stays open, with its pool member, until you close it:
+
+            async with contextlib.aclosing(aiter(pool.stream_run("x", timeout_seconds=9))) as chunks:
+                async for chunk in chunks:
+                    ...
+
+        ``retry`` repeats a 429 or 503, which come before the first frame. A 429 means
+        nothing ran. A 503 usually means the same, but a runner lost just after the
+        program started also answers 503, so a retry can run the program twice. Use it
+        only for a program that is safe to repeat. The default is not to retry. A failure
+        after the first frame is never retried.
 
         Raises ``RateLimitedError`` when the pool is full, ``UnavailableError`` when
         no sandbox could start, ``GatewayTimeoutError`` when no first frame came within
@@ -322,12 +351,24 @@ class Pool:
         1 MiB limit, and ``PoolRunError`` for a failure after the first frame and before
         ``exit``.
         """
+        return RunStream(self._chunks(command, args, timeout_seconds, cwd, env, stdin, retry))
+
+    async def _chunks(
+        self,
+        command: str,
+        args: Sequence[str] | None,
+        timeout_seconds: int,
+        cwd: str | None,
+        env: Sequence[str] | None,
+        stdin: str | bytes | None,
+        retry: RetryPolicy | None,
+    ) -> AsyncGenerator[RunChunk, None]:
         request = exec_request(command, args, cwd, env, stdin, timeout_seconds)
         body = json.dumps(request).encode("utf-8")
         if len(body) > _RUN_BODY_LIMIT:
             raise RequestTooLargeError(
                 f"pool run: the encoded request is {len(body)} bytes, and the API takes {_RUN_BODY_LIMIT}. "
-                "stdin is base64 inside it, so about 786 KiB of stdin fits."
+                "stdin is base64 inside it, so about 768 KiB of stdin fits."
             )
         try:
             response = await retrying(

@@ -46,7 +46,11 @@ class RateLimitedError(RetryLaterError):
 
 
 class UnavailableError(RetryLaterError):
-    """503: no sandbox could start, or a runner is down or still starting. Nothing ran."""
+    """503: no sandbox could start, or a runner is down or still starting.
+
+    On a run, probably nothing ran, but it isn't certain: the runner may have been lost
+    after the program started.
+    """
 
 
 class GatewayTimeoutError(RetryLaterError):

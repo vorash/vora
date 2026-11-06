@@ -63,8 +63,23 @@ await pool.delete()
 `declare` is idempotent for an equal spec. `size=0` starts every run cold. A global
 admin passes `tenant_id` to `declare`, `get` and `list`, and the handle keeps it.
 `stream_run` takes the same arguments as `run` and yields `RunChunk`s: `run`, then
-`stdout` and `stderr`, then `exit`, then `run_done`. Leaving the loop before `exit`
-cancels the run.
+`stdout` and `stderr`, then `exit`, then `run_done`. Iterate it once.
+
+Leaving the loop before `exit` cancels the run once the iterator closes. `async for`
+does not close it on `break`. CPython drops it as the loop ends, which closes it on the
+event loop's next turn, even if you still hold what `stream_run` returned. If you hold
+the iterator from `aiter()`, or use another interpreter, it stays open, with its pool
+member, until you close it:
+
+```python
+from contextlib import aclosing
+
+async with aclosing(aiter(pool.stream_run("sleep 60", timeout_seconds=60))) as chunks:
+    async for chunk in chunks:
+        break
+```
+
+In `vora.sync`, use `contextlib.closing(iter(pool.stream_run(...)))`.
 
 What a result tells you:
 
@@ -94,7 +109,7 @@ reservation. Keep the pool's name, not its `id`, across a `declare`.
 
 Limits on a run:
 
-- The encoded request must fit the API's 1 MiB body limit, which leaves about 786 KiB
+- The encoded request must fit the API's 1 MiB body limit, which leaves about 768 KiB
   of stdin. A larger one raises `RequestTooLargeError` without being sent.
 - A client that reads slower than about 1.5 KiB/s while output is flowing is cut off
   with `client_stalled`.
@@ -106,8 +121,14 @@ Limits on a run:
 and `delete` repeats it for up to `max_wait_seconds` (default 600). The pool calls set
 their own HTTP timeouts above the API's own bounds, so a custom `httpx.AsyncClient`'s
 timeouts do not cut them short. A run can wait up to 7 minutes for its first frame,
-which then raises `GatewayTimeoutError`. Plain `exec` and `stream_exec` have no read
-timeout, as a silent command has nothing to read until it exits.
+which then raises `GatewayTimeoutError`.
+
+Plain `exec` and `stream_exec` wait for output for `timeout_seconds` plus 30 s, as the
+agent kills the command's process group at `timeout_seconds`. Past that they raise
+`httpx.ReadTimeout`. Without `timeout_seconds`, a custom `httpx.AsyncClient` keeps its own
+read timeout, and a client the SDK built has none. Then a background process that holds
+the pipes (`sandbox.exec("server &")`) or a dead connection waits indefinitely, so pass
+`timeout_seconds`.
 
 ### Sync convenience
 
@@ -146,12 +167,14 @@ exported for reuse).
 
 Every failed API call raises `vora.VoraError` with `status` (HTTP status when
 the failure came from the API) and `body` (the parsed `{"error": "..."}`), and
-the message carries the API's error string. These subclasses say what to do next:
+the message carries the API's error string. Plain `exec` and `stream_exec` are the
+exception for a network failure or a read timeout, which raise httpx's own error. These
+subclasses say what to do next:
 
 | Error | Status | Meaning |
 | --- | --- | --- |
 | `RateLimitedError` | 429 | The pool is full or capacity is reached. Nothing ran. `retry_after` has the API's wait. |
-| `UnavailableError` | 503 | No sandbox could start, or a runner is down or still starting. Nothing ran. `retry_after` has the API's wait. |
+| `UnavailableError` | 503 | No sandbox could start, or a runner is down or still starting. On a run, probably nothing ran, but it isn't certain: the runner may have been lost after the program started. `retry_after` has the API's wait. |
 | `GatewayTimeoutError` | 504 | The runner did not answer in time. It is not known whether anything ran. |
 | `ConflictError` | 409 | The resource's state refuses the call. The next three are its subclasses. |
 | `PoolDrainingError` | 409 | The pool is being deleted. Retry later, or declare it again once it is gone. |
@@ -164,11 +187,14 @@ the message carries the API's error string. These subclasses say what to do next
 The SDK tells the 409s apart by reading the pool's state, which costs one extra `GET`.
 
 Pool calls that are safe to repeat retry 429 and 503, honouring `Retry-After`, under
-the client's `retry` (a `RetryPolicy`, default 4 attempts; `None` turns it off). A run
-retries only if you pass `retry=RetryPolicy()`, because a repeated run isn't
-idempotent. It then repeats a 429 or 503, which mean nothing ran, and never repeats a
-run past its first frame. A `Retry-After` longer than `max_delay` raises instead of
-waiting. Sandbox routes do not retry.
+the client's `retry` (a `RetryPolicy`, default 4 attempts; `None` turns it off).
+`delete` rides out 429, 503 and 504 for up to `max_wait_seconds`, whatever the policy. A
+run retries only if you pass `retry=RetryPolicy()`, because a repeated run isn't
+idempotent. It then repeats a 429 or 503, and never repeats a run past its first frame. A
+429 means nothing ran. A 503 usually means the same, but a runner lost just after the
+program started also answers 503, so a retry can run the program twice. Use `retry` only
+for a program that is safe to repeat. A `Retry-After` longer than `max_delay` raises
+instead of waiting. Sandbox routes do not retry.
 
 ## Development
 

@@ -8,10 +8,11 @@ private event loop. It is not thread-safe — use the asyncio client
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterator, Awaitable, Iterator, TypeVar
+from typing import Any, AsyncIterator, Awaitable, Generator, Iterator, TypeVar
 
 from ._client import Vora as AsyncVora
 from ._client import Sandboxes as AsyncSandboxes
+from ._errors import VoraError
 from ._http import RetryPolicy
 from ._pools import Pool as AsyncPool
 from ._pools import Pools as AsyncPools
@@ -206,6 +207,21 @@ class Pools(_Sync):
         return [Pool(self._loop, item) for item in self._run(self._async.list(tenant_id=tenant_id))]
 
 
+class RunStream:
+    """A run's chunks, from ``Pool.stream_run``. Iterate it once."""
+
+    def __init__(self, chunks: Generator[RunChunk, None, None]) -> None:
+        self._chunks: Generator[RunChunk, None, None] | None = chunks
+
+    def __iter__(self) -> Generator[RunChunk, None, None]:
+        # As in the async RunStream: `for` does not close what it iterates on break, so
+        # only dropping it does, however long the caller holds this object.
+        chunks, self._chunks = self._chunks, None
+        if chunks is None:
+            raise VoraError("pool run: a stream can be iterated once")
+        return chunks
+
+
 class Pool(_Sync):
     def __init__(self, loop: asyncio.AbstractEventLoop, async_: AsyncPool) -> None:
         super().__init__(loop)
@@ -232,8 +248,12 @@ class Pool(_Sync):
     def run(self, command: str, args: list[str] | None = None, **options: Any) -> PoolRunResult:
         return self._run(self._async.run(command, args, **options))
 
-    def stream_run(self, command: str, args: list[str] | None = None, **options: Any) -> Iterator[RunChunk]:
-        agen = self._async.stream_run(command, args, **options)
+    def stream_run(self, command: str, args: list[str] | None = None, **options: Any) -> RunStream:
+        """As the async ``stream_run``. To close for certain, ``closing(iter(...))``."""
+        return RunStream(self._chunks(command, args, **options))
+
+    def _chunks(self, command: str, args: list[str] | None, **options: Any) -> Generator[RunChunk, None, None]:
+        agen = aiter(self._async.stream_run(command, args, **options))
         try:
             while True:
                 try:

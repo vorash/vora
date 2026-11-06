@@ -40,7 +40,8 @@ class Vora:
             client: An ``httpx.AsyncClient`` to reuse (custom transports, tests).
             retry: How pool calls that are safe to repeat handle 429 and 503. None
                 turns it off. A pool run has its own ``retry`` argument, off by
-                default, and sandbox routes do not retry.
+                default, ``delete`` waits by its own ``max_wait_seconds`` whatever this
+                is, and sandbox routes do not retry.
         """
         self._transport = Transport(
             (base_url or _env("VORA_API_URL") or _DEFAULT_BASE_URL),
