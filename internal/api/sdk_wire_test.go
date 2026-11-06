@@ -347,8 +347,8 @@ func TestSDKWireGolden(t *testing.T) {
 				delete(mem.runners, "run_test")
 				return f.key
 			}, http.MethodDelete, "/v1/pools/py", ""),
-			"listing_not_on_runner": captureCall(t, &wireRunner{streamRunner: &streamRunner{}, get: notOnRunner}, http.MethodGet, "/v1/pools", ""),
-			"listing_unsafe_unanswered": captureUnsafeListing(t, silent),
+			"listing_not_on_runner":       captureCall(t, &wireRunner{streamRunner: &streamRunner{}, get: notOnRunner}, http.MethodGet, "/v1/pools", ""),
+			"listing_unsafe_unanswered":   captureUnsafeListing(t, silent),
 			"global_admin_without_tenant": adminWithoutTenant(t),
 			"listing_runner_silent": captureCall(t, &wireRunner{
 				streamRunner: &streamRunner{},
