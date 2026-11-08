@@ -9,8 +9,11 @@ dependencies** and runs on Node 18+ and in browsers that provide `fetch`.
 
 ## Install
 
+The package isn't on npm. Build it from a checkout of this repository, then install it by path:
+
 ```sh
-npm install @vorash/sdk
+npm install && npm run build --workspace @vorash/sdk   # at the repository root
+npm install <path to the checkout>/sdk/typescript       # in your project
 ```
 
 ## Quick start

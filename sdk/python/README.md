@@ -2,8 +2,12 @@
 
 Python client for the [Vora](https://github.com/vorash/vora) sandbox API.
 
+The package isn't on PyPI. Each [release](https://github.com/vorash/vora/releases) attaches its wheel, or
+you can install from a checkout of this repository:
+
 ```sh
-pip install vorash
+pip install https://github.com/vorash/vora/releases/download/v0.10.8/vorash-0.8.0-py3-none-any.whl
+pip install -e sdk/python   # from a checkout
 ```
 
 ```python

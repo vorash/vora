@@ -24,7 +24,7 @@ forever. It fails inside the sandbox while `run.mjs` returns a clean error.
 
 ## Profiles
 
-`run.mjs` has three presets, chosen by the `--profile` env (`strict` default):
+`run.mjs` has three presets, chosen by the `PLUGIN_PROFILE` environment variable (`strict` by default):
 `strict` (no network, 32 pids, 64Mi), `standard` (no network, 64 pids,
 256Mi), and `network` (restricted egress and an allowlist, for plugins that fetch).
 Ship `strict` for first-party marketplace plugins and require an audit-clean

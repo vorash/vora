@@ -4,7 +4,7 @@ Run [OpenAI Agents](https://openai.github.io/openai-agents-js/) code inside
 [Vora](https://github.com/vorash/vora) sandboxes.
 
 This is an **integration**, not part of the Vora core. It depends on
-[`@vorash/sdk`](../typescript) and the Agents SDK, and nothing in Vora depends
+[`@vorash/sdk`](../../sdk/typescript) and the Agents SDK, and nothing in Vora depends
 on it.
 
 ## What it gives an agent

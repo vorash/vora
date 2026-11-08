@@ -25,9 +25,9 @@ vora-runner &                 # local runner (make install-rootless for the serv
 vora sandbox create --image vora/base && vora sandbox destroy sbx_...   # sanity
 ```
 
-Recipes marked **API** also need the control plane and an API key
+The JS SDK recipes also need the control plane and an API key
 (`vora-api`, `vora keys create`, `VORA_API_KEY`). The release-bot recipe needs
-`VORA_MASTER_KEY` for the secret store. See the [README](../README.md) for
+`vora-api` too, started with `VORA_MASTER_KEY` for the secret store. See the [README](../README.md) for
 setting up the API and images, and [docs/configuration.md](../docs/configuration.md)
 for every setting.
 

@@ -13,7 +13,7 @@ header upstream over TLS. The value never enters the sandbox: not the
 environment, not the filesystem, not the persisted record, not the audit trail
 (which records only the *alias*). A workload that misbehaves can talk only to
 `api.github.com`. The broker is bound to that one host and never follows
-redirects ([ADR 013](../docs/adr/013-credential-brokering.md)).
+redirects ([ADR 013](../../docs/adr/013-credential-brokering.md)).
 
 ## Run it
 
