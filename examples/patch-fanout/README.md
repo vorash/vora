@@ -9,7 +9,7 @@ untrusted.
 **The move.** Snapshot the prepared repo state **once**, live, while its sandbox
 runs. Then fork it once per candidate. Each fork is an independent sandbox that
 starts from exactly the same state: a crash-consistent copy of `/workspace` and
-`/root`, on the same image ([ADR 023](../docs/adr/023-snapshot-fork.md)).
+`/root`, on the same image ([ADR 023](../../docs/adr/023-snapshot-fork.md)).
 Apply one patch per fork, run the tests **concurrently**, collect a verdict
 table, and tear everything down.
 

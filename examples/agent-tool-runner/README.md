@@ -13,8 +13,8 @@ tool call gets a fresh, budgeted sandbox, and results go back to the model as
 text.
 
 For production agent frameworks, Vora ships ready-made adapters:
-[`integrations/openai-agents`](../integrations/openai-agents/) and the
-[`sdk/mcp`](../sdk/mcp/) server. They do this same wiring inside those
+[`integrations/openai-agents`](../../integrations/openai-agents/) and the
+[`sdk/mcp`](../../sdk/mcp/) server. They do this same wiring inside those
 frameworks.
 
 ## Run it

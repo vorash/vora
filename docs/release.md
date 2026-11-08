@@ -1,6 +1,6 @@
 # Releases and host artifacts
 
-Status: v0.7 · applies to `vora` releases cut by
+Status: v0.10.8 · applies to `vora` releases cut by
 [`.github/workflows/release.yml`](../.github/workflows/release.yml).
 
 ## What a release contains
@@ -10,6 +10,7 @@ Status: v0.7 · applies to `vora` releases cut by
 | `vora`, `vora-runner`, `vora-init`, `vora-api` | static `linux/amd64` binaries (`CGO_ENABLED=0`, so they also run against musl rootfs images) |
 | `SHA256SUMS` | checksums for the four binaries and the tarball |
 | `vora_<version>_linux_amd64.tar.gz` | the binaries plus `LICENSE` and the three systemd units |
+| `vorash-<sdk version>-py3-none-any.whl`, `vorash-<sdk version>.tar.gz` | the Python SDK, built from `sdk/python`. `SHA256SUMS` doesn't cover these two files |
 | `ghcr.io/<owner>/vora-base\|vora-python\|vora-node:<version>` | sandbox rootfs images, pulled by reference by the runner (ADR 009) |
 
 `vora` reports the version baked in at build time, so `vora version`, the
